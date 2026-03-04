@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python - <<'EOF'\nfrom google.cloud import bigquery\nclient = bigquery.Client\\(project=\"data-platform-core-prd\"\\)\n\n# Get OpTracker schema first\nq_schema = \"\"\"\nSELECT column_name FROM `data-platform-core-prd.optracker__src.INFORMATION_SCHEMA.COLUMNS`\nWHERE table_name = 'operation'\nORDER BY ordinal_position\n\"\"\"\ncols = client.query\\(q_schema\\).to_dataframe\\(\\)[\"column_name\"].tolist\\(\\)\nprint\\(\"OpTracker columns:\", cols\\)\n\n# Search for the streakout process_id\nq1 = \"\"\"\nSELECT *\nFROM `data-platform-core-prd.optracker__src.operation`\nWHERE process_id LIKE '%STREAK_18Feb2026%'\n   OR process_id LIKE '%1743997%'\nLIMIT 20\n\"\"\"\nprint\\(\"\\\\n=== OpTracker: STREAK_18Feb2026_well1743997 ===\"\\)\nr1 = client.query\\(q1\\).to_dataframe\\(\\)\nprint\\(r1.to_string\\(\\)\\)\nEOF)"
+    ]
+  }
+}

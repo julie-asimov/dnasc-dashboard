@@ -1,0 +1,156 @@
+"""
+dnasc/extractors/optracker.py
+──────────────────────────────
+Extracts OpTracker operation data from BigQuery, including well locations,
+TAT metrics, and protocol success/failure state.
+"""
+
+from __future__ import annotations
+import time
+
+import pandas as pd
+
+from dnasc.config import PipelineConfig
+from dnasc.logger import get_logger
+
+log = get_logger(__name__)
+
+
+class OpTrackerExtractor:
+    """Extract OpTracker operations with timing and state."""
+
+    @staticmethod
+    def get_optracker_operations() -> pd.DataFrame:
+        t0 = time.time()
+        proj = PipelineConfig.PROJECT_ID
+        date_filter = PipelineConfig.get_date_filter()
+        log.info("Querying OpTracker operations (since %s)...", date_filter)
+
+        query = f"""
+        WITH all_operations AS (
+          SELECT
+            o.id AS operation_id, o.job_id, o.plan_id, o.state,
+            o.date_created, o.date_ready,
+            p.name AS protocol_name,
+            MAX(CASE WHEN pt.name = 'Product'     THEN op_param.value END) AS product,
+            MAX(CASE WHEN pt.name = 'Process'     THEN REPLACE(op_param.value, '"', '') END) AS process_id,
+            MAX(CASE WHEN pt.name = 'DNA to Assemble'       THEN op_param.value END) AS input_dna_plasmids,
+            MAX(CASE WHEN pt.name = 'DNA Stocks to Assemble'THEN op_param.value END) AS input_stock_wells,
+            MAX(CASE WHEN pt.name = 'Assembly Well'         THEN op_param.value END) AS output_assembly_well_json,
+            MAX(CASE WHEN pt.name = 'Source Well'           THEN op_param.value END) AS source_well_json,
+            MAX(CASE WHEN pt.name = 'Destination Well'      THEN op_param.value END) AS destination_well_json,
+            MAX(CASE WHEN pt.name = 'Agar Well'             THEN op_param.value END) AS agar_well_json,
+            MAX(CASE WHEN pt.name = 'Miniprep Plates'       THEN op_param.value END) AS miniprep_plates_json,
+            MAX(CASE WHEN pt.name = 'Glycerol Plate'        THEN op_param.value END) AS glycerol_plate_json,
+            MAX(CASE WHEN pt.name = 'Experiment'            THEN REPLACE(op_param.value, '"', '') END) AS experiment,
+            MAX(CASE WHEN pt.name = 'Result Status'         THEN REPLACE(op_param.value, '"', '') END) AS result_status,
+            MAX(CASE WHEN pt.name = 'LSP Batch'
+                THEN COALESCE(JSON_EXTRACT_SCALAR(op_param.value, '$.name'), REPLACE(op_param.value, '"', ''))
+                END) AS lsp_batch_id_from_optracker
+          FROM `{proj}.op_tracker__src.op_tracker_api_operation` o
+          JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
+          JOIN `{proj}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
+          JOIN `{proj}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
+          WHERE o.date_created >= '{date_filter}'
+          GROUP BY o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready, p.name
+        ),
+        successful_protocols AS (
+          SELECT DISTINCT process_id, protocol_name FROM all_operations WHERE state = 'SC'
+        ),
+        miniprep_plates AS (
+          SELECT a.operation_id,
+            STRING_AGG(CONCAT('Plate', CAST(pl_mini.id AS STRING), '-miniprep'), '|') AS miniprep_location
+          FROM all_operations a
+          CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(a.miniprep_plates_json)) AS plate_json
+          LEFT JOIN `{proj}.lims__src.plate` pl_mini
+            ON pl_mini.id = CAST(JSON_EXTRACT_SCALAR(plate_json, '$.id') AS INT64)
+          WHERE a.miniprep_plates_json IS NOT NULL
+          GROUP BY a.operation_id
+        ),
+        glycerol_plates AS (
+          SELECT a.operation_id,
+            STRING_AGG(CONCAT('Plate', CAST(pl_glyc.id AS STRING), '-glycerol'), '|') AS glycerol_location
+          FROM all_operations a
+          CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(a.glycerol_plate_json)) AS plate_json
+          LEFT JOIN `{proj}.lims__src.plate` pl_glyc
+            ON pl_glyc.id = CAST(JSON_EXTRACT_SCALAR(plate_json, '$.id') AS INT64)
+          WHERE a.glycerol_plate_json IS NOT NULL
+          GROUP BY a.operation_id
+        ),
+        well_info AS (
+          SELECT a.operation_id, a.protocol_name,
+            CASE
+              WHEN a.destination_well_json IS NOT NULL THEN
+                CONCAT(COALESCE(pl_dest.barcode, CONCAT('Plate', CAST(pl_dest.id AS STRING))), '-',
+                  CHR(65 + CAST(FLOOR(w_dest.position / 24) AS INT64)),
+                  CAST(MOD(w_dest.position, 24) + 1 AS STRING))
+              WHEN a.agar_well_json IS NOT NULL THEN
+                CONCAT(COALESCE(pl_agar.barcode, CONCAT('Plate', CAST(pl_agar.id AS STRING))), '-',
+                  CHR(65 + CAST(FLOOR(w_agar.position / 12) AS INT64)),
+                  CAST(MOD(w_agar.position, 12) + 1 AS STRING))
+              WHEN mp.miniprep_location IS NOT NULL OR gp.glycerol_location IS NOT NULL THEN
+                CONCAT(
+                  COALESCE(mp.miniprep_location, ''),
+                  CASE WHEN mp.miniprep_location IS NOT NULL AND gp.glycerol_location IS NOT NULL THEN '|' ELSE '' END,
+                  COALESCE(gp.glycerol_location, ''))
+              WHEN a.output_assembly_well_json IS NOT NULL THEN
+                CONCAT(COALESCE(pl.barcode, CONCAT('Plate', CAST(pl.id AS STRING))), '-',
+                  CHR(65 + CAST(FLOOR(w.position / 12) AS INT64)),
+                  CAST(MOD(w.position, 12) + 1 AS STRING))
+              ELSE NULL
+            END AS well_location
+          FROM all_operations a
+          LEFT JOIN `{proj}.lims__src.well` w
+            ON w.id = CAST(JSON_EXTRACT_SCALAR(a.output_assembly_well_json, '$.id') AS INT64)
+          LEFT JOIN `{proj}.lims__src.plate` pl ON w.plate_id = pl.id
+          LEFT JOIN `{proj}.lims__src.well` w_dest
+            ON w_dest.id = CAST(JSON_EXTRACT_SCALAR(a.destination_well_json, '$.id') AS INT64)
+          LEFT JOIN `{proj}.lims__src.plate` pl_dest ON w_dest.plate_id = pl_dest.id
+          LEFT JOIN `{proj}.lims__src.well` w_agar
+            ON w_agar.id = CAST(JSON_EXTRACT_SCALAR(a.agar_well_json, '$.id') AS INT64)
+          LEFT JOIN `{proj}.lims__src.plate` pl_agar ON w_agar.plate_id = pl_agar.id
+          LEFT JOIN miniprep_plates mp ON mp.operation_id = a.operation_id
+          LEFT JOIN glycerol_plates gp ON gp.operation_id = a.operation_id
+          WHERE a.output_assembly_well_json IS NOT NULL
+             OR a.destination_well_json IS NOT NULL
+             OR a.agar_well_json IS NOT NULL
+             OR mp.miniprep_location IS NOT NULL
+             OR gp.glycerol_location IS NOT NULL
+        ),
+        operations_with_tat AS (
+          SELECT a.*, wi.well_location,
+            sp.process_id IS NOT NULL AS protocol_has_success,
+            LAG(a.date_created) OVER (PARTITION BY a.process_id ORDER BY a.date_created) AS prev_operation_end,
+            TIMESTAMP_DIFF(a.date_ready, a.date_created, HOUR) AS ready_wait_hours,
+            ROW_NUMBER() OVER (PARTITION BY a.process_id, a.protocol_name ORDER BY a.date_created DESC) AS operation_rank
+          FROM all_operations a
+          LEFT JOIN successful_protocols sp
+            ON a.process_id = sp.process_id AND a.protocol_name = sp.protocol_name
+          LEFT JOIN well_info wi ON a.operation_id = wi.operation_id
+        )
+        SELECT
+          process_id, plan_id AS op_batch_id, operation_id, job_id,
+          protocol_name, state AS operation_state,
+          date_created AS operation_start, date_ready AS operation_ready,
+          ready_wait_hours,
+          LAG(date_created) OVER (PARTITION BY process_id ORDER BY date_ready) AS prev_operation_completed,
+          TIMESTAMP_DIFF(
+            date_ready,
+            LAG(date_created) OVER (PARTITION BY process_id ORDER BY date_ready),
+            HOUR
+          ) AS tat_from_prev_hours,
+          product, input_dna_plasmids, input_stock_wells,
+          output_assembly_well_json, well_location,
+          experiment, result_status,
+          operation_rank, protocol_has_success,
+          lsp_batch_id_from_optracker
+        FROM operations_with_tat
+        WHERE state = 'SC'
+           OR (state = 'FA' AND protocol_has_success = FALSE)
+           OR state IN ('RD', 'RU')
+        ORDER BY process_id, date_created
+        """
+
+        df = pd.read_gbq(query, project_id=proj, dialect="standard")
+        log.info("OpTracker operations retrieved: %d rows in %.2fs", len(df), time.time() - t0)
+        return df

@@ -1,0 +1,27 @@
+# Generated output
+www/
+*.html
+
+# Pipeline state & data
+dashboard_state/
+*.parquet
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Environment
+.env
+*.json.key
+*credentials*.json
+*service_account*.json
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
