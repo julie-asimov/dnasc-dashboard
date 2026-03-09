@@ -401,7 +401,7 @@ def render_all_projects_dashboard(
     .tab-btn { padding: 10px 16px; font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.9); background: transparent; border: none; cursor: pointer; border-right: 1px solid rgba(255,255,255,0.2); display: flex; align-items: center; gap: 6px; }
     .tab-btn:last-child { border-right: none; }
     .tab-btn:hover { background: rgba(255,255,255,0.1); }
-    .tab-btn.active { background: rgba(255,255,255,0.2); }
+    .tab-btn.active { background: rgba(255,255,255,0.2); border-bottom: 3px solid #fff; }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
     .tab-icon-img { height: 24px; width: 24px; border-radius: 4px; }
@@ -455,7 +455,7 @@ def render_all_projects_dashboard(
 
     /* BADGES */
     .badge { padding: 1px 4px; border-radius: 2px; font-size: 8px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
-    .status-SUCCEEDED, .status-FULFILLED { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+    .status-SUCCEEDED, .status-FULFILLED { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; padding: 1px 7px; }
     .status-FAILED    { background: #fff1f5; color: #be185d; border: 1px solid #fecdd3; }
     .status-CANCELED  { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
     .status-RUNNING   { background: #f5f3ff; color: #7c3aed; border: 1px solid #ddd6fe; }
@@ -1194,7 +1194,13 @@ def render_all_projects_dashboard(
                     elif pd.notna(op_id) and str(op_id).lower() != 'nan': display_lsp_id = op_id
                     elif pd.notna(bios_id) and str(bios_id).lower() != 'nan': display_lsp_id = bios_id
                     else: display_lsp_id = f"WO-{str(row['workorder_id'])[:8]}"
-                    lsp_parts = [f'<div style="color: #4b5563; font-size: 10px; font-weight: 700; margin-bottom: 4px;">{display_lsp_id}</div>']
+                    _batch_num = str(display_lsp_id).replace("LSP-", "").strip()
+                    if _batch_num.isdigit():
+                        _batch_href = f"https://bios.asimov.io/inventory/lsp-batches/{_batch_num}"
+                        _batch_label = f'<a href="{_batch_href}" target="_blank" style="color:#7c3aed;text-decoration:underline;font-weight:700;">{display_lsp_id}</a>'
+                    else:
+                        _batch_label = f'<span style="color:#4b5563;font-weight:700;">{display_lsp_id}</span>'
+                    lsp_parts = [f'<div style="font-size: 10px; font-weight: 700; margin-bottom: 4px;">{_batch_label}</div>']
 
 
                     # Source Material Popover
@@ -1246,29 +1252,126 @@ def render_all_projects_dashboard(
                                 proc_id = f"job__{int(job_val[0])}"
 
                     pai_val = row.get('STOCK_ID', 'N/A')
+
+                    # Look up source workorder for full experiment name, req_id, request_status
+                    src_req_id, src_req_status, src_exp_name = "N/A", "", exp_name
+                    if proc_id and proc_id != "N/A" and not proc_id.startswith("job__"):
+                        _src = df[df["workorder_id"] == proc_id]
+                        if not _src.empty:
+                            _r = _src.iloc[0]
+                            _e = str(_r.get("experiment_name") or "")
+                            if _e and _e not in ("nan", ""):
+                                src_exp_name = _e
+                            src_req_id = str(_r.get("req_id") or "N/A")
+                            src_req_status = str(_r.get("request_status") or "")
+
+                    # Status badge for source request
+                    _st = src_req_status.upper()
+                    if _st == "CANCELED":
+                        src_badge = '<span style="background:#fee2e2;color:#b91c1c;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #fca5a5;margin-left:6px;">CANCELED</span>'
+                    elif _st in ("FULFILLED", "COMPLETED"):
+                        src_badge = f'<span style="background:#dcfce7;color:#15803d;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #86efac;margin-left:6px;">{src_req_status}</span>'
+                    elif _st and _st not in ("", "NAN", "N/A"):
+                        src_badge = f'<span style="background:#f3f4f6;color:#6b7280;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #d1d5db;margin-left:6px;">{src_req_status}</span>'
+                    else:
+                        src_badge = ""
+
+                    # BIOS link for process ID
+                    if proc_id.startswith("job__"):
+                        proc_href = f"https://op-tracker.asimov.io/job/{proc_id.replace('job__', '')}/group/0/step/0/"
+                        proc_label = f"Job {proc_id.replace('job__', '')}"
+                    else:
+                        proc_href = f"https://bios.asimov.io/inbox/work-orders?filter_-l=%5B%7B%22id%22%3A%22workOrderId%22%2C%22value%22%3A%22{proc_id}%22%7D%5D"
+                        proc_label = proc_id
+
+                    # Resolve input well ID for Source Info popover
+                    _input_well_raw = row.get('lsp_input_well')
+                    if pd.isna(_input_well_raw) or str(_input_well_raw) == 'nan':
+                        _input_well_raw = row.get('input_well_id')
+                    _input_well_html = ""
+                    if pd.notna(_input_well_raw) and str(_input_well_raw) != 'nan':
+                        _wm = re.search(r'"id":\s*(\d+)', str(_input_well_raw))
+                        _fid = _wm.group(1) if _wm else str(_input_well_raw)
+                        _input_well_html = f"""
+                                    <span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">Input:</span>
+                                    <span style="font-size:11px;padding:4px 0;border-bottom:1px solid #f3f4f6;"><a href="https://bios.asimov.io/inventory/wells/{_fid}" target="_blank" style="color:#7c3aed;text-decoration:underline;font-weight:700;">well{_fid}</a></span>"""
+
                     lsp_parts.append(f"""
                         <div class="plate-hover-container" style="display: inline-block; margin-bottom: 6px;">
                             <span class="plate-trigger" style="background: #e5e7eb; color: #4b5563; cursor: pointer; font-size: 9px; font-weight: 600; padding: 2px 6px; border-radius: 3px; border: 1px solid #d1d5db;">
                                 Source Info
                             </span>
-                            <div class="plate-popover" style="width: 450px; white-space: normal; padding: 15px; border-top: 4px solid #6b7280; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
+                            <div class="plate-popover" style="width: 460px; white-space: normal; padding: 15px; border-top: 4px solid #6b7280; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
                                 <div style="border-bottom: 1px solid #e5e7eb; margin-bottom: 10px; padding-bottom: 5px; font-weight: 800; color: #4b5563; text-transform: uppercase; font-size: 11px;">
                                     Source Material Context
                                 </div>
-                                <div style="display: grid; grid-template-columns: 100px 1fr; gap: 8px; font-size: 12px; line-height: 1.5; color: #1f2937;">
-                                    <span style="color: #6b7280; font-size: 10px; font-weight: 700; text-transform: uppercase;">Experiment:</span>
-                                    <span>{exp_name}</span>
-                                    <span style="color: #6b7280; font-size: 10px; font-weight: 700; text-transform: uppercase;">Construct:</span>
-                                    <span>{construct_name}</span>
-                                    <span style="color: #6b7280; font-size: 10px; font-weight: 700; text-transform: uppercase;">Stock ID:</span>
-                                    <span style="font-family: monospace; color: #4b5563; font-weight: 700;">{pai_val}</span>
-                                    <span style="color: #6b7280; font-size: 10px; font-weight: 700; text-transform: uppercase;">Process ID:</span>
-                                    <a href="{'https://op-tracker.asimov.io/job/' + proc_id.replace('job__', '') + '/group/0/step/0/' if proc_id.startswith('job__') else 'https://op-tracker.asimov.io/workorder/' + proc_id}" target="_blank" style="font-family: monospace; font-size: 11px; color: #4b5563; background: #f3f4f6; padding: 2px 6px; border-radius: 3px; text-decoration: underline; border: 1px solid #d1d5db;">
-                                        {'Job ' + proc_id.replace('job__', '') if proc_id.startswith('job__') else proc_id}
-                                    </a>
+                                <div style="display: grid; grid-template-columns: 115px 1fr; gap: 0; font-size: 12px; line-height: 1.5; color: #1f2937;">
+                                    <span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">Experiment:</span>
+                                    <span style="padding:4px 0;border-bottom:1px solid #f3f4f6;">{src_exp_name}</span>
+                                    <span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">Process ID:</span>
+                                    <div style="padding:4px 0;border-bottom:1px solid #f3f4f6;">
+                                        <a href="{proc_href}" target="_blank" style="font-family: monospace; font-size: 11px; color: #4b5563; background: #f3f4f6; padding: 2px 6px; border-radius: 3px; text-decoration: underline; border: 1px solid #d1d5db;">{proc_label}</a>
+                                        <div style="font-size: 9px; color: #9ca3af; margin-top: 4px; padding-left: 2px;">{construct_name} &nbsp;·&nbsp; <span style="font-family: monospace; color: #6b7280;">{pai_val}</span></div>
+                                    </div>
+                                    <span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">Request ID:</span>
+                                    <span style="font-family: monospace; font-size: 11px; color: #4b5563; padding:4px 0;border-bottom:1px solid #f3f4f6;">{src_req_id}{src_badge}</span>
+                                    {_input_well_html}
                                 </div>
                             </div>
                         </div>""")
+                    # ── QC Details popover ────────────────────────────────────
+                    _qc_fields = [
+                        ("QC Status",            row.get("qc_status")),
+                        ("NGS Status",           row.get("ngs_status")),
+                        ("Concentration Status", row.get("concentration_status")),
+                        ("Yield Status",         row.get("yield_status")),
+                        ("Digest",               row.get("digest")),
+                        ("Available",            "Yes" if row.get("available") is True or str(row.get("available","")).lower() == "true" else ("No" if row.get("available") is False or str(row.get("available","")).lower() == "false" else None)),
+                        ("Comment",              row.get("batch_comments")),
+                    ]
+                    # Filter to fields that have a real value
+                    _qc_rows = [(lbl, str(val)) for lbl, val in _qc_fields if val is not None and str(val) not in ("nan","None","")]
+
+                    # Button color: red if any Fail, green if all status fields Pass, grey otherwise
+                    _status_vals = [str(row.get(f) or "") for f in ["qc_status","ngs_status","concentration_status","yield_status","digest"]]
+                    _status_vals = [v for v in _status_vals if v and v not in ("nan","None","")]
+                    if any(v.lower() == "fail" for v in _status_vals):
+                        _qc_btn_style = "background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;"
+                    elif _status_vals and all(v.lower() == "pass" for v in _status_vals):
+                        _qc_btn_style = "background:#dcfce7;color:#15803d;border:1px solid #86efac;"
+                    else:
+                        _qc_btn_style = "background:#e5e7eb;color:#4b5563;border:1px solid #d1d5db;"
+
+                    def _qc_dot(val):
+                        v = str(val).lower()
+                        if v == "pass" or v == "yes":
+                            return '<span style="color:#16a34a;font-size:11px;margin-right:4px;">●</span>'
+                        elif v == "fail" or v == "no":
+                            return '<span style="color:#dc2626;font-size:11px;margin-right:4px;">●</span>'
+                        else:
+                            return '<span style="color:#9ca3af;font-size:11px;margin-right:4px;">○</span>'
+
+                    if _qc_rows:
+                        _qc_grid = "".join(
+                            f'<span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">{lbl}:</span>'
+                            f'<span style="font-size:11px;color:#1f2937;padding:4px 0;border-bottom:1px solid #f3f4f6;">{"" if lbl == "Comment" else _qc_dot(val)}{val}</span>'
+                            for lbl, val in _qc_rows
+                        )
+                        lsp_parts.append(f"""
+                        <div class="plate-hover-container" style="display: inline-block; margin-bottom: 6px; margin-left: 4px;">
+                            <span class="plate-trigger" style="{_qc_btn_style} cursor: pointer; font-size: 9px; font-weight: 600; padding: 2px 6px; border-radius: 3px;">
+                                QC Details
+                            </span>
+                            <div class="plate-popover" style="width: 340px; white-space: normal; padding: 15px; border-top: 4px solid #6b7280; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
+                                <div style="border-bottom: 1px solid #e5e7eb; margin-bottom: 10px; padding-bottom: 5px; font-weight: 800; color: #4b5563; text-transform: uppercase; font-size: 11px;">
+                                    QC Details
+                                </div>
+                                <div style="display: grid; grid-template-columns: 160px 1fr; gap: 0; line-height: 1.6;">
+                                    {_qc_grid}
+                                </div>
+                            </div>
+                        </div>""")
+
                     metrics_list = []
                     strain = row.get('comp_cell') or row.get('cloning_strain')
                     conc = row.get('qubit_concentration_ngul')
@@ -1288,13 +1391,6 @@ def render_all_projects_dashboard(
                         lsp_parts.append(
                             f'<div style="display:grid;grid-template-columns:52px 1fr;gap:2px 6px;margin-bottom:4px;">{grid_cells}</div>'
                         )
-                    input_well = row.get('lsp_input_well')
-                    if pd.isna(input_well) or str(input_well) == 'nan':
-                        input_well = row.get('input_well_id')
-                    if pd.notna(input_well) and str(input_well) != 'nan':
-                        well_id_match = re.search(r'"id":\s*(\d+)', str(input_well))
-                        final_id = well_id_match.group(1) if well_id_match else str(input_well)
-                        lsp_parts.append(f'<div style="font-size: 11px; margin-top: 4px;"><b style="color: #475569;">Input:</b> <a href="https://bios.asimov.io/inventory/wells/{final_id}" target="_blank" style="color: #7c3aed; text-decoration: underline; font-weight: 700;">well{final_id}</a></div>')
                     details_info += "".join(lsp_parts)
 
                 elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation']:
@@ -1372,7 +1468,29 @@ def render_all_projects_dashboard(
         new_req_list = []; active_req_list = []; fulfilled_req_list = []; canceled_req_list = []
         stalled_reqs = set(); production_tats = []; total_tats = []
         has_ptr = project_df['for_partner'].astype(str).str.lower().str.contains('true').any()
-        dots_html = ""; req_groups = list(project_df.groupby('req_id'))
+        dots_html = ""
+        # Sort requests: newest first, but group base+variant construct names together.
+        # Strip trailing _identifier suffix to find the base construct name, then use
+        # the newest request_created_at in the base group as the anchor date so variants
+        # stay adjacent to their base construct rather than floating by their own date.
+        def _base_construct(r_df):
+            cn = str(r_df['construct_name'].iloc[0] if len(r_df) > 0 else '')
+            return re.sub(r'_[^_()]+$', '', cn).strip()
+        def _req_date(r_df):
+            d = r_df['request_created_at'].iloc[0] if 'request_created_at' in r_df.columns else None
+            return pd.Timestamp(d) if d and pd.notna(d) else pd.Timestamp.min
+        _raw_groups = list(project_df.groupby('req_id'))
+        _base_anchor = {}
+        for _rid, _rdf in _raw_groups:
+            _bc = _base_construct(_rdf)
+            _dt = _req_date(_rdf)
+            if _bc not in _base_anchor or _dt > _base_anchor[_bc]:
+                _base_anchor[_bc] = _dt
+        req_groups = sorted(_raw_groups, key=lambda x: (
+            -_base_anchor.get(_base_construct(x[1]), pd.Timestamp.min).timestamp(),
+            _base_construct(x[1]),
+            str(x[1]['construct_name'].iloc[0] if len(x[1]) > 0 else '')
+        ))
 
         for rid, r_df in req_groups:
             r_created = to_est(r_df['request_created_at'].iloc[0]) or to_est(r_df['wo_created_at'].min())

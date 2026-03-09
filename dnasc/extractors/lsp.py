@@ -116,6 +116,8 @@ class LSPExtractor:
             batch.available, batch.created_at AS batch_created_at,
             batch.comments AS batch_comments, batch.prep_method, batch.buffer,
             batch._order AS vendor_order_id, batch.deposited_by, batch.qc_status,
+            batch.ngs_status, batch.concentration_status, batch.yield_status,
+            batch.digest, batch.digest_note,
             MAX(p.cell_strain) AS comp_cell,
             STRING_AGG(CAST(aliq.id AS STRING), ', ')         AS aliquot_ids,
             STRING_AGG(CAST(aliq.volume_ul AS STRING), ', ')  AS volume_ul,
@@ -132,7 +134,7 @@ class LSPExtractor:
         LEFT JOIN `{proj}.lims__src.well_content` AS wc ON wc.strain_id = p.id
         LEFT JOIN `{proj}.lims__src.well` AS w ON w.id = wc.well_id
         WHERE batch.created_at >= '{date_filter}'
-        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24
         """
 
         df = pd.read_gbq(query, project_id=proj, dialect="standard")
