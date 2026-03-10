@@ -539,6 +539,25 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
         lsp_null = (df["type"] == "lsp_workorder") & df["cloning_strain"].isna()
         df.loc[lsp_null, "cloning_strain"] = df.loc[lsp_null, "source_lsp_process_id"].map(src_strain)
 
+    # Backfill source_lsp_process_id and lsp_input_well from sibling LSP rows
+    # sharing the same input_well_id. Legacy workorders (LSP-XXXX format) predate
+    # BIOS and have these fields null even when newer workorders for the same
+    # source well have them populated.
+    if "input_well_id" in df.columns and "source_lsp_process_id" in df.columns:
+        lsp_well_mask = (df["type"] == "lsp_workorder") & df["input_well_id"].notna()
+        if lsp_well_mask.any():
+            for col in ["source_lsp_process_id", "lsp_input_well"]:
+                if col not in df.columns:
+                    continue
+                filled = (
+                    df[lsp_well_mask & df[col].notna()]
+                    .drop_duplicates(subset=["input_well_id"])
+                    .set_index("input_well_id")[col]
+                )
+                null_mask = lsp_well_mask & (df[col].isna() | (df[col].astype(str) == "None"))
+                if null_mask.any():
+                    df.loc[null_mask, col] = df.loc[null_mask, "input_well_id"].map(filled)
+
     return df
 
 
