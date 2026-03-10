@@ -234,6 +234,12 @@ def run_pipeline() -> pd.DataFrame:
     log.info("STEP 11 — Root repair & metadata backfill")
     t = time.time()
     final_df = RepairTransformer.repair_data(final_df)
+    # Re-run LSP root assignment after repair — Step 6 ran before Step 11
+    # resolved STREAK synthetic row roots, so legacy LSPs sourced via
+    # lsp_process_id=STREAK_well* were left self-rooted. Now that repair has
+    # filled STREAK roots, re-resolve so those LSPs inherit the correct
+    # root_work_order_id, experiment_name, and cloning_strain.
+    final_df = _assign_lsp_roots(final_df)
     final_df = _finalize_metadata(final_df)
     log.info("Repair complete in %.2fs", time.time() - t)
 
