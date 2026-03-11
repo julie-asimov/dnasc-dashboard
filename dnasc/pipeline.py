@@ -114,6 +114,7 @@ def run_pipeline() -> pd.DataFrame:
             "operation_ready":  list,
             "job_id":           list,
             "well_location":    list,
+            "ngs_run_number":   list,
         })
         .reset_index()
     )
@@ -133,6 +134,7 @@ def run_pipeline() -> pd.DataFrame:
             "operation_ready":  list,
             "job_id":           list,
             "well_location":    list,
+            "ngs_run_number":   list,
         })
         .reset_index()
         .rename(columns={"_lsp_key": "lsp_batch_key"})
@@ -170,7 +172,7 @@ def run_pipeline() -> pd.DataFrame:
     # fill from the lsp_op_agg keyed by lsp_batch_id_from_optracker.
     # Pass 1: synthetic LSP rows (workorder_id = "LSP-XXXX")
     # Pass 2: real LSP workorders (UUID workorder_id) using bios_batch_id
-    _op_cols = ["protocol_name", "operation_state", "operation_start", "operation_ready", "job_id", "well_location"]
+    _op_cols = ["protocol_name", "operation_state", "operation_start", "operation_ready", "job_id", "well_location", "ngs_run_number"]
     _no_ops = ~final_df["protocol_name"].apply(lambda x: isinstance(x, list) and len(x) > 0)
 
     _syn_lsp_empty = (
@@ -248,6 +250,12 @@ def run_pipeline() -> pd.DataFrame:
     t = time.time()
     final_df = _filter_and_enrich(final_df)
     log.info("Filtering complete in %.2fs", time.time() - t)
+
+    # ── Recompute derived columns that depend on root_work_order_id ──────────
+    # is_fulfillment is first set at Step 5 for dedup, but root_work_order_id
+    # changes during Step 11 repair.  Recompute here so it reflects the final
+    # repaired root assignment rather than the pre-repair value.
+    final_df["is_fulfillment"] = final_df["workorder_id"] == final_df["root_work_order_id"]
 
     # ── Dedup columns from merges ─────────────────────────────────────────────
     final_df = final_df.loc[:, ~final_df.columns.duplicated()]
@@ -533,22 +541,12 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
             df.groupby("root_work_order_id")["STOCK_ID"].transform("first")
         )
 
-    # Copy cloning_strain from source transformation to LSP rows where null.
-    # LSPs sourced from internal transformations don't inherit strain via the
-    # root group (they're in a different assembly group), so fill directly.
-    if "cloning_strain" in df.columns and "source_lsp_process_id" in df.columns:
-        src_strain = (
-            df.dropna(subset=["cloning_strain"])
-            .set_index("workorder_id")["cloning_strain"]
-            .to_dict()
-        )
-        lsp_null = (df["type"] == "lsp_workorder") & df["cloning_strain"].isna()
-        df.loc[lsp_null, "cloning_strain"] = df.loc[lsp_null, "source_lsp_process_id"].map(src_strain)
-
     # Backfill source_lsp_process_id and lsp_input_well from sibling LSP rows
     # sharing the same input_well_id. Legacy workorders (LSP-XXXX format) predate
     # BIOS and have these fields null even when newer workorders for the same
     # source well have them populated.
+    # NOTE: this must run BEFORE the cloning_strain fill below so that
+    # source_lsp_process_id is resolved before it's used as a lookup key.
     if "input_well_id" in df.columns and "source_lsp_process_id" in df.columns:
         lsp_well_mask = (df["type"] == "lsp_workorder") & df["input_well_id"].notna()
         if lsp_well_mask.any():
@@ -563,6 +561,18 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
                 null_mask = lsp_well_mask & (df[col].isna() | (df[col].astype(str) == "None"))
                 if null_mask.any():
                     df.loc[null_mask, col] = df.loc[null_mask, "input_well_id"].map(filled)
+
+    # Copy cloning_strain from source transformation to LSP rows where null.
+    # LSPs sourced from internal transformations don't inherit strain via the
+    # root group (they're in a different assembly group), so fill directly.
+    if "cloning_strain" in df.columns and "source_lsp_process_id" in df.columns:
+        src_strain = (
+            df.dropna(subset=["cloning_strain"])
+            .set_index("workorder_id")["cloning_strain"]
+            .to_dict()
+        )
+        lsp_null = (df["type"] == "lsp_workorder") & df["cloning_strain"].isna()
+        df.loc[lsp_null, "cloning_strain"] = df.loc[lsp_null, "source_lsp_process_id"].map(src_strain)
 
     return df
 

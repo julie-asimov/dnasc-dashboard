@@ -569,6 +569,23 @@ def populate_synthetic_optracker_batch(
         log.info("No OpTracker operations found for synthetic plates")
         return final_df
 
+    # ── Run number lookup (NGS Sequence Confirmation) ─────────────────────────
+    op_ids_str = ",".join(str(i) for i in ops_df["op_id"].unique())
+    try:
+        run_num_df = client.query(f"""
+            SELECT op_param.operation_id AS op_id,
+                   REPLACE(op_param.value, '"', '') AS ngs_run_number
+            FROM `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param
+            JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt
+                ON op_param.parameter_type_id = pt.id
+            WHERE pt.name = 'Run Number'
+              AND op_param.operation_id IN ({op_ids_str})
+        """).to_dataframe()
+        ops_df = ops_df.merge(run_num_df, on="op_id", how="left")
+    except Exception as exc:
+        log.warning("populate_synthetic_optracker_batch: run number lookup failed: %s", exc)
+        ops_df["ngs_run_number"] = None
+
     # ── Protocol filtering ────────────────────────────────────────────────────
     lsp_only = {
         "LSP Order", "LSP Receiving", "LSP Reviewing", "LSP Releasing",
@@ -598,11 +615,12 @@ def populate_synthetic_optracker_batch(
         ops_df[~_has_job],
     ], ignore_index=True).sort_values(["synthetic_id", "date_created"])
     agg = ops_df.groupby("synthetic_id").agg(
-        protocol_name=("protocol_name", list),
-        state        =("state",         list),
-        date_created =("date_created",  list),
-        date_ready   =("date_ready",    list),
-        job_id       =("job_id",        list),
+        protocol_name  =("protocol_name",   list),
+        state          =("state",           list),
+        date_created   =("date_created",    list),
+        date_ready     =("date_ready",      list),
+        job_id         =("job_id",          list),
+        ngs_run_number =("ngs_run_number",  list),
     ).reset_index()
 
     # ── Normalize datetime lists to pd.Timestamp(tz=UTC) ─────────────────────
@@ -627,7 +645,7 @@ def populate_synthetic_optracker_batch(
 
     # ── Apply updates ─────────────────────────────────────────────────────────
     update_cols = ["protocol_name", "operation_state", "operation_start",
-                   "operation_ready", "job_id", "wo_created_at", "wo_updated_at"]
+                   "operation_ready", "job_id", "ngs_run_number", "wo_created_at", "wo_updated_at"]
     for col in update_cols:
         if col not in final_df.columns:
             final_df[col] = None
@@ -645,12 +663,14 @@ def populate_synthetic_optracker_batch(
             updates["operation_start"][sid]  = [m_time]                    + row["date_created"]
             updates["operation_ready"][sid]  = [m_time]                    + row["date_ready"]
             updates["job_id"][sid]           = [None]                      + row["job_id"]
+            updates["ngs_run_number"][sid]   = [None]                      + row["ngs_run_number"]
         elif is_lsp:
             updates["protocol_name"][sid]    = row["protocol_name"]
             updates["operation_state"][sid]  = row["state"]
             updates["operation_start"][sid]  = row["date_created"]
             updates["operation_ready"][sid]  = row["date_ready"]
             updates["job_id"][sid]           = row["job_id"]
+            updates["ngs_run_number"][sid]   = row["ngs_run_number"]
         else:
             mt = m_time or pd.Timestamp.now(tz="UTC")
             updates["protocol_name"][sid]    = ["Manual: Miniprep/Glycerol/Media created"] + row["protocol_name"]
@@ -658,6 +678,7 @@ def populate_synthetic_optracker_batch(
             updates["operation_start"][sid]  = [mt]                                         + row["date_created"]
             updates["operation_ready"][sid]  = [mt]                                         + row["date_ready"]
             updates["job_id"][sid]           = [None]                                       + row["job_id"]
+            updates["ngs_run_number"][sid]   = [None]                                       + row["ngs_run_number"]
             # Backfill wo_created_at with earliest LIMS plate time so TAT is
             # based on when the physical work happened, not pipeline run time.
             updates["wo_created_at"][sid]    = mt

@@ -105,7 +105,7 @@ def render_all_projects_dashboard(
         if not found: return 99999999
         return min_pai
 
-    def parse_pipeline_operations(protocol_names, operation_states, operation_starts, job_ids, well_locations_list, operation_ready_times):
+    def parse_pipeline_operations(protocol_names, operation_states, operation_starts, job_ids, well_locations_list, operation_ready_times, ngs_run_numbers=None):
         # --- STEP 0: TYPE PROTECTION ---
         # Force all inputs to be lists. If they are NaN or None, they become empty lists.
         def ensure_list(x):
@@ -118,6 +118,7 @@ def render_all_projects_dashboard(
         job_ids = ensure_list(job_ids)
         well_locations_list = ensure_list(well_locations_list)
         operation_ready_times = ensure_list(operation_ready_times)
+        ngs_run_numbers = ensure_list(ngs_run_numbers)
 
         if not protocol_names:
             return []
@@ -128,6 +129,7 @@ def render_all_projects_dashboard(
             # Safe access using index checks
             r_time = to_est(operation_ready_times[i]) if i < len(operation_ready_times) else None
             s_time = to_est(operation_starts[i]) if i < len(operation_starts) else None
+            run_num = ngs_run_numbers[i] if i < len(ngs_run_numbers) else None
 
             raw_ops.append({
                 'protocol': protocol_names[i],
@@ -135,7 +137,8 @@ def render_all_projects_dashboard(
                 'start_time': s_time,
                 'ready_time': r_time,
                 'job_id': job_ids[i] if i < len(job_ids) else None,
-                'well_location': well_locations_list[i] if i < len(well_locations_list) else None
+                'well_location': well_locations_list[i] if i < len(well_locations_list) else None,
+                'run_number': run_num if (run_num is not None and pd.notna(run_num)) else None,
             })
 
         # --- STEP 2: SORTING ---
@@ -181,7 +184,8 @@ def render_all_projects_dashboard(
                 'start_time': op['start_time'],
                 'ready_time': op['ready_time'],
                 'job_id': op['job_id'],
-                'wells': [op['well_location']] if pd.notna(op['well_location']) else []
+                'wells': [op['well_location']] if pd.notna(op['well_location']) else [],
+                'run_numbers': [op['run_number']] if op['run_number'] is not None else [],
             }
 
             # Grouping Engine
@@ -190,8 +194,9 @@ def render_all_projects_dashboard(
             else:
                 prev_op = current_group[-1]
                 if protocol == prev_op['queue'] and protocol in groupable_protocols:
-                    # Merge wells and update state if necessary
+                    # Merge wells and run numbers; update state if necessary
                     prev_op['wells'].extend(clean_op['wells'])
+                    prev_op['run_numbers'].extend(clean_op['run_numbers'])
                     if clean_op['class'] == 'running':
                         prev_op['state'] = 'Running'
                         prev_op['class'] = 'running'
@@ -207,7 +212,8 @@ def render_all_projects_dashboard(
     def get_active_step_info(row):
         queue_data = parse_pipeline_operations(
             row.get('protocol_name', []), row.get('operation_state', []), row.get('operation_start', []),
-            row.get('job_id', []), row.get('well_location', []), row.get('operation_ready', [])
+            row.get('job_id', []), row.get('well_location', []), row.get('operation_ready', []),
+            row.get('ngs_run_number', [])
         )
         if not queue_data: return None
         for op in queue_data:
@@ -345,6 +351,11 @@ def render_all_projects_dashboard(
                             # Use LIMS data (seq_confirmed) directly — don't require NGS in OpTracker
                             if tot > 0 and seq == 0:
                                 return 'FAILED', False
+                else:
+                    # No OpTracker protocol data (e.g. synthetic LIMS-only streakout).
+                    # Colonies were picked but sequencing not yet done → in progress.
+                    if tot > 0 and seq == 0:
+                        return 'RUNNING', False
 
         return original, False
 
@@ -699,7 +710,12 @@ def render_all_projects_dashboard(
         partner_badge = '<span class="badge" style="background:#ede9fe;color:#7c3aed;margin-right:8px;border:1px solid #c4b5fd;">PARTNER</span>' if is_partner_req else ""
 
         # --- UPDATED CONTEXT-AWARE STATUS SELECTION ---
-        active_rows = req_df[req_df['visual_status'].isin(['RUNNING', 'READY', 'WAITING', 'BLOCKED', 'IN_PROGRESS'])]
+        # Compute render-time effective status for each row so colony-type overrides
+        # (e.g. streakout with colonies but no seq → RUNNING) are reflected in phase
+        # detection, not just in the per-row display.
+        req_df = req_df.copy()
+        req_df['_eff_status'] = req_df.apply(lambda r: get_visual_status(r)[0], axis=1)
+        active_rows = req_df[req_df['_eff_status'].isin(['RUNNING', 'READY', 'WAITING', 'BLOCKED', 'IN_PROGRESS'])]
         target_row = None
         status_badge_html = ""
 
@@ -729,11 +745,11 @@ def render_all_projects_dashboard(
                 phase_border = "#a5f3fc"
             elif not asm_active.empty:
                 _progressing = {'RUNNING', 'READY', 'IN_PROGRESS', 'BLOCKED'}
-                asm_progressing = asm_active[asm_active['visual_status'].isin(_progressing)]
+                asm_progressing = asm_active[asm_active['_eff_status'].isin(_progressing)]
                 if not asm_progressing.empty:
                     asm_priority = {'RUNNING': 0, 'READY': 1, 'IN_PROGRESS': 2, 'WAITING': 3, 'BLOCKED': 4}
                     asm_active = asm_active.copy()
-                    asm_active['_rank'] = asm_active['visual_status'].map(asm_priority).fillna(99)
+                    asm_active['_rank'] = asm_active['_eff_status'].map(asm_priority).fillna(99)
                     target_row = asm_active.sort_values('_rank').iloc[0]
                     phase_label = "ASM"
                     phase_bg = "#dbeafe"
@@ -743,7 +759,7 @@ def render_all_projects_dashboard(
                     # All ASM WAITING — show most urgent part, fall back to waiting ASM
                     if not parts_active.empty:
                         parts_active = parts_active.copy()
-                        parts_active['_rank'] = parts_active['visual_status'].map(_parts_priority).fillna(99)
+                        parts_active['_rank'] = parts_active['_eff_status'].map(_parts_priority).fillna(99)
                         target_row = parts_active.sort_values('_rank').iloc[0]
                     else:
                         target_row = asm_active.iloc[0]
@@ -753,7 +769,7 @@ def render_all_projects_dashboard(
                     phase_border = "#fed7aa"
             elif not parts_active.empty:
                 parts_active = parts_active.copy()
-                parts_active['_rank'] = parts_active['visual_status'].map(_parts_priority).fillna(99)
+                parts_active['_rank'] = parts_active['_eff_status'].map(_parts_priority).fillna(99)
                 target_row = parts_active.sort_values('_rank').iloc[0]
                 phase_label = "PARTS"
                 phase_bg = "#ffedd5"
@@ -763,7 +779,7 @@ def render_all_projects_dashboard(
                 target_row = active_rows.iloc[0]
 
             if target_row is not None:
-                status = target_row['visual_status']
+                status = target_row['_eff_status']
                 active_info = get_active_step_info(target_row)
 
                 if active_info and 'Ready' in active_info:
@@ -792,7 +808,14 @@ def render_all_projects_dashboard(
                             if pstate in ('RU', 'RD', 'SC'):
                                 running_step = pname
                                 break
-                    display_text = f"{running_step}: {status}".upper() if running_step else status.upper()
+                    if running_step:
+                        display_text = f"{running_step}: {status}".upper()
+                    else:
+                        _type = str(target_row.get('type', '')).lower()
+                        if 'streak' in _type:
+                            display_text = f"STREAKOUT: {status}"
+                        else:
+                            display_text = status.upper()
 
                 badge_class = f"status-{status}"
                 if target_row['type'] == 'lsp_workorder' and status == 'RUNNING':
@@ -992,8 +1015,13 @@ def render_all_projects_dashboard(
             if status == 'FAILED' and target_row['type'] != 'lsp_workorder':
                 recovery_types = {'streakout_operation', 'transformation_offline_operation'}
                 recovery_rows = root_df[root_df['type'].isin(recovery_types)]
-                if not recovery_rows.empty and (recovery_rows['visual_status'] == 'SUCCEEDED').any():
-                    status = 'SUCCEEDED'
+                if not recovery_rows.empty:
+                    running_recovery = recovery_rows[recovery_rows['visual_status'].isin(['RUNNING', 'READY', 'IN_PROGRESS', 'WAITING'])]
+                    if not running_recovery.empty:
+                        target_row = running_recovery.iloc[0]
+                        status = target_row['visual_status']
+                    elif (recovery_rows['visual_status'] == 'SUCCEEDED').any():
+                        status = 'SUCCEEDED'
             if str(status).upper() in ('NAN', 'NONE', '', 'UNKNOWN'):
                 active_info = get_active_step_info(target_row)
                 if active_info:
@@ -1060,7 +1088,7 @@ def render_all_projects_dashboard(
                     elif row['type'] == 'lsp_workorder' and 'STBL3' in suffix: extra_tag = '<span class="source-badge">from STBL3</span>'
                     elif row['type'] == 'lsp_workorder' and 'EPI400' in suffix: extra_tag = '<span class="source-badge">from EPI400</span>'
                 type_display = f"{spacer}{type_text}{extra_tag}"
-                queue_data = parse_pipeline_operations(row.get('protocol_name', []), row.get('operation_state', []), row.get('operation_start', []), row.get('job_id', []), row.get('well_location', []), row.get('operation_ready', []))
+                queue_data = parse_pipeline_operations(row.get('protocol_name', []), row.get('operation_state', []), row.get('operation_start', []), row.get('job_id', []), row.get('well_location', []), row.get('operation_ready', []), row.get('ngs_run_number', []))
                 effective_status = row['visual_status']
                 if queue_data and effective_status == 'RUNNING':
                     for op in queue_data:
@@ -1143,6 +1171,8 @@ def render_all_projects_dashboard(
                                     tooltip_groups[item['queue']].add(pid)
                         details_pills = ""
                         if pd.notna(item['job_id']): details_pills += f'<a href="https://op-tracker.asimov.io/job/{int(item["job_id"])}/group/0/step/0/" target="_blank" class="t-pill">Job {int(item["job_id"])}</a> '
+                        _run_nums = list(dict.fromkeys(r for r in item.get('run_numbers', []) if r))
+                        if _run_nums: details_pills += f'<span class="t-pill">Run {" / ".join(str(r) for r in _run_nums)}</span> '
                         unique_plates = set()
                         for p_set in tooltip_groups.values(): unique_plates.update(p_set)
                         total_plates = len(unique_plates)
@@ -1158,7 +1188,24 @@ def render_all_projects_dashboard(
                                 tooltip_html += '</div></div>'
                             details_pills += f"""<div class="plate-hover-container"><span class="plate-trigger">{total_plates} Plates</span><div class="plate-popover">{tooltip_html}</div></div>"""
                         pipeline_html += f"""<div class="timeline-row"><div class="t-dot {item['class']}"></div><div class="t-content"><div class="t-header"><span class="t-name">{item['queue']}</span><span class="t-time">{time_str}</span></div><div class="t-details">{details_pills}</div></div></div>"""
-                else: pipeline_html += '<span style="color: #9ca3af; font-size: 11px;">No queue data</span>'
+                else:
+                    if lims_plate_map:
+                        # Group all LIMS plates under a single manual entry with the same
+                        # plate-hover popover format used for normal OpTracker timeline rows.
+                        tooltip_html = ""
+                        all_pids = set()
+                        for proto_name, pids in lims_plate_map.items():
+                            pids_sorted = sorted(pids, key=lambda x: int(x) if x.isdigit() else 0)
+                            all_pids.update(pids_sorted)
+                            tooltip_html += f'<div class="popover-group"><div class="popover-title">{proto_name}</div><div style="margin-left: 8px;">'
+                            for i, pid in enumerate(pids_sorted):
+                                tooltip_html += f'<a href="https://bios.asimov.io/inventory/plates/{pid}" target="_blank" class="popover-link">Plate {pid}</a>'
+                                if (i + 1) % 3 == 0 and i < len(pids_sorted) - 1: tooltip_html += '<br>'
+                            tooltip_html += '</div></div>'
+                        lims_pills = f'<div class="plate-hover-container"><span class="plate-trigger">{len(all_pids)} Plates</span><div class="plate-popover">{tooltip_html}</div></div>'
+                        pipeline_html += f"""<div class="timeline-row"><div class="t-dot succeeded"></div><div class="t-content"><div class="t-header"><span class="t-name">Manual: Miniprep/Glycerol/Media created</span><span class="t-time"></span></div><div class="t-details">{lims_pills}</div></div></div>"""
+                    else:
+                        pipeline_html += '<span style="color: #9ca3af; font-size: 11px;">No queue data</span>'
                 pipeline_html += '</div>'
 
                 # --- DETAILS INFO ---

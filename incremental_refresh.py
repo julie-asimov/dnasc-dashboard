@@ -40,6 +40,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 # ── Imports ───────────────────────────────────────────────────────────────────
 from dnasc import run_pipeline, PipelineConfig
 from dnasc.pipeline import _assign_lsp_roots, _finalize_metadata
+from dnasc.transformers.processing import ProcessingTransformer
 from dnasc.renderer import render_dashboard
 
 # ── Pipeline version — always in sync with config.py ─────────────────────────
@@ -126,16 +127,42 @@ def upsert_baseline(delta_df: pd.DataFrame) -> pd.DataFrame:
         "protocol_name", "operation_state", "operation_start",
         "operation_ready", "job_id", "well_location",
         "op_batch_id", "lsp_batch_id_from_optracker",
+        "process_id",  # OpTracker join key; null in delta when no recent ops
+        "ngs_run_number",
+    ]
+
+    # Columns populated from the LSP aliquot query (filtered by batch.created_at).
+    # In incremental mode only new batches are returned, so existing LSP batches
+    # have null aliquot data in the delta — restore from baseline to avoid wiping.
+    ALIQUOT_COLS = [
+        "lsp_batch_id", "lsp_process_id", "input_well_id", "source_material",
+        "plasmid_id", "comp_cell", "deposited_by",
+        "available", "batch_created_at", "batch_comments",
+        "prep_method", "buffer", "vendor_order_id",
+        "qc_status", "ngs_status", "concentration_status", "yield_status",
+        "digest", "digest_note",
+        "nanodrop_concentration_ngul", "qubit_concentration_ngul",
+        "nanodrop_concentration", "qubit_concentration",
+        "nanodrop_yield", "qubit_yield",
+        "ratio_260_280", "ratio_260_230",
+        "aliquot_ids", "volume_ul", "total_volume_ul",
+        "aliq_available", "aliq_created_at",
+        "date_received", "location", "aliquot_comments",
+        # Note: is_fulfillment is a derived column (workorder_id == root_work_order_id),
+        # not from the aliquot query.  It is recomputed post-upsert below — keep it out
+        # of this list so the restore logic doesn't interfere.
     ]
 
     def _is_empty(v) -> bool:
         if v is None:
             return True
-        if isinstance(v, float) and pd.isna(v):
-            return True
-        if isinstance(v, (list, np.ndarray)) and len(v) == 0:
-            return True
-        return False
+        if isinstance(v, (list, np.ndarray)):
+            return len(v) == 0
+        # Catches float NaN, pd.NaT, and other NA-like scalars
+        try:
+            return bool(pd.isna(v))
+        except (TypeError, ValueError):
+            return False
 
     baseline_df = pd.read_parquet(BASELINE)
     print(f"  📦 Baseline: {len(baseline_df):,} rows  +  delta: {len(delta_df):,} rows")
@@ -144,23 +171,27 @@ def upsert_baseline(delta_df: pd.DataFrame) -> pd.DataFrame:
     combined = pd.concat([baseline_df, delta_df], ignore_index=True)
     combined = combined.drop_duplicates(subset=["workorder_id"], keep="last")
 
-    # For workorders in both baseline and delta, restore OpTracker columns
-    # where delta has None/empty but baseline had data.
+    # For workorders in both baseline and delta, restore columns where the delta
+    # has None/empty but the baseline had data.  Two categories:
+    #   • OpTracker cols — incremental only fetches recent ops; older op data lost
+    #   • Aliquot cols   — incremental filters by batch.created_at; existing batches
+    #                      return 0 rows, leaving all aliquot fields null in delta
     overlap_ids = set(baseline_df["workorder_id"]) & set(delta_df["workorder_id"])
     if overlap_ids:
-        ot_cols_present = [c for c in OPTRACKER_COLS if c in baseline_df.columns and c in combined.columns]
-        if ot_cols_present:
-            base_ot = (
+        restore_cols = OPTRACKER_COLS + ALIQUOT_COLS
+        cols_present = [c for c in restore_cols if c in baseline_df.columns and c in combined.columns]
+        if cols_present:
+            base_restore = (
                 baseline_df[baseline_df["workorder_id"].isin(overlap_ids)]
-                [["workorder_id"] + ot_cols_present]
+                [["workorder_id"] + cols_present]
                 .set_index("workorder_id")
             )
             overlap_mask = combined["workorder_id"].isin(overlap_ids)
-            for col in ot_cols_present:
+            for col in cols_present:
                 empty_in_delta = combined[col].apply(_is_empty)
                 needs_fill = overlap_mask & empty_in_delta
                 if needs_fill.any():
-                    fill_vals = combined.loc[needs_fill, "workorder_id"].map(base_ot[col])
+                    fill_vals = combined.loc[needs_fill, "workorder_id"].map(base_restore[col])
                     combined.loc[needs_fill, col] = fill_vals
 
     print(f"  ✅ Merged: {len(combined):,} rows")
@@ -264,7 +295,24 @@ def main():
     # LSP root pointers and the strain fill in _finalize_metadata.
     print("\n🔧 Re-running root assignment and metadata fill on merged baseline...")
     final_df = _assign_lsp_roots(final_df)
+    # Reset ACTIVE_WIP sentinel before _finalize_metadata so fillna can re-fill
+    # from the correct root row.  The delta's _finalize_metadata sets ACTIVE_WIP
+    # for LSP rows whose root (Gibson/GG) wasn't in the delta slice; now that the
+    # full merged df is available, root req_ids can be propagated properly.
+    wip_mask = (final_df.get("data_source", pd.Series()) == "LSP") & \
+               (final_df.get("req_id", pd.Series()) == "ACTIVE_WIP")
+    if wip_mask.any():
+        final_df.loc[wip_mask, "req_id"]          = None
+        final_df.loc[wip_mask, "request_status"]  = None
     final_df = _finalize_metadata(final_df)
+
+    # Recompute derived columns that depend on the full dataset context.
+    # is_fulfillment: delta computed False for all LSP rows (root not in delta scope);
+    # must recompute after root assignment is correct on the merged df.
+    final_df["is_fulfillment"] = final_df["workorder_id"] == final_df["root_work_order_id"]
+    # source_material_link: delta resolves source UUIDs against delta rows only;
+    # after upsert the full row set is available so we can resolve properly.
+    final_df = ProcessingTransformer._generate_source_links(final_df)
 
     # Fix mixed-type columns before saving
     print("\n🔧 Fixing column types for parquet serialization...")

@@ -46,7 +46,8 @@ class OpTrackerExtractor:
             MAX(CASE WHEN pt.name = 'Result Status'         THEN REPLACE(op_param.value, '"', '') END) AS result_status,
             MAX(CASE WHEN pt.name = 'LSP Batch'
                 THEN COALESCE(JSON_EXTRACT_SCALAR(op_param.value, '$.name'), REPLACE(op_param.value, '"', ''))
-                END) AS lsp_batch_id_from_optracker
+                END) AS lsp_batch_id_from_optracker,
+            MAX(CASE WHEN pt.name = 'Run Number' THEN REPLACE(op_param.value, '"', '') END) AS ngs_run_number
           FROM `{proj}.op_tracker__src.op_tracker_api_operation` o
           JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
           JOIN `{proj}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
@@ -143,7 +144,7 @@ class OpTrackerExtractor:
           output_assembly_well_json, well_location,
           experiment, result_status,
           operation_rank, protocol_has_success,
-          lsp_batch_id_from_optracker
+          lsp_batch_id_from_optracker, ngs_run_number
         FROM operations_with_tat
         WHERE state = 'SC'
            OR (state = 'FA' AND protocol_has_success = FALSE)
