@@ -347,10 +347,19 @@ def render_all_projects_dashboard(
                             if has_miniprep:
                                 return 'FAILED', False
                         else:
-                            # Colony progress ran but LIMS shows 0 seq confirmed → failure
-                            # Use LIMS data (seq_confirmed) directly — don't require NGS in OpTracker
+                            # seq=0 after colony progress — only FAILED if a sequencing
+                            # protocol actually ran (NGS/Sanger/Fragment Analyzer SC).
+                            # Rearray or Quant done but NGS not yet scheduled = still running.
                             if tot > 0 and seq == 0:
-                                return 'FAILED', False
+                                _seq_protocols = {'NGS Sequence Confirmation', 'Fragment Analyzer', 'Sanger Sequencing'}
+                                if any(p in _seq_protocols and s == 'SC' for p, s in zip(protocols, states)):
+                                    return 'FAILED', False
+                                # Use real OpTracker state if an op is active
+                                if any(s == 'RU' for s in states):
+                                    return 'RUNNING', False
+                                if any(s == 'RD' for s in states):
+                                    return 'READY', False
+                                return 'IN_PROGRESS', False
                 else:
                     # No OpTracker protocol data (e.g. synthetic LIMS-only streakout).
                     # Colonies were picked but sequencing not yet done → in progress.

@@ -491,7 +491,7 @@ def populate_synthetic_optracker_batch(
         JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
         JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
         WHERE pt.name = 'Plate ID'
-          AND o.state IN ('SC', 'FA')
+          AND o.state IN ('SC', 'FA', 'RD', 'RU')
           AND SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) IN ({plate_ids_str})
     """).to_dataframe()
     ops_1a = ops_1a.merge(
@@ -521,7 +521,7 @@ def populate_synthetic_optracker_batch(
         JOIN our_wells ow
             ON SAFE_CAST(JSON_EXTRACT_SCALAR(op_param.value, '$.id') AS INT64) = ow.well_id
         WHERE pt.name IN ('Source Well', 'Well to Quant', 'Destination Well')
-          AND o.state IN ('SC', 'FA')
+          AND o.state IN ('SC', 'FA', 'RD', 'RU')
     """).to_dataframe()
     ops_1b = ops_1b.merge(
         plate_syn_pairs.rename(columns={"plate_id": "ref_id"}),
@@ -551,7 +551,7 @@ def populate_synthetic_optracker_batch(
             JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
             JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
             WHERE o.job_id IN ({job_ids_str})
-              AND o.state IN ('SC', 'FA')
+              AND o.state IN ('SC', 'FA', 'RD', 'RU')
               AND pt.name = 'Plate ID'
         """).to_dataframe()
         ops_pass2 = ops_pass2.merge(job_syn_pairs, on="job_id", how="inner")
@@ -1056,7 +1056,7 @@ def resolve_downstream_plates(
             ON o.id = op_param.operation_id
         JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt
             ON op_param.parameter_type_id = pt.id
-        WHERE o.state IN ('SC', 'FA')
+        WHERE o.state IN ('SC', 'FA', 'RD', 'RU')
           AND p.name IN ('Rearray 96 to 384', 'DNA Quantification', 'NGS Sequence Confirmation')
         GROUP BY 1,2,3,4,5,6
     )
