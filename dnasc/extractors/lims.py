@@ -150,6 +150,20 @@ class LIMSExtractor:
             colony_summary["workorder_id"].map(json_map).fillna("{}")
         )
 
+        # ── Plate-only rows (e.g. PCR workorders with no colonies) ────────────
+        # json_map is built from all wells in raw_df, not just colony wells.
+        # Workorders that appear in raw_df but have no colonies are absent from
+        # colony_summary, so all_protocol_plates would be NULL after the merge.
+        # Add stub rows for these workorders so plate data flows through.
+        plates_only_ids = set(json_map.index) - set(colony_summary["workorder_id"])
+        if plates_only_ids:
+            plates_only = pd.DataFrame({
+                "workorder_id":           list(plates_only_ids),
+                "all_protocol_plates":    [json_map[w] for w in plates_only_ids],
+            })
+            colony_summary = pd.concat([colony_summary, plates_only], ignore_index=True)
+            log.info("Added %d plate-only (no-colony) workorder rows", len(plates_only_ids))
+
         log.info(
             "Colony data retrieved: %d workorders in %.2fs",
             len(colony_summary), time.time() - t0,
