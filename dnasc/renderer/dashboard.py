@@ -718,6 +718,19 @@ def render_all_projects_dashboard(
         pais_display = " ".join([_pai_tag(pid, i == 0) for i, pid in enumerate(final_list)])
         partner_badge = '<span class="badge" style="background:#ede9fe;color:#7c3aed;margin-right:8px;border:1px solid #c4b5fd;">PARTNER</span>' if is_partner_req else ""
 
+        _customer_styles = {
+            'R_D':             ('R&D',          '#cffafe', '#0e7490', '#a5f3fc'),
+            'INTERNAL_CLD':    ('CLD',          '#dbeafe', '#1d4ed8', '#93c5fd'),
+            'TECH_OUT':        ('TECH OUT',     '#ffedd5', '#c2410c', '#fdba74'),
+            'EXTERNAL_TECH_OUT':('EXT TECH OUT','#fce7f3', '#be185d', '#f9a8d4'),
+        }
+        _cust_raw = str(req_df['customer'].iloc[0]) if 'customer' in req_df.columns and pd.notna(req_df['customer'].iloc[0]) else None
+        if _cust_raw and _cust_raw not in ('nan', 'None', ''):
+            _clabel, _cbg, _cfg, _cborder = _customer_styles.get(_cust_raw, (_cust_raw.replace('_', ' '), '#f3f4f6', '#374151', '#d1d5db'))
+            customer_badge = f'<span class="badge" style="background:{_cbg};color:{_cfg};border:1px solid {_cborder};margin-right:4px;">{_clabel}</span>'
+        else:
+            customer_badge = ""
+
         # --- UPDATED CONTEXT-AWARE STATUS SELECTION ---
         # Compute render-time effective status for each row so colony-type overrides
         # (e.g. streakout with colonies but no seq → RUNNING) are reflected in phase
@@ -916,7 +929,7 @@ def render_all_projects_dashboard(
                     <div style="margin-top: 4px; color: #94a3b8; font-size: 10px; font-family: monospace; letter-spacing: -0.2px;">REQ ID: {req_id}</div>
                 </div>
                 <div style="display: flex; gap: 8px; align-items: center;">
-                    {partner_badge}
+                    {customer_badge}{partner_badge}
                     <span class="badge status-{str(req_status).replace(" ", "_")}" style="font-size: 10px; padding: 2px 8px;">{req_status}</span>
                     {status_badge_html}
                     {stalled_badge}
@@ -1526,6 +1539,23 @@ def render_all_projects_dashboard(
         new_req_list = []; active_req_list = []; fulfilled_req_list = []; canceled_req_list = []
         stalled_reqs = set(); production_tats = []; total_tats = []
         has_ptr = project_df['for_partner'].astype(str).str.lower().str.contains('true').any()
+        _exp_customer_styles = {
+            'R_D':              ('R&D',           '#cffafe', '#0e7490', '#a5f3fc'),
+            'INTERNAL_CLD':     ('CLD',           '#dbeafe', '#1d4ed8', '#93c5fd'),
+            'TECH_OUT':         ('TECH OUT',      '#ffedd5', '#c2410c', '#fdba74'),
+            'EXTERNAL_TECH_OUT':('EXT TECH OUT',  '#fce7f3', '#be185d', '#f9a8d4'),
+        }
+        _exp_customers = []
+        if 'customer' in project_df.columns:
+            for _cv in project_df['customer'].dropna().unique():
+                _cv = str(_cv)
+                if _cv not in ('nan', 'None', '') and _cv not in [c for c, *_ in _exp_customers]:
+                    _cl, _cbg, _cfg, _cborder = _exp_customer_styles.get(_cv, (_cv.replace('_', ' '), 'rgba(255,255,255,0.15)', 'rgba(255,255,255,0.9)', 'rgba(255,255,255,0.3)'))
+                    _exp_customers.append((_cv, _cl, _cbg, _cfg, _cborder))
+        exp_customer_tags = " ".join(
+            f'<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px;background:{bg};color:{fg};border:1px solid {bd};">{lbl}</span>'
+            for _, lbl, bg, fg, bd in _exp_customers
+        )
         dots_html = ""
         # Sort requests: newest first, but group base+variant construct names together.
         # Strip trailing _identifier suffix to find the base construct name, then use
@@ -1701,7 +1731,10 @@ def render_all_projects_dashboard(
                 <div class="header-banner" style="background: {exp_header_gradient}; min-height: auto; padding: 12px 18px;" onclick="toggleSection('{safe_exp_id}')">
                     <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
                         <div>
-                            <div class="header-title" style="margin-bottom: 0; white-space: nowrap;">{experiment_name}</div>
+                            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                                <div class="header-title" style="margin-bottom: 0; white-space: nowrap;">{experiment_name}</div>
+                                {exp_customer_tags}
+                            </div>
                             <div style="font-size: 9px; color: rgba(255,255,255,0.6); font-weight: 500; margin-top: 2px; font-family: monospace;">
                                 Created: {exp_created_str}
                             </div>

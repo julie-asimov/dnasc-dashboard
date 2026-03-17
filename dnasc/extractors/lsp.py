@@ -70,7 +70,7 @@ class LSPExtractor:
             req.type AS request_type, req.status AS request_status,
             req.created_at AS request_created_at,
             pr.construct_name, pr.delivery_container, pr.delivery_format,
-            pr.for_partner,
+            pr.for_partner, pr.customer,
             exp.name AS experiment_name,
             exp.created_at AS experiment_created_at,
             exp.updated_at AS experiment_updated_at,
