@@ -26,7 +26,11 @@ import pandas as pd
 import pytz
 
 from dnasc.logger import get_logger
-from dnasc.renderer.lsp_capacity import render_lsp_capacity_tab
+try:
+    from dnasc.renderer.lsp_capacity import render_lsp_capacity_tab
+except ImportError:
+    def render_lsp_capacity_tab(_df):
+        return "<p style='color:#6b7280;padding:1rem;'>LSP capacity view not available.</p>"
 
 log = get_logger(__name__)
 
