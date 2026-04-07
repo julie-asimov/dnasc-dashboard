@@ -111,9 +111,11 @@ class LSPExtractor:
             ) AS source_material,
             CONCAT('pAI-', CAST(batch.plasmid_id AS STRING)) AS plasmid_id,
             batch.nanodrop_concentration_ngul, batch.qubit_concentration_ngul,
+            batch.concentration_ngul AS deprecated_concentration_ngul,
             batch.nanodrop_yield, batch.qubit_yield,
             batch.ratio_260_280, batch.ratio_260_230,
             batch.available, batch.created_at AS batch_created_at,
+            batch.etoh_precipitation,
             batch.comments AS batch_comments, batch.prep_method, batch.buffer,
             batch._order AS vendor_order_id, batch.deposited_by, batch.qc_status,
             batch.ngs_status, batch.concentration_status, batch.yield_status,
@@ -134,7 +136,7 @@ class LSPExtractor:
         LEFT JOIN `{proj}.lims__src.well_content` AS wc ON wc.strain_id = p.id
         LEFT JOIN `{proj}.lims__src.well` AS w ON w.id = wc.well_id
         WHERE batch.created_at >= '{date_filter}'
-        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26
         """
 
         df = pd.read_gbq(query, project_id=proj, dialect="standard")

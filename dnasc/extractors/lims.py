@@ -169,3 +169,84 @@ class LIMSExtractor:
             len(colony_summary), time.time() - t0,
         )
         return colony_summary
+
+    @staticmethod
+    def get_colony_picking_counts(workorder_ids: list) -> pd.DataFrame:
+        """
+        Pull QPix colony picking counts from bios__src.colonypickingcounts,
+        joined to lims__src.well via well_id → process_id (= workorder UUID).
+        Returns one row per workorder with summed imaged/pickable/picked counts.
+        """
+        if not workorder_ids:
+            return pd.DataFrame()
+
+        t0 = time.time()
+        proj = PipelineConfig.PROJECT_ID
+        clean_ids = list(set(str(w) for w in workorder_ids))
+        client = bigquery.Client(project=proj)
+        log.info("Querying colony picking counts for %d workorders...", len(clean_ids))
+
+        raw_dfs: list[pd.DataFrame] = []
+        for i in range(0, len(clean_ids), _BATCH_SIZE):
+            batch = clean_ids[i : i + _BATCH_SIZE]
+            ids_str = "', '".join(batch)
+            query = f"""
+            SELECT
+                w.process_id AS workorder_id,
+                SUM(cpc.imaged) AS imaged_colonies,
+                SUM(COALESCE(cpc.pickable_automated, 0) + COALESCE(cpc.pickable_manual, 0)) AS pickable_colonies,
+                SUM(COALESCE(cpc.picked_automated, 0)  + COALESCE(cpc.picked_manual, 0))  AS picked_colonies
+            FROM `{proj}.bios__src.colonypickingcounts` cpc
+            JOIN `{proj}.lims__src.well` w ON w.id = cpc.well_id
+            WHERE w.process_id IN ('{ids_str}')
+              AND cpc.deleted_at IS NULL
+            GROUP BY w.process_id
+            """
+            raw_dfs.append(client.query(query).to_dataframe())
+
+        if not any(len(d) > 0 for d in raw_dfs):
+            log.info("No colony picking count data found")
+            return pd.DataFrame()
+
+        result = pd.concat(raw_dfs, ignore_index=True)
+        log.info("Colony picking counts: %d workorders in %.2fs", len(result), time.time() - t0)
+        return result
+
+    @staticmethod
+    def get_well_comments(workorder_ids: list) -> pd.DataFrame:
+        """
+        Pull non-null well comments from lims__src.well for the given workorder IDs.
+        Returns one row per workorder with all unique comments joined by ' | '.
+        Used to surface PCR stock plate "at risk" comments in the dashboard.
+        """
+        if not workorder_ids:
+            return pd.DataFrame()
+
+        t0 = time.time()
+        proj = PipelineConfig.PROJECT_ID
+        clean_ids = list(set(str(w) for w in workorder_ids))
+        client = bigquery.Client(project=proj)
+
+        raw_dfs: list[pd.DataFrame] = []
+        for i in range(0, len(clean_ids), _BATCH_SIZE):
+            batch = clean_ids[i : i + _BATCH_SIZE]
+            ids_str = "', '".join(batch)
+            query = f"""
+            SELECT
+                w.process_id AS workorder_id,
+                STRING_AGG(DISTINCT w.comments, ' | ' ORDER BY w.comments) AS well_comments
+            FROM `{proj}.lims__src.well` w
+            WHERE w.process_id IN ('{ids_str}')
+              AND w.comments IS NOT NULL
+              AND TRIM(w.comments) != ''
+            GROUP BY w.process_id
+            """
+            raw_dfs.append(client.query(query).to_dataframe())
+
+        if not any(len(d) > 0 for d in raw_dfs):
+            log.info("No well comments found")
+            return pd.DataFrame()
+
+        result = pd.concat(raw_dfs, ignore_index=True)
+        log.info("Well comments: %d workorders in %.2fs", len(result), time.time() - t0)
+        return result

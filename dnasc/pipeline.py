@@ -151,13 +151,21 @@ def run_pipeline() -> pd.DataFrame:
     # ── STEP 8: LIMS colony extraction ────────────────────────────────────────
     log.info("STEP 8 — LIMS colony extraction")
     t = time.time()
-    colony_data = LIMSExtractor.get_colony_data(processed["workorder_id"].unique().tolist())
+    wo_ids = processed["workorder_id"].unique().tolist()
+    colony_data = LIMSExtractor.get_colony_data(wo_ids)
+    picking_counts = LIMSExtractor.get_colony_picking_counts(wo_ids)
+    pcr_ids = processed.loc[processed["type"] == "pcr_workorder", "workorder_id"].dropna().unique().tolist()
+    well_comments = LIMSExtractor.get_well_comments(pcr_ids)
     log.info("Colony data extracted in %.2fs", time.time() - t)
 
     # ── STEP 9: Final merges ──────────────────────────────────────────────────
     log.info("STEP 9 — Final merges")
     t = time.time()
     final_df = processed.merge(colony_data, on="workorder_id", how="left")
+    if not picking_counts.empty:
+        final_df = final_df.merge(picking_counts, on="workorder_id", how="left")
+    if not well_comments.empty:
+        final_df = final_df.merge(well_comments, on="workorder_id", how="left")
 
     def _optracker_key(row):
         return str(row.get("workorder_id", "")).replace("STBL3_", "").replace("stbl3_", "").lower()
@@ -562,6 +570,27 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
                 if null_mask.any():
                     df.loc[null_mask, col] = df.loc[null_mask, "input_well_id"].map(filled)
 
+    # Backfill qubit_concentration_ngul from batch_comments for older batches
+    # that stored qubit as free text ("Qbit Concentration: XXXX") before the
+    # structured field was used.  Also backfill nanodrop_concentration_ngul
+    # from the deprecated concentration_ngul field (pre-split schema).
+    import re as _re
+    if "batch_comments" in df.columns and "qubit_concentration_ngul" in df.columns:
+        lsp_null_qubit = (df["type"] == "lsp_workorder") & df["qubit_concentration_ngul"].isna()
+        if lsp_null_qubit.any():
+            def _parse_qbit(c):
+                m = _re.search(r"[Qq]bit\s+[Cc]oncentration[:\s]+([0-9.]+)", str(c))
+                return float(m.group(1)) if m else None
+            parsed = df.loc[lsp_null_qubit, "batch_comments"].apply(_parse_qbit)
+            df.loc[lsp_null_qubit, "qubit_concentration_ngul"] = parsed
+
+    if "deprecated_concentration_ngul" in df.columns and "nanodrop_concentration_ngul" in df.columns:
+        lsp_null_nano = (df["type"] == "lsp_workorder") & df["nanodrop_concentration_ngul"].isna()
+        if lsp_null_nano.any():
+            df.loc[lsp_null_nano, "nanodrop_concentration_ngul"] = df.loc[
+                lsp_null_nano, "deprecated_concentration_ngul"
+            ]
+
     # Copy cloning_strain from source transformation to LSP rows where null.
     # LSPs sourced from internal transformations don't inherit strain via the
     # root group (they're in a different assembly group), so fill directly.
@@ -651,15 +680,23 @@ def _filter_and_enrich(df: pd.DataFrame) -> pd.DataFrame:
         wo = str(row.get("wo_status", "")).strip().upper()
         if wo == "CANCELED":
             return "CANCELED"
+        if wo == "DRAFT":
+            return "DRAFT"
         states = row.get("operation_state")
         if isinstance(states, list) and states:
             # Active states take priority regardless of list order.
             # An LSP Order in READY beats a prior Glycerol Stocking SC.
             if "RU" in states: return "RUNNING"
             if "RD" in states: return "READY"
-            for s in reversed(states):
-                if s == "SC": return "SUCCEEDED"
-                if s == "FA": return "FAILED"
+            # For LSP workorders do NOT infer SUCCEEDED/FAILED from ops alone.
+            # Glycerol Stocking SC means the physical glycerol was done, but the
+            # LSP isn't complete until Order → Receiving → Reviewing → Releasing
+            # all run. Those steps are WA (excluded by state filter), so ops only
+            # ever show Glycerol SC. Trust wo_status for LSP terminal state.
+            if row.get("type") != "lsp_workorder":
+                for s in reversed(states):
+                    if s == "SC": return "SUCCEEDED"
+                    if s == "FA": return "FAILED"
         wo = str(row.get("wo_status", "")).strip().upper()
         if wo and wo not in ("NAN", "NONE", "", "UNKNOWN"):
             return wo

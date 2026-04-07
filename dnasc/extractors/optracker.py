@@ -27,7 +27,51 @@ class OpTrackerExtractor:
         log.info("Querying OpTracker operations (since %s)...", date_filter)
 
         query = f"""
-        WITH all_operations AS (
+        WITH kicked_back_jobs AS (
+          -- Pattern 1: Failed Precheck (PCR, Gibson, GoldenGate)
+          SELECT id AS job_id
+          FROM `{proj}.op_tracker__src.op_tracker_api_job`
+          WHERE EXISTS (
+            SELECT 1 FROM UNNEST(JSON_EXTRACT_ARRAY(step_groups)) AS sg
+            WHERE JSON_EXTRACT_SCALAR(sg, '$.name') = 'Failed Precheck'
+          )
+          UNION DISTINCT
+          -- Pattern 2: Confirmation step where user actually chose Retry.
+          -- user_input=0 means "Continue" was selected (job ran fine, not a kickback).
+          -- user_input>=1 means user chose "Retry all operations" — true kickback.
+          -- Matching just the label text is too broad: it appears as an unselected option.
+          SELECT id AS job_id
+          FROM `{proj}.op_tracker__src.op_tracker_api_job`
+          WHERE EXISTS (
+            SELECT 1 FROM UNNEST(JSON_EXTRACT_ARRAY(step_groups)) AS sg
+            WHERE JSON_EXTRACT_SCALAR(sg, '$.name') = 'Confirmation'
+          )
+          AND REGEXP_CONTAINS(step_groups, r'"tag":\s*"confirmation"[^}}]*"user_input":\s*[1-9]')
+          UNION DISTINCT
+          -- Pattern 4: PCR jobs that never completed (didn't reach Cleanup PCRs)
+          -- Exclude jobs that still have active (RU/RD) operations — those are in progress, not kicked back
+          SELECT j.id AS job_id
+          FROM `{proj}.op_tracker__src.op_tracker_api_job` j
+          JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON j.protocol_id = p.id
+          WHERE p.name = 'PCR'
+            AND NOT EXISTS (
+              SELECT 1 FROM UNNEST(JSON_EXTRACT_ARRAY(j.step_groups)) AS sg
+              WHERE JSON_EXTRACT_SCALAR(sg, '$.name') = 'Cleanup PCRs'
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM `{proj}.op_tracker__src.op_tracker_api_operation` o
+              WHERE o.job_id = j.id AND o.state IN ('RU', 'RD')
+            )
+          UNION DISTINCT
+          -- Pattern 3: Synthesis Order where all completion-toggles are False (nothing ordered)
+          SELECT j.id AS job_id
+          FROM `{proj}.op_tracker__src.op_tracker_api_job` j
+          JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON j.protocol_id = p.id
+          WHERE p.name = 'Synthesis Order'
+            AND REGEXP_CONTAINS(j.step_groups, r'"tag":\s*"completion-toggle"')
+            AND NOT REGEXP_CONTAINS(j.step_groups, r'"tag":\s*"completion-toggle"[^}}]*"user_input":\s*true')
+        ),
+        all_operations AS (
           SELECT
             o.id AS operation_id, o.job_id, o.plan_id, o.state,
             o.date_created, o.date_ready,
@@ -53,6 +97,7 @@ class OpTrackerExtractor:
           JOIN `{proj}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
           JOIN `{proj}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
           WHERE o.date_created >= '{date_filter}'
+            AND (o.job_id IS NULL OR o.job_id NOT IN (SELECT job_id FROM kicked_back_jobs))
           GROUP BY o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready, p.name
         ),
         successful_protocols AS (

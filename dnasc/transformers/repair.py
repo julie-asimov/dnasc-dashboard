@@ -974,15 +974,31 @@ def resolve_downstream_plates(
     MINIPREP_KEYS = {'Miniprep', 'miniprep', 'Minipreps', 'minipreps'}
 
     # ── STEP 1: Find workorders missing downstream ops ────────────────────────
-    def _needs_downstream(x):
+    def _needs_downstream(row):
+        import json as _json
+        x = row.get('protocol_name')
+        if hasattr(x, 'tolist'):
+            x = x.tolist()
         if not isinstance(x, list) or len(x) == 0:
             return False
-        return (
-            'Create Minipreps and Glycerol Stocks' in x and
-            not any(p in x for p in SEQ_PROTOCOLS)
-        )
+        # Gibson/GG: has Miniprep step but no Quant/NGS yet
+        if 'Create Minipreps and Glycerol Stocks' in x:
+            return not any(p in x for p in SEQ_PROTOCOLS)
+        # Transformation: has STAR Transformation + Rearray but no Quant/NGS,
+        # AND all_protocol_plates declares an NGS plate (meaning NGS was planned)
+        if 'STAR Transformation' in x and 'Rearray 96 to 384' in x:
+            if any(p in x for p in SEQ_PROTOCOLS):
+                return False
+            plates_json = row.get('all_protocol_plates')
+            if plates_json:
+                try:
+                    plates = _json.loads(plates_json) if isinstance(plates_json, str) else {}
+                    return 'NGS Sequence Confirmation' in plates
+                except Exception:
+                    pass
+        return False
 
-    missing_mask = final_df['protocol_name'].apply(_needs_downstream)
+    missing_mask = final_df.apply(_needs_downstream, axis=1)
     missing_df = final_df[missing_mask].copy()
 
     if missing_df.empty:
@@ -1042,7 +1058,7 @@ def resolve_downstream_plates(
     raw_ops = client.query(f"""
     WITH all_ops AS (
         SELECT
-            o.id, o.job_id, o.state, o.date_created, o.date_ready,
+            o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready,
             p.name AS protocol_name,
             MAX(CASE WHEN pt.name = 'Source Well'       THEN op_param.value END) AS sw,
             MAX(CASE WHEN pt.name = 'Well to Quant'     THEN op_param.value END) AS qw,
@@ -1056,9 +1072,9 @@ def resolve_downstream_plates(
             ON o.id = op_param.operation_id
         JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt
             ON op_param.parameter_type_id = pt.id
-        WHERE o.state IN ('SC', 'FA', 'RD', 'RU')
+        WHERE o.state IN ('SC', 'FA', 'RD', 'RU', 'CA')
           AND p.name IN ('Rearray 96 to 384', 'DNA Quantification', 'NGS Sequence Confirmation')
-        GROUP BY 1,2,3,4,5,6
+        GROUP BY 1,2,3,4,5,6,7
     )
     SELECT a.*,
         CAST(JSON_EXTRACT_SCALAR(a.sw, '$.id') AS INT64) AS sw_id,
@@ -1216,6 +1232,125 @@ def resolve_downstream_plates(
     agg['date_created'] = agg['date_created'].map(_normalize_dt_list)
     agg['date_ready']   = agg['date_ready'].map(_normalize_dt_list)
 
+    # ── STEP 6b: Enrich ops — plate from job (dw/qw → LIMS plate) and
+    #             job from plate (null job_id → plan → op_tracker_api_job) ──────
+
+    # Collect all well IDs we need plate lookups for
+    _well_ids_needed: set = set()
+    for _col in ['dw_id', 'qw_id']:
+        for _v in ops_df[_col].tolist():
+            try:
+                if pd.notna(_v):
+                    _well_ids_needed.add(int(_v))
+            except (TypeError, ValueError):
+                pass
+
+    _op_well_plate: dict = {}  # well_id → plate_id
+    if _well_ids_needed:
+        _wids_str = ','.join(str(w) for w in _well_ids_needed)
+        _op_wp_df = client.query(f"""
+            SELECT id AS well_id, plate_id
+            FROM `{project_id}.lims__src.well`
+            WHERE id IN ({_wids_str})
+        """).to_dataframe()
+        _op_well_plate = dict(zip(
+            _op_wp_df['well_id'].astype(int),
+            _op_wp_df['plate_id'].astype(int)
+        ))
+
+    def _get_op_plate(row):
+        """Return LIMS plate_id for an op row (dw_id > qw_id > nps)."""
+        for _col in ['dw_id', 'qw_id']:
+            _v = row.get(_col)
+            try:
+                if pd.notna(_v):
+                    _p = _op_well_plate.get(int(_v))
+                    if _p is not None:
+                        return _p
+            except (TypeError, ValueError):
+                pass
+        _nps = row.get('nps')
+        try:
+            if pd.notna(_nps):
+                return int(_nps)
+        except (TypeError, ValueError):
+            pass
+        return None
+
+    ops_df['_plate_id'] = ops_df.apply(_get_op_plate, axis=1)
+
+    # Recover null job_ids via plan_id → op_tracker_api_job
+    def _is_null(v):
+        try:
+            return not pd.notna(v)
+        except (TypeError, ValueError):
+            return True
+
+    _null_plan_ids = []
+    for _, _r in ops_df[ops_df['job_id'].apply(_is_null)].iterrows():
+        _p = _r.get('plan_id')
+        try:
+            if pd.notna(_p):
+                _null_plan_ids.append(int(_p))
+        except (TypeError, ValueError):
+            pass
+    _plan_to_job: dict = {}
+    if _null_plan_ids:
+        _plan_ids_str = ','.join(str(int(p)) for p in _null_plan_ids)
+        # op_tracker_api_job has no plan_id column — recover via other ops
+        # in the same plan that DO have a job_id set.
+        _plan_job_df = client.query(f"""
+            SELECT plan_id, job_id
+            FROM `{project_id}.op_tracker__src.op_tracker_api_operation`
+            WHERE plan_id IN ({_plan_ids_str})
+              AND job_id IS NOT NULL
+            ORDER BY job_id DESC
+        """).to_dataframe()
+        # Take most recent job per plan
+        _plan_to_job = (
+            _plan_job_df.drop_duplicates(subset=['plan_id'], keep='first')
+            .set_index('plan_id')['job_id']
+            .to_dict()
+        )
+        log.info(
+            "resolve_downstream_plates: recovered job_id for %d plans with null job",
+            len(_plan_to_job),
+        )
+
+    def _enrich_job(row):
+        try:
+            if pd.notna(row.get('job_id')):
+                return row['job_id']
+        except (TypeError, ValueError):
+            pass
+        _plan = row.get('plan_id')
+        try:
+            if pd.notna(_plan):
+                return _plan_to_job.get(int(_plan))
+        except (TypeError, ValueError):
+            pass
+        return None
+
+    ops_df['job_id'] = ops_df.apply(_enrich_job, axis=1)
+
+    # Build (resolved_workorder, protocol_name) → plate_id for all_protocol_plates writeback
+    _proto_plate_map: dict = {}  # (workorder_id, protocol_name) → plate_id
+    for _, _row in ops_df[ops_df['_plate_id'].notna()].iterrows():
+        _key = (_row['resolved_workorder'], _row['protocol_name'])
+        if _key not in _proto_plate_map:
+            _proto_plate_map[_key] = int(_row['_plate_id'])
+
+    # Re-aggregate job_id after enrichment
+    agg = ops_df.groupby('resolved_workorder').agg(
+        protocol_name=('protocol_name', list),
+        state        =('state',         list),
+        date_created =('date_created',  list),
+        date_ready   =('date_ready',    list),
+        job_id       =('job_id',        list),
+    ).reset_index()
+    agg['date_created'] = agg['date_created'].map(_normalize_dt_list)
+    agg['date_ready']   = agg['date_ready'].map(_normalize_dt_list)
+
     # ── STEP 7: Append to existing protocol lists ─────────────────────────────
     update_map = agg.set_index('resolved_workorder').to_dict('index')
 
@@ -1234,6 +1369,34 @@ def resolve_downstream_plates(
             existing = row.get(dst_col)
             existing = existing if isinstance(existing, list) else []
             row[dst_col] = existing + new[src_col]
+
+        # Write discovered plate IDs back to all_protocol_plates
+        # so the renderer can display them even when LIMS colony data didn't capture them.
+        # Map: OpTracker protocol_name → all_protocol_plates key
+        _proto_to_lims_key = {
+            'Rearray 96 to 384':          'Rearray 96 to 384',
+            'DNA Quantification':          'DNA Quant',
+            'NGS Sequence Confirmation':   'NGS Sequence Confirmation',
+        }
+        try:
+            _plates_str = row.get('all_protocol_plates') or '{}'
+            _plates = json.loads(_plates_str) if isinstance(_plates_str, str) else {}
+            _updated = False
+            for _proto in new['protocol_name']:
+                _lims_key = _proto_to_lims_key.get(_proto)
+                if not _lims_key:
+                    continue
+                if _lims_key in _plates:
+                    continue  # already present, don't overwrite
+                _plate_id = _proto_plate_map.get((wid, _proto))
+                if _plate_id:
+                    _plates[_lims_key] = str(_plate_id)
+                    _updated = True
+            if _updated:
+                row['all_protocol_plates'] = json.dumps(_plates)
+        except Exception:
+            pass
+
         return row
 
     final_df = final_df.apply(_append_ops, axis=1)

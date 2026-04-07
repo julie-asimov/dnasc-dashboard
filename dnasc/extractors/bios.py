@@ -95,7 +95,83 @@ class BIOSExtractor:
 
         UNION ALL
 
-        -- 2. NEW requests (no active workorders yet)
+        -- 2. DRAFT root workorders that are the root of active (non-DRAFT) workorders.
+        -- These provide context for parts (e.g. plasmid synthesis) ordered from a draft
+        -- plan so they render as children of their assembly root rather than as standalone
+        -- deliverables.
+        SELECT
+            wo.fulfills_request, wo.type, wo.status AS wo_status,
+            wo.op_tracker_plan_id AS op_batch_id,
+            wo.id AS workorder_id,
+            tw_well.process_id AS source_asm_process_id,
+            wo.deleted_at,
+            wo.created_at AS wo_created_at, wo.updated_at AS wo_updated_at,
+            ad.root_work_order_id, ad.id AS ad_id, ad.created_at AS ad_created_at,
+            req.id AS req_id, req.priority, req.submitter_email,
+            req.type AS request_type, req.status AS request_status,
+            req.created_at AS request_created_at,
+            pr.construct_name, pr.delivery_container, pr.delivery_format,
+            pr.for_partner, pr.customer,
+            exp.name AS experiment_name,
+            exp.created_at AS experiment_created_at,
+            exp.updated_at AS experiment_updated_at,
+            exp.active AS experiment_active,
+            JSON_VALUE(COALESCE(
+                ggw.product, gw.product, uw.product, pcrw.product,
+                tw.product, psw.plasmid, ssw.syn_part, osw.oligo
+            ), '$.name') AS STOCK_ID,
+            osw.oligo AS oligosynthesis_oligo,
+            pcrw.forward_primer AS pcr_forward_primer,
+            pcrw.reverse_primer AS pcr_reverse_primer,
+            pcrw.templates AS pcr_templates,
+            psw.plasmid AS plasmidsynthesis_plasmid,
+            psw.insert_sequence AS plasmidsynthesis_insert_sequence,
+            psw.vector AS plasmidsynthesis_vector,
+            ssw.syn_part AS synpartsynthesis_syn_part,
+            COALESCE(ssw.vendor, psw.vendor, osw.vendor) AS vendor,
+            uw.description AS untracked_description,
+            COALESCE(ggw.product, gw.product, uw.product, pcrw.product, tw.product) AS product_json,
+            COALESCE(ggw.backbone, gw.backbone) AS backbone_json,
+            COALESCE(ggw.parts, gw.parts) AS parts_json,
+            COALESCE(tw.cloning_strain, gw.cloning_strain, ggw.cloning_strain) AS cloning_strain,
+            COALESCE(tw.antibiotic, gw.antibiotic, ggw.antibiotic) AS antibiotic,
+            COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
+            COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
+            'BIOS_DRAFT' AS data_source
+        FROM `{proj}.bios__src.workorder` wo
+        LEFT JOIN `{proj}.bios__src.assemblydesignworkorderassociation` adwoa ON adwoa.workorder_id = wo.id
+        LEFT JOIN `{proj}.bios__src.assemblydesign` ad ON adwoa.assemblydesign_id = ad.id
+        LEFT JOIN `{proj}.bios__src.gibsonworkorder` gw ON wo.id = gw.id
+        LEFT JOIN `{proj}.bios__src.goldengateworkorder` ggw ON wo.id = ggw.id
+        LEFT JOIN `{proj}.bios__src.oligosynthesisworkorder` osw ON wo.id = osw.id
+        LEFT JOIN `{proj}.bios__src.pcrworkorder` pcrw ON wo.id = pcrw.id
+        LEFT JOIN `{proj}.bios__src.plasmidsynthesisworkorder` psw ON wo.id = psw.id
+        LEFT JOIN `{proj}.bios__src.synpartsynthesisworkorder` ssw ON wo.id = ssw.id
+        LEFT JOIN `{proj}.bios__src.untrackedworkorder` uw ON wo.id = uw.id
+        LEFT JOIN `{proj}.bios__src.transformationworkorder` tw ON wo.id = tw.id
+        LEFT JOIN `{proj}.lims__src.well` AS tw_well
+            ON tw_well.id = CAST(JSON_VALUE(tw.input_well_key, '$.id') AS INT64)
+        LEFT JOIN `{proj}.bios__src.workorder` root_wo
+            ON root_wo.id = COALESCE(ad.root_work_order_id, wo.id)
+        LEFT JOIN `{proj}.bios__src.request` req ON root_wo.request_id = req.id
+        LEFT JOIN `{proj}.bios__src.plasmidrequest` pr ON root_wo.request_id = pr.id
+        LEFT JOIN `{proj}.bios__src.experiment` exp ON pr.experiment_id = exp.id
+        WHERE wo.status = 'DRAFT'
+          AND wo.type != 'lsp_workorder'
+          AND wo.created_at >= '{date_filter}'
+          AND wo.id IN (
+            SELECT DISTINCT ad2.root_work_order_id
+            FROM `{proj}.bios__src.assemblydesignworkorderassociation` adwoa2
+            JOIN `{proj}.bios__src.assemblydesign` ad2 ON adwoa2.assemblydesign_id = ad2.id
+            JOIN `{proj}.bios__src.workorder` wo2 ON adwoa2.workorder_id = wo2.id
+            WHERE wo2.status NOT IN ('DRAFT')
+              AND wo2.created_at >= '{date_filter}'
+              AND ad2.root_work_order_id IS NOT NULL
+          )
+
+        UNION ALL
+
+        -- 3. NEW requests (no active workorders yet)
         SELECT
             FALSE AS fulfills_request, 'request_placeholder' AS type,
             'NEW' AS wo_status, NULL AS op_batch_id,

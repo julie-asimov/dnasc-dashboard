@@ -26,6 +26,7 @@ import pandas as pd
 import pytz
 
 from dnasc.logger import get_logger
+from dnasc.renderer.lsp_capacity import render_lsp_capacity_tab
 
 log = get_logger(__name__)
 
@@ -150,6 +151,23 @@ def render_all_projects_dashboard(
             x['start_time'] if pd.notna(x['start_time']) else pd.Timestamp.min
         ))
 
+        # --- STEP 2b: DEDUP same-protocol same-state ops (e.g. Rearray from OpTracker + downstream) ---
+        # Keep the op that has a job_id; merge wells from both sources.
+        seen: dict = {}
+        deduped: list = []
+        for op in raw_ops:
+            key = (op['protocol'], op['state'])
+            if key not in seen:
+                seen[key] = len(deduped)
+                deduped.append(op)
+            else:
+                existing = deduped[seen[key]]
+                if op['job_id'] is not None and pd.notna(op['job_id']) and (existing['job_id'] is None or pd.isna(existing['job_id'])):
+                    existing['job_id'] = op['job_id']
+                if op['start_time'] and (not existing['start_time'] or op['start_time'] < existing['start_time']):
+                    existing['start_time'] = op['start_time']
+        raw_ops = deduped
+
         # --- STEP 3: SOFT FAIL & GROUPING ---
         protocol_success = {op['protocol'] for op in raw_ops if op['state'] == 'SC'}
         groupable_protocols = {
@@ -164,8 +182,8 @@ def render_all_projects_dashboard(
             protocol = op['protocol']
             state = op['state']
 
-            # Skip Fails if a Success exists for the same protocol
-            if state == 'FA' and protocol in protocol_success:
+            # Skip Fails and Cancels if a Success exists for the same protocol
+            if state in ('FA', 'CA') and protocol in protocol_success:
                 continue
 
             state_map = {
@@ -248,11 +266,21 @@ def render_all_projects_dashboard(
         job_id = _jid[0] if isinstance(_jid, list) and len(_jid) > 0 else None
         completion_time = None
         op_states, op_starts = row.get('operation_state'), row.get('operation_start')
+        op_protocols = row.get('protocol_name')
+        if isinstance(op_protocols, np.ndarray): op_protocols = op_protocols.tolist()
         if isinstance(op_states, np.ndarray): op_states = op_states.tolist()
         if isinstance(op_starts, np.ndarray): op_starts = op_starts.tolist()
         if isinstance(op_states, list) and isinstance(op_starts, list):
-            valid_times = [to_est(start) for state, start in zip(op_states, op_starts) if state in ('SC', 'FA') and pd.notna(start)]
-            if valid_times: completion_time = max(valid_times)
+            # For GG/Gibson, use the assembly step time (not the last op which may be NGS)
+            _asm_proto_map = {'golden_gate_workorder': 'Golden Gate Assembly', 'gibson_workorder': 'Gibson Assembly'}
+            _target_proto = _asm_proto_map.get(str(row.get('type', '')))
+            if _target_proto and isinstance(op_protocols, list):
+                for proto, state, start in zip(op_protocols, op_states, op_starts):
+                    if proto == _target_proto and state in ('SC', 'FA') and pd.notna(start):
+                        completion_time = to_est(start); break
+            if not completion_time:
+                valid_times = [to_est(start) for state, start in zip(op_states, op_starts) if state in ('SC', 'FA') and pd.notna(start)]
+                if valid_times: completion_time = max(valid_times)
         if not completion_time: completion_time = to_est(row['wo_created_at'])
         plate_id = None
         json_str = row.get('all_protocol_plates', '{}')
@@ -312,6 +340,11 @@ def render_all_projects_dashboard(
             if original == 'FAILED' and seq > 0:
                 return 'SUCCEEDED', True
 
+            # Status lag: BIOS still RUNNING/IN_PROGRESS but sequencing confirmed → SUCCEEDED
+            # (e.g. engineer canceled OpTracker ops after completion, BIOS never auto-closed)
+            if original in ('RUNNING', 'IN_PROGRESS') and seq > 0:
+                return 'SUCCEEDED', False
+
             # Zero Colony: BIOS=SUCCEEDED but no colonies in LIMS → always a failure
             if original == 'SUCCEEDED':
                 if tot == 0:
@@ -370,7 +403,7 @@ def render_all_projects_dashboard(
 
     df[['visual_status', 'is_software_fail']] = df.apply(lambda row: pd.Series(get_visual_status(row)), axis=1)
 
-    status_priority = {'RUNNING': 0, 'IN_PROGRESS': 0, 'BLOCKED': 1, 'WAITING': 2, 'READY': 2, 'SUCCEEDED': 3, 'FAILED': 4, 'CANCELED': 5}
+    status_priority = {'RUNNING': 0, 'IN_PROGRESS': 0, 'BLOCKED': 1, 'WAITING': 2, 'READY': 2, 'DRAFT': 2, 'SUCCEEDED': 3, 'FAILED': 4, 'CANCELED': 5}
     df['status_rank'] = df['visual_status'].map(status_priority).fillna(99)
     df['req_rank'] = df.groupby('req_id')['status_rank'].transform('min')
     df['group_rank'] = df.groupby('root_work_order_id')['status_rank'].transform('min')
@@ -483,6 +516,7 @@ def render_all_projects_dashboard(
     .status-IN_PROGRESS { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; }
     .status-READY     { background: #f0fdfa; color: #0d9488; border: 1px solid #99f6e4; }
     .status-WAITING   { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
+    .status-DRAFT     { background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; }
     .status-UNKNOWN   { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
     .status-BLOCKED   { background: #be185d; color: white; border: none; }
 
@@ -563,6 +597,8 @@ def render_all_projects_dashboard(
     .warning-note { background: #fdf2f8; border: 1px solid #f9a8d4; color: #be185d; padding: 2px 5px; margin: 3px 6px; border-radius: 2px; font-weight: 600; font-size: 8px; }
     #search_box { width: 280px; padding: 4px 8px; border: 1px solid #d1d1d6; border-radius: 4px; font-size: 10px; background: white; }
     #search_box:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.1); }
+    .search-match td { background: #fef9c3 !important; }
+    .search-match-section { outline: 2px solid #f59e0b !important; outline-offset: 1px; border-radius: 3px; }
     </style>
 
     <script>
@@ -578,28 +614,54 @@ def render_all_projects_dashboard(
         else { el.style.display = "block"; if(icon) icon.classList.add('open'); if(btn) btn.classList.add('active-header'); }
     }
     function filterDashboard() {
-        var searchTerm = document.getElementById('search_box').value.toLowerCase();
+        var searchTerm = document.getElementById('search_box').value.toLowerCase().trim();
         var activeOnly = document.getElementById('active_toggle').checked;
         try { localStorage.setItem('dash_activeOnly', activeOnly ? '1' : '0'); } catch(e) {}
         try { localStorage.setItem('dash_search', document.getElementById('search_box').value); } catch(e) {}
+        document.querySelectorAll('.search-match').forEach(function(el) { el.classList.remove('search-match'); });
+        document.querySelectorAll('.search-match-section').forEach(function(el) { el.classList.remove('search-match-section'); });
         var projects = document.getElementsByClassName('project-wrapper');
+        var firstTarget = null;
         for (var i = 0; i < projects.length; i++) {
             var project = projects[i];
             var isActive = project.getAttribute('data-active') === 'true';
             if (activeOnly && !isActive) { project.style.display = 'none'; continue; }
             if (searchTerm) {
-                var projectText = project.textContent.toLowerCase();
-                var reqCards = project.getElementsByClassName('req-card');
-                var hasMatch = false;
-                if (projectText.includes(searchTerm)) { hasMatch = true; }
-                if (!hasMatch && reqCards.length > 0) {
-                    for (var j = 0; j < reqCards.length; j++) {
-                        var cardText = reqCards[j].textContent.toLowerCase();
-                        if (cardText.includes(searchTerm)) { hasMatch = true; break; }
-                    }
-                }
-                project.style.display = hasMatch ? 'block' : 'none';
-            } else { project.style.display = 'block'; }
+                if (!project.textContent.toLowerCase().includes(searchTerm)) { project.style.display = 'none'; continue; }
+                project.style.display = 'block';
+                project.querySelectorAll('details').forEach(function(d) {
+                    if (d.textContent.toLowerCase().includes(searchTerm)) d.open = true;
+                });
+                project.querySelectorAll('div[id^="req_"]').forEach(function(reqEl) {
+                    if (!reqEl.textContent.toLowerCase().includes(searchTerm)) return;
+                    reqEl.style.display = 'block';
+                    var reqIcon = document.getElementById(reqEl.id + '_icon');
+                    if (reqIcon) reqIcon.classList.add('open');
+                    reqEl.querySelectorAll('.assembly-section').forEach(function(section) {
+                        if (!section.textContent.toLowerCase().includes(searchTerm)) return;
+                        section.classList.add('search-match-section');
+                        var pane = section.querySelector('.content-pane');
+                        if (pane) {
+                            pane.style.display = 'block';
+                            var paneBtn = document.getElementById(pane.id + '_btn');
+                            if (paneBtn) paneBtn.classList.add('active-header');
+                            var paneIcon = document.getElementById(pane.id + '_icon');
+                            if (paneIcon) paneIcon.classList.add('open');
+                        }
+                        section.querySelectorAll('tr').forEach(function(row) {
+                            if (row.textContent.toLowerCase().includes(searchTerm)) {
+                                row.classList.add('search-match');
+                                if (!firstTarget) firstTarget = row;
+                            }
+                        });
+                    });
+                });
+            } else {
+                project.style.display = 'block';
+            }
+        }
+        if (firstTarget && searchTerm) {
+            setTimeout(function() { firstTarget.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 50);
         }
     }
     document.addEventListener('DOMContentLoaded', function() {
@@ -631,6 +693,9 @@ def render_all_projects_dashboard(
     </script>
     """
 
+    # LSP Capacity tab (generated once, injected into template)
+    lsp_capacity_html = render_lsp_capacity_tab(df)
+
     # Part 2: HTML with variables (f-string)
     html += f"""
     <div class="dashboard-container">
@@ -654,6 +719,10 @@ def render_all_projects_dashboard(
                 <button class="tab-btn" data-tab="costs" onclick="switchTab('costs')">
                     <img src="data:image/png;base64,{cost_icon_b64}" class="tab-icon-img" alt="Costs">
                     <span class="tab-text">Costs</span>
+                </button>
+                <button class="tab-btn" data-tab="capacity" onclick="switchTab('capacity')">
+                    <span style="font-size:16px;">📈</span>
+                    <span class="tab-text">LSP Capacity</span>
                 </button>
             </div>
             <!-- TRACKING TAB -->
@@ -855,6 +924,8 @@ def render_all_projects_dashboard(
                 '''
         req_created = to_est(req_df['request_created_at'].iloc[0])
         submitted_str = req_created.strftime('%Y-%m-%d') if req_created else "N/A"
+        _req_email_raw = req_df['submitter_email'].dropna().iloc[0] if 'submitter_email' in req_df.columns and not req_df['submitter_email'].dropna().empty else ''
+        _req_email = str(_req_email_raw).strip() if _req_email_raw else ''
         now = datetime.now(pytz.timezone('US/Eastern'))
         is_done = str(req_status).upper() in ['FULFILLED', 'SUCCEEDED', 'CANCELED']
 
@@ -926,7 +997,7 @@ def render_all_projects_dashboard(
                             <div style="font-size: 1px;">{time_badges_html}</div>
                         </div>
                     </div>
-                    <div style="margin-top: 4px; color: #94a3b8; font-size: 10px; font-family: monospace; letter-spacing: -0.2px;">REQ ID: {req_id}</div>
+                    <div style="margin-top: 4px; color: #94a3b8; font-size: 10px; font-family: monospace; letter-spacing: -0.2px;">REQ ID: {req_id}{(' · ' + _req_email) if _req_email else ''}</div>
                 </div>
                 <div style="display: flex; gap: 8px; align-items: center;">
                     {customer_badge}{partner_badge}
@@ -953,7 +1024,7 @@ def render_all_projects_dashboard(
             if is_req_fulfilled:
                 if r_df['fulfills_request'].any() or r_df['wo_status'].isin(['SUCCEEDED', 'FULFILLED']).any():
                     is_winner = True; has_winner = True
-            status_priority = {'RUNNING': 0, 'IN_PROGRESS': 0, 'BLOCKED': 1, 'WAITING': 2, 'READY': 2, 'SUCCEEDED': 3, 'FAILED': 4, 'CANCELED': 5}
+            status_priority = {'RUNNING': 0, 'IN_PROGRESS': 0, 'BLOCKED': 1, 'WAITING': 2, 'READY': 2, 'DRAFT': 2, 'SUCCEEDED': 3, 'FAILED': 4, 'CANCELED': 5}
             r_df['local_rank'] = r_df['visual_status'].map(status_priority).fillna(99)
             min_rank = r_df['local_rank'].min()
             root_status_map[root_id] = {'is_winner': is_winner, 'rank': min_rank}
@@ -1008,14 +1079,91 @@ def render_all_projects_dashboard(
                         except:
                             pass
             roots_in_view.sort(key=lambda x: 0 if x == root_id else 1)
+
+            # Separate assembly roots from vendor parts roots so they render in distinct sections
+            _asm_types_dfs = {'golden_gate_workorder', 'gibson_workorder'}
+            _parts_types_dfs = {'oligo_synthesis_workorder', 'pcr_workorder', 'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder'}
+            def _root_will_render(wid):
+                """Returns True if this root row will not be skipped by the CANCELED+no-ops filter."""
+                r = row_map.get(wid, {})
+                if r.get('wo_status') != 'CANCELED': return True
+                _pn = r.get('protocol_name')
+                if hasattr(_pn, 'tolist'): _pn = _pn.tolist()
+                return isinstance(_pn, list) and len(_pn) > 0
+
+            asm_roots_list = [r for r in roots_in_view if r in row_map and row_map[r].get('type') in _asm_types_dfs]
+            parts_roots_list = [r for r in roots_in_view if r in row_map and row_map[r].get('type') in _parts_types_dfs]
+            other_roots_list = [r for r in roots_in_view if r not in asm_roots_list and r not in parts_roots_list]
+
+            # Sort assembly roots by created_at and assign attempt numbers when there are retries.
+            # Only count roots that will actually render (not CANCELED with no queue data).
+            asm_roots_list.sort(key=lambda x: (row_map[x].get('wo_created_at') or pd.Timestamp.min))
+            visible_asm_roots = [r for r in asm_roots_list if _root_will_render(r)]
+            # Compute best downstream status for each assembly root's chain
+            _chain_status_rank = {'SUCCEEDED': 0, 'READY': 1, 'RUNNING': 2, 'IN_PROGRESS': 3, 'WAITING': 4, 'BLOCKED': 5, 'FAILED': 6, 'CANCELED': 7}
+            def _subtree_best_status(node_id):
+                best = row_map[node_id].get('visual_status', '') if node_id in row_map else ''
+                for child in adj.get(node_id, []):
+                    child_best = _subtree_best_status(child)
+                    if _chain_status_rank.get(child_best, 99) < _chain_status_rank.get(best, 99):
+                        best = child_best
+                return best
+
+            if len(visible_asm_roots) > 1:
+                for _ai, _ar in enumerate(visible_asm_roots, 1):
+                    row_map[_ar]['_attempt_number'] = _ai
+                    row_map[_ar]['_attempt_total'] = len(visible_asm_roots)
+            # Always assign chain status for assembly roots (even single-attempt, used in banner)
+            for _ar in visible_asm_roots:
+                row_map[_ar]['_attempt_chain_status'] = _subtree_best_status(_ar)
+
+            # Assign attempt numbers within parts: group by (type, STOCK_ID), sort by wo_created_at
+            from collections import defaultdict as _dd
+            _parts_by_key = _dd(list)
+            for _pr in parts_roots_list:
+                _prow = row_map[_pr]
+                _key = (_prow.get('type', ''), str(_prow.get('STOCK_ID', '') or ''))
+                _parts_by_key[_key].append(_pr)
+            for _key, _prs in _parts_by_key.items():
+                if len(_prs) > 1:
+                    _prs.sort(key=lambda x: (row_map[x].get('wo_created_at') or pd.Timestamp.min))
+                    for _pi, _pr in enumerate(_prs, 1):
+                        row_map[_pr]['_attempt_number'] = _pi
+                        row_map[_pr]['_attempt_total'] = len(_prs)
+            # Reorder: single-attempt (first-time-right) parts first, retry groups at the end.
+            # Within retries keep same-key groups together sorted by created_at.
+            _single_parts = [r for r in parts_roots_list if not isinstance(row_map[r].get('_attempt_number'), int)]
+            _retry_parts  = [r for r in parts_roots_list if isinstance(row_map[r].get('_attempt_number'), int)]
+            _retry_parts.sort(key=lambda x: (
+                (row_map[x].get('type', ''), str(row_map[x].get('STOCK_ID', '') or '')),
+                row_map[x].get('wo_created_at') or pd.Timestamp.min
+            ))
+            parts_roots_list = _single_parts + _retry_parts
+
             ordered_data = []
+            parts_ordered = []
             def dfs(node_id, depth):
                 if node_id in row_map:
                     row_data = row_map[node_id]; row_data['tree_depth'] = depth; ordered_data.append(row_data)
                 children = sorted(adj[node_id], key=lambda x: (0 if row_map[x]['type'] == 'transformation_workorder' else 1))
                 for child in children: dfs(child, depth + 1)
-            for r in roots_in_view: dfs(r, 0)
-            sorted_root_df = pd.DataFrame(ordered_data)
+            def dfs_p(node_id, depth):
+                if node_id in row_map:
+                    row_data = row_map[node_id]; row_data['tree_depth'] = depth; parts_ordered.append(row_data)
+                for child in adj.get(node_id, []):
+                    dfs_p(child, depth + 1)
+            for r in asm_roots_list + other_roots_list: dfs(r, 0)
+            for r in parts_roots_list: dfs_p(r, 0)
+            sorted_root_df = pd.DataFrame(ordered_data + parts_ordered)
+
+            # Skip root groups where every row is CANCELED with no queue data (empty dropdown)
+            def _row_is_visible(r):
+                if r.get('wo_status') != 'CANCELED': return True
+                _pn = r.get('protocol_name')
+                if hasattr(_pn, 'tolist'): _pn = _pn.tolist()
+                return isinstance(_pn, list) and len(_pn) > 0
+            if sorted_root_df.empty or not any(_row_is_visible(r) for _, r in sorted_root_df.iterrows()):
+                continue
 
             badges_html = ""; header_extra_info = ""; target_row = None
             lsp_rows = root_df[root_df['type'] == 'lsp_workorder']
@@ -1078,6 +1226,8 @@ def render_all_projects_dashboard(
 
             html += f"""<div class="{section_class}"><button id="{div_id}_btn" class="dropdown-btn" onclick="toggleSection('{div_id}')"><span id="{div_id}_icon" class="dropdown-icon">▶</span><div class="assembly-info"><span class="assembly-type">{assembly_label}</span><span class="stock-tag" style="font-size:9px; padding:3px 8px; background:#ede9fe; color:#6d28d9; border: 1px solid #c4b5fd;">{root_stock}</span><span class="assembly-counts" style="font-weight: 600;">{count_str}</span><span class="wo-id-tag">Root: {root_id}</span></div><div class="status-badges">{badges_html}</div></button><div id="{div_id}" class="content-pane"><table class="wo-table"><thead><tr><th>Type</th><th>Workorder ID</th><th>Status</th><th>Stock ID</th><th>Created</th><th>TAT</th><th>Details</th><th style="width: 350px;">Queue</th></tr></thead><tbody>"""
 
+            _emitted_parts_header = False
+            _emitted_retry_header = False
             for _, row in sorted_root_df.iterrows():
                 # Skip CANCELED workorders that never ran (no queue data) —
                 # these are abandoned attempts that clutter the timeline.
@@ -1089,6 +1239,42 @@ def render_all_projects_dashboard(
                         _pn = []
                     if not _pn:
                         continue
+                _is_parts_row = row.get('type') in _parts_types_dfs
+                _attempt_num = row.get('_attempt_number')
+                _has_attempt = isinstance(_attempt_num, (int, float)) and not (isinstance(_attempt_num, float) and pd.isna(_attempt_num))
+                _status_colors = {'SUCCEEDED': '#15803d', 'FAILED': '#be185d', 'RUNNING': '#0891b2', 'WAITING': '#d97706', 'READY': '#0d9488', 'DRAFT': '#64748b'}
+
+                # "Parts / Inputs" section header — emitted once before the first single-attempt parts row
+                if _is_parts_row and not _emitted_parts_header:
+                    _emitted_parts_header = True
+                    html += f"""<tr><td colspan="8" style="padding:5px 10px 4px; background:#f8fafc; border-top:2px solid #e2e8f0; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">Parts / Inputs</span></td></tr>"""
+
+                if _is_parts_row and _has_attempt and row.get('tree_depth', 0) == 0:
+                    # "Retried Parts" divider — emitted once before the first retry attempt group
+                    if not _emitted_retry_header:
+                        _emitted_retry_header = True
+                        html += f"""<tr><td colspan="8" style="padding:5px 10px 4px; background:#fef9ec; border-top:2px solid #fde68a; border-bottom:1px solid #fde68a;"><span style="font-size:10px; font-weight:700; color:#92400e; text-transform:uppercase; letter-spacing:0.05em;">Retried Parts</span></td></tr>"""
+                    _atype = row.get('type', '')
+                    _alabel = format_type_label(_atype)
+                    _attempt_total = int(row.get('_attempt_total', 1))
+                    _sid_raw = row.get('STOCK_ID')
+                    _sid_lbl = '' if (_sid_raw is None or (isinstance(_sid_raw, float) and pd.isna(_sid_raw)) or str(_sid_raw).lower() in ('nan', 'none', '')) else str(_sid_raw).strip()
+                    _vstatus = row.get('visual_status', '') or ''
+                    _vstatus = '' if (isinstance(_vstatus, float) and pd.isna(_vstatus)) else str(_vstatus)
+                    _vcolor = _status_colors.get(_vstatus, '#64748b')
+                    _vicon = '✓ ' if _vstatus == 'SUCCEEDED' else '✗ ' if _vstatus == 'FAILED' else ''
+                    html += f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:1px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{(_sid_lbl + ' — ') if _sid_lbl else ''}Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_vcolor};">{_vicon}{_vstatus}</span></td></tr>"""
+
+                elif not _is_parts_row and _has_attempt and row.get('tree_depth', 0) == 0:
+                    # Assembly attempt banner (GG/Gibson) — uses best chain status
+                    _atype = row.get('type', '')
+                    _alabel = format_type_label(_atype)
+                    _attempt_total = int(row.get('_attempt_total', 1))
+                    _cs_raw = row.get('_attempt_chain_status')
+                    _astatus = row.get('visual_status', '') if (_cs_raw is None or (isinstance(_cs_raw, float) and pd.isna(_cs_raw))) else str(_cs_raw)
+                    _astatus_color = _status_colors.get(_astatus, '#64748b')
+                    _status_icon = '✓ ' if _astatus == 'SUCCEEDED' else '✗ ' if _astatus == 'FAILED' else ''
+                    html += f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:2px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{_alabel} — Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_astatus_color};">{_status_icon}{_astatus}</span></td></tr>"""
                 depth = row.get('tree_depth', 0)
                 row_class = f"tree-row-{min(depth, 2)}"  # CSS only has 0, 1, 2
                 spacer = ""
@@ -1225,7 +1411,14 @@ def render_all_projects_dashboard(
                                 if (i + 1) % 3 == 0 and i < len(pids_sorted) - 1: tooltip_html += '<br>'
                             tooltip_html += '</div></div>'
                         lims_pills = f'<div class="plate-hover-container"><span class="plate-trigger">{len(all_pids)} Plates</span><div class="plate-popover">{tooltip_html}</div></div>'
-                        pipeline_html += f"""<div class="timeline-row"><div class="t-dot succeeded"></div><div class="t-content"><div class="t-header"><span class="t-name">Manual: Miniprep/Glycerol/Media created</span><span class="t-time"></span></div><div class="t-details">{lims_pills}</div></div></div>"""
+                        _fallback_labels = {
+                            'pcr_workorder': 'PCR',
+                            'oligo_synthesis_workorder': 'Oligo Synthesis',
+                            'plasmid_synthesis_workorder': 'Plasmid Synthesis',
+                            'syn_part_synthesis_workorder': 'Syn Part Synthesis',
+                        }
+                        _fallback_label = _fallback_labels.get(row['type'], 'Manual: Miniprep/Glycerol/Media created')
+                        pipeline_html += f"""<div class="timeline-row"><div class="t-dot succeeded"></div><div class="t-content"><div class="t-header"><span class="t-name">{_fallback_label}</span><span class="t-time"></span></div><div class="t-details">{lims_pills}</div></div></div>"""
                     else:
                         pipeline_html += '<span style="color: #9ca3af; font-size: 11px;">No queue data</span>'
                 pipeline_html += '</div>'
@@ -1464,10 +1657,30 @@ def render_all_projects_dashboard(
                         )
                     details_info += "".join(lsp_parts)
 
+                elif row['type'] in ['oligo_synthesis_workorder', 'pcr_workorder', 'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder']:
+                    _vendor = row.get('vendor')
+                    if pd.notna(_vendor) and str(_vendor).strip() not in ('', 'nan', 'None'):
+                        details_info += f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Vendor: {str(_vendor).strip()}</div>"
+                    if row['type'] == 'pcr_workorder':
+                        _wc = row.get('well_comments')
+                        _wc_clean = str(_wc).strip().strip(';').strip() if _wc is not None and not (isinstance(_wc, float) and pd.isna(_wc)) else ''
+                        if _wc_clean and _wc_clean not in ('nan', 'None'):
+                            details_info += f"<div style='font-size:10px;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;margin-top:3px;'>&#9888; {_wc_clean}</div>"
+
                 elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation']:
                     strain = row.get('cloning_strain')
                     if pd.notna(strain): details_info += f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Strain: {strain}</div>"
-                    if row['is_software_fail']: details_info += f'<br><div style="font-size:9px;color:#be185d;margin-top:2px;font-weight:bold;">Software: FAILED</div>'
+                    _imaged   = row.get('imaged_colonies')
+                    _pickable = row.get('pickable_colonies')
+                    _picked   = row.get('picked_colonies')
+                    if any(pd.notna(v) for v in [_imaged, _pickable, _picked]):
+                        details_info += (
+                            f"<div style='display:grid;grid-template-columns:58px 1fr;gap:1px 4px;margin-top:3px;'>"
+                            f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Imaged</span><span style='font-size:10px;color:#1e293b;'>{int(_imaged)}</span>"
+                            f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Pickable</span><span style='font-size:10px;color:#1e293b;'>{int(_pickable) if pd.notna(_pickable) else 0}</span>"
+                            f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Picked</span><span style='font-size:10px;color:#1e293b;'>{int(_picked) if pd.notna(_picked) else 0}</span>"
+                            f"</div>"
+                        )
                     if row['visual_status'] == 'FAILED' and str(row['wo_status']).upper() == 'SUCCEEDED' and not row['is_software_fail']:
                         _tot = row.get('total_colonies')
                         if pd.isna(_tot) or int(_tot) == 0:
@@ -1585,7 +1798,7 @@ def render_all_projects_dashboard(
             if not r_created: continue
             status = str(r_df.get('request_status', ['NEW']).iloc[0]).upper()
             is_partner = 'true' in str(r_df.get('for_partner', ['false']).iloc[0]).lower()
-            if is_partner: yellow_limit, red_limit = 5.0, 6.0
+            if is_partner: yellow_limit, red_limit = 4.0, 5.0
             else: yellow_limit, red_limit = 6.0, 7.0
 
             ready_to_ship_time = None; final_release_time = None
@@ -1620,7 +1833,8 @@ def render_all_projects_dashboard(
 
             active_rows = r_df[r_df['wo_status'] != 'CANCELED']
             is_blocked = 'BLOCKED' in active_rows['visual_status'].values
-            real_wos = r_df[r_df['workorder_id'].notna() & ~r_df['workorder_id'].astype(str).str.startswith('REQ-')]
+            _draft_mask = r_df['data_source'].eq('BIOS_DRAFT') if 'data_source' in r_df.columns else pd.Series(False, index=r_df.index)
+            real_wos = r_df[r_df['workorder_id'].notna() & ~r_df['workorder_id'].astype(str).str.startswith('REQ-') & ~_draft_mask]
             has_real_workorders = not real_wos.empty
             has_life = not active_rows[active_rows['visual_status'].isin(['RUNNING', 'READY', 'IN_PROGRESS', 'LSP_RUNNING', 'WAITING'])].empty
             # After calculating has_life, add root chain check:
@@ -1638,10 +1852,19 @@ def render_all_projects_dashboard(
                     .isin(['RUNNING', 'READY', 'IN_PROGRESS']).any()
             )
 
+            # A SUCCEEDED LSP means physical delivery is done — not stalled, just pending BIOS closure.
+            # The stall check (root_chain_finished) fires for Gibson→done-but-no-LSP AND for
+            # LSP-done-but-no-BIOS-fulfillment; the latter is a false positive.
+            lsp_succeeded = (
+                not root_chain_rows[root_chain_rows['type'] == 'lsp_workorder'].empty
+                and (root_chain_rows[root_chain_rows['type'] == 'lsp_workorder']['visual_status'] == 'SUCCEEDED').any()
+            )
+
             is_stalled = (
                 has_real_workorders
                 and not is_finished
                 and status != 'CANCELED'
+                and not lsp_succeeded  # LSP delivered — BIOS just needs to mark FULFILLED
                 and (
                     not has_life  # Original condition: no activity anywhere
                     or (root_chain_exists and root_chain_finished)  # root chain dead even if parts running
@@ -1697,7 +1920,7 @@ def render_all_projects_dashboard(
                 tat_parts.append(f"<span style='background:rgba(255,255,255,0.2); color:white; padding:2px 6px; border-radius:3px; font-size:10px; white-space:nowrap;'>Avg Total: <span style='color:#67e8f9; font-weight:700;'>{weeks}w {days}d</span></span>")
             avg_tat_html = f'''<div style="display:flex; gap:10px; font-weight:700;">{" ".join(tat_parts)}</div>'''
 
-        orange_week = 5 if has_ptr else 6; red_week = 6 if has_ptr else 7
+        orange_week = 4 if has_ptr else 6; red_week = 5 if has_ptr else 7
         timeline_bar = f"""<div style="margin: 10px 12px 8px 12px; padding: 10px; background: rgba(0,0,0,0.15); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);"><div style="display:flex; justify-content:space-between; font-size:11px; color:rgba(255,255,255,1); margin-bottom:8px; font-family:monospace; font-weight:900; letter-spacing:1px; text-shadow: 0 1px 3px rgba(0,0,0,0.4);"><span>START</span><span>1w</span><span>2w</span><span>3w</span><span>4w</span><span>5w</span><span>6w</span><span>7w</span><span>8w+</span></div><div style="position:relative; width:100%; height:22px; background:rgba(255,255,255,0.15); border-radius:11px; box-shadow: inset 0 1px 4px rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2);">{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; width:1px; height:100%; background:rgba(255,255,255,0.1); z-index:1;"></div>' for w in range(1,8)])}<div style="position:absolute; left:{(orange_week/8)*100}%; width:2px; height:28px; background:#f97316; top:-3px; border-radius:1px; box-shadow: 0 0 6px rgba(249,115,22,0.6); z-index:2;"></div><div style="position:absolute; left:{(red_week/8)*100}%; width:2px; height:28px; background:#be185d; top:-3px; border-radius:1px; box-shadow: 0 0 6px rgba(190,24,93,0.6); z-index:2;"></div><div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div></div>
             <div style="display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:10px; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
               <div style="display:flex; align-items:center; gap:8px; color:white; font-size:9px; font-weight:600;">
@@ -1726,6 +1949,9 @@ def render_all_projects_dashboard(
             if exp_created_dt:
                 exp_created_str = exp_created_dt.strftime('%Y-%m-%d')
 
+        _exp_emails_raw = [str(e).strip() for e in project_df['submitter_email'].dropna().unique() if str(e).strip() not in ('', 'nan', 'none', 'None')] if 'submitter_email' in project_df.columns else []
+        _exp_email_str = ' / '.join(_exp_emails_raw[:2]) if 1 <= len(_exp_emails_raw) <= 2 else ''
+
         html += f"""
             <div class="project-wrapper" data-active="{"true" if db_active else "false"}">
                 <div class="header-banner" style="background: {exp_header_gradient}; min-height: auto; padding: 12px 18px;" onclick="toggleSection('{safe_exp_id}')">
@@ -1736,7 +1962,7 @@ def render_all_projects_dashboard(
                                 {exp_customer_tags}
                             </div>
                             <div style="font-size: 9px; color: rgba(255,255,255,0.6); font-weight: 500; margin-top: 2px; font-family: monospace;">
-                                Created: {exp_created_str}
+                                Created: {exp_created_str}{(f' &nbsp;<span style="color:rgba(255,255,255,0.85);font-weight:700;">' + _exp_email_str + '</span>') if _exp_email_str else ''}
                             </div>
                         </div>
                         <div class="header-main-stat" style="margin-bottom: 0; font-size: 11px;">
@@ -1815,9 +2041,15 @@ def render_all_projects_dashboard(
                 </div>
             </div>
 
+            <!-- LSP CAPACITY TAB -->
+            <div id="tab-capacity" class="tab-content">
+                __LSP_CAPACITY_TAB_CONTENT__
+            </div>
+
         </div>
     </div>
     """
+    html = html.replace("__LSP_CAPACITY_TAB_CONTENT__", lsp_capacity_html)
     return html
 
 
