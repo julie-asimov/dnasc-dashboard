@@ -2106,7 +2106,11 @@ def render_dashboard(df: pd.DataFrame) -> str:
                 .then(function(ts) {{
                     ts = ts.trim();
                     if (_loadedTs === null) {{ _loadedTs = ts; }}
-                    else if (ts !== _loadedTs) {{ window.location.reload(true); }}
+                    else if (ts !== _loadedTs) {{
+                        // reload(true) is ignored by modern browsers — navigate
+                        // with the new timestamp as a cache-busting query param
+                        window.location.href = window.location.pathname + '?v=' + ts;
+                    }}
                 }})
                 .catch(function() {{}});
         }}
