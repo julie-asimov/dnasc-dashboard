@@ -617,6 +617,11 @@ def render_all_projects_dashboard(
         if (el.style.display === "block") { el.style.display = "none"; if(icon) icon.classList.remove('open'); if(btn) btn.classList.remove('active-header'); }
         else { el.style.display = "block"; if(icon) icon.classList.add('open'); if(btn) btn.classList.add('active-header'); }
     }
+    var _filterTimer = null;
+    function filterDashboardDebounced() {
+        clearTimeout(_filterTimer);
+        _filterTimer = setTimeout(filterDashboard, 300);
+    }
     function filterDashboard() {
         var searchTerm = document.getElementById('search_box').value.toLowerCase().trim();
         var activeOnly = document.getElementById('active_toggle').checked;
@@ -733,7 +738,7 @@ def render_all_projects_dashboard(
             <div id="tab-tracking" class="tab-content active">
                 <div class="controls-container">
                     <div class="toggle-wrapper" style="margin-right: auto;">
-                        <input type="text" id="search_box" placeholder="Search Stock ID, Experiment, or Construct..." oninput="filterDashboard()">
+                        <input type="text" id="search_box" placeholder="Search Stock ID, Experiment, or Construct..." oninput="filterDashboardDebounced()">
                     </div>
                     <div class="toggle-wrapper">
                         <span class="toggle-label">Active Projects Only</span>
