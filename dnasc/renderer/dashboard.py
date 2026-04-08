@@ -2094,7 +2094,26 @@ def render_dashboard(df: pd.DataFrame) -> str:
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>DNA SC Dashboard</title>
-    <script>setInterval(function(){{ window.location.reload(true); }}, 3600000);</script>
+    <script>
+    // Poll dnasc_version.txt every 2 minutes. When the cron job updates the
+    // dashboard the timestamp changes and we hard-reload automatically — no
+    // manual refresh needed.
+    (function() {{
+        var _loadedTs = null;
+        function _checkVersion() {{
+            fetch('dnasc_version.txt?_=' + Date.now(), {{cache: 'no-store'}})
+                .then(function(r) {{ return r.text(); }})
+                .then(function(ts) {{
+                    ts = ts.trim();
+                    if (_loadedTs === null) {{ _loadedTs = ts; }}
+                    else if (ts !== _loadedTs) {{ window.location.reload(true); }}
+                }})
+                .catch(function() {{}});
+        }}
+        setInterval(_checkVersion, 120000);
+        _checkVersion();
+    }})();
+    </script>
 </head>
 <body>
 {html}

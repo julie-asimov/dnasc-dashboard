@@ -60,6 +60,8 @@ def main():
 
     # 4. Write to www/
     HTML_OUT.write_text(html, encoding="utf-8")
+    VERSION_TS = WWW_DIR / "dnasc_version.txt"
+    VERSION_TS.write_text(str(int(time.time())))
     print(f"   ✅ Dashboard written → {HTML_OUT}")
 
     elapsed = time.time() - start
