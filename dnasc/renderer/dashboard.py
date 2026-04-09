@@ -620,7 +620,7 @@ def render_all_projects_dashboard(
         if (bk.style.display === 'none') {
             bk.style.display = 'block'; tl.style.display = 'none'; btn.textContent = 'Timeline';
         } else {
-            bk.style.display = 'none'; tl.style.display = 'block'; btn.textContent = 'Process Bucket';
+            bk.style.display = 'none'; tl.style.display = 'block'; btn.textContent = 'Stage View';
         }
     }
     function toggleSection(id) {
@@ -1757,7 +1757,7 @@ def render_all_projects_dashboard(
     # =========================================================================
 
     _BUCKET_STAGES = [
-        ('Parts',       '#94a3b8'),
+        ('Vendor Parts', '#94a3b8'),
         ('PL1 Build',   '#60a5fa'),
         ('PCR',         '#38bdf8'),
         ('Assembly',    '#a78bfa'),
@@ -1819,28 +1819,33 @@ def render_all_projects_dashboard(
                                   'plasmid_synthesis_workorder'}) &
             active['visual_status'].isin(ACTIVE_VIS)
         ]
-        if not parts_a.empty: return 'Parts'
+        if not parts_a.empty: return 'Vendor Parts'
 
         return 'Stalled'
 
     def _render_bucket_chart(stage_counts):
-        """Render a compact horizontal bar chart for process bucket view."""
+        """Render a horizontal bar chart showing all pipeline stages — zero counts
+        displayed as empty/dimmed so the full progression is always visible."""
         total = sum(stage_counts.values())
-        if total == 0:
-            return '<div style="color:rgba(255,255,255,0.5);text-align:center;padding:16px;font-size:10px;">No active requests</div>'
-        max_c = max(stage_counts.values())
+        max_c = max(stage_counts.values()) if total > 0 else 1
         rows  = ''
         for stage_key, color in _BUCKET_STAGES:
-            cnt = stage_counts.get(stage_key, 0)
-            if cnt == 0: continue
-            bar_w = max(4, int((cnt / max_c) * 160))
+            cnt   = stage_counts.get(stage_key, 0)
+            bar_w = max(3, int((cnt / max_c) * 160)) if cnt > 0 else 0
+            label_style = f"color:rgba(255,255,255,0.8);font-weight:600;" if cnt > 0 else "color:rgba(255,255,255,0.3);font-weight:400;"
+            bar_html = (
+                f'<div style="width:{bar_w}px;height:14px;background:{color};border-radius:3px;flex-shrink:0;"></div>'
+                if cnt > 0 else
+                f'<div style="width:100%;height:14px;background:rgba(255,255,255,0.07);border-radius:3px;border:1px dashed rgba(255,255,255,0.15);"></div>'
+            )
+            count_html = f'<span style="font-size:10px;color:white;font-weight:700;font-family:monospace;">{cnt}</span>' if cnt > 0 else ''
             rows += f'''<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
-                <div style="width:88px;font-size:9px;color:rgba(255,255,255,0.8);text-align:right;white-space:nowrap;font-family:monospace;font-weight:600;">{stage_key}</div>
-                <div style="width:{bar_w}px;height:14px;background:{color};border-radius:3px;flex-shrink:0;"></div>
-                <span style="font-size:10px;color:white;font-weight:700;font-family:monospace;">{cnt}</span>
+                <div style="width:88px;font-size:9px;{label_style}text-align:right;white-space:nowrap;font-family:monospace;">{stage_key}</div>
+                <div style="flex:1;display:flex;align-items:center;gap:6px;">{bar_html}{count_html}</div>
             </div>'''
+        total_str = f'{total} active request{"s" if total != 1 else ""}' if total > 0 else 'No active requests'
         return f'''<div style="padding:10px 14px 8px 14px;">
-            <div style="font-size:9px;color:rgba(255,255,255,0.45);margin-bottom:8px;font-family:monospace;">{total} active request{"s" if total != 1 else ""}</div>
+            <div style="font-size:9px;color:rgba(255,255,255,0.45);margin-bottom:8px;font-family:monospace;">{total_str}</div>
             {rows}
         </div>'''
 
@@ -2067,6 +2072,7 @@ def render_all_projects_dashboard(
             <div class="project-wrapper" data-active="{"true" if db_active else "false"}">
                 <div class="header-banner" style="background: {exp_header_gradient}; min-height: auto; padding: 12px 18px;" onclick="toggleSection('{safe_exp_id}')">
                     <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
+                        <button id="bucket_btn_{safe_exp_id}" onclick="event.stopPropagation();toggleBucketView('{safe_exp_id}')" style="margin-left:auto;order:99;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.35);color:white;font-size:9px;padding:3px 9px;border-radius:4px;cursor:pointer;font-family:monospace;font-weight:600;letter-spacing:0.5px;white-space:nowrap;flex-shrink:0;">Stage View</button>
                         <div>
                             <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                                 <div class="header-title" style="margin-bottom: 0; white-space: nowrap;">{experiment_name}</div>
@@ -2082,8 +2088,7 @@ def render_all_projects_dashboard(
                         </div>
                         <div style="font-size: 1px;">{avg_tat_html}</div>
                     </div>
-                    <div style="position:relative; margin-bottom:10px;">
-                        <button id="bucket_btn_{safe_exp_id}" onclick="event.stopPropagation();toggleBucketView('{safe_exp_id}')" style="position:absolute;right:0;top:0;z-index:50;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.35);color:white;font-size:9px;padding:3px 9px;border-radius:4px;cursor:pointer;font-family:monospace;font-weight:600;letter-spacing:0.5px;">Process Bucket</button>
+                    <div style="margin-bottom:10px;">
                         <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
                         <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts)}</div>
                     </div>
