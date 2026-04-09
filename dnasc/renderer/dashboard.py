@@ -612,6 +612,17 @@ def render_all_projects_dashboard(
         document.querySelector('[data-tab="' + tabName + '"]').classList.add('active');
         document.getElementById('tab-' + tabName).classList.add('active');
     }
+    function toggleBucketView(expId) {
+        var tl  = document.getElementById('timeline_' + expId);
+        var bk  = document.getElementById('bucket_'   + expId);
+        var btn = document.getElementById('bucket_btn_' + expId);
+        if (!tl || !bk || !btn) return;
+        if (bk.style.display === 'none') {
+            bk.style.display = 'block'; tl.style.display = 'none'; btn.textContent = 'Timeline';
+        } else {
+            bk.style.display = 'none'; tl.style.display = 'block'; btn.textContent = 'Process Bucket';
+        }
+    }
     function toggleSection(id) {
         var el = document.getElementById(id); var icon = document.getElementById(id + '_icon'); var btn = document.getElementById(id + '_btn');
         if (el.style.display === "block") { el.style.display = "none"; if(icon) icon.classList.remove('open'); if(btn) btn.classList.remove('active-header'); }
@@ -1745,6 +1756,93 @@ def render_all_projects_dashboard(
     # 4. MAIN RENDER LOOP
     # =========================================================================
 
+    _BUCKET_STAGES = [
+        ('Parts',       '#94a3b8'),
+        ('PL1 Build',   '#60a5fa'),
+        ('PCR',         '#38bdf8'),
+        ('Assembly',    '#a78bfa'),
+        ('Assembly QC', '#818cf8'),
+        ('LSP',         '#34d399'),
+        ('LSP QC',      '#2dd4bf'),
+        ('Reviewing',   '#fbbf24'),
+        ('Releasing',   '#f97316'),
+        ('Stalled',     '#f87171'),
+    ]
+
+    def _classify_stage(r_df, is_stalled, is_blocked):
+        """Return the pipeline stage bucket for a single active request."""
+        if is_stalled:
+            return 'Stalled'
+        ACTIVE_VIS    = {'WAITING', 'RUNNING', 'IN_PROGRESS', 'READY'}
+        ACTIVE_STATES = {'RD', 'RU'}
+
+        def _get(v):
+            return list(v) if isinstance(v, (list, np.ndarray)) else []
+
+        def _has_proto(rows_df, proto_set):
+            for _, _r in rows_df.iterrows():
+                for _p, _s in zip(_get(_r.get('protocol_name')), _get(_r.get('operation_state'))):
+                    if str(_p) in proto_set and str(_s) in ACTIVE_STATES:
+                        return True
+            return False
+
+        active = r_df[r_df['wo_status'] != 'CANCELED']
+        lsp    = active[active['type'] == 'lsp_workorder']
+        lsp_a  = lsp[lsp['visual_status'].isin(ACTIVE_VIS)]
+
+        if _has_proto(lsp_a, {'LSP Releasing'}):  return 'Releasing'
+        if _has_proto(lsp_a, {'LSP Reviewing'}):  return 'Reviewing'
+        if not lsp_a.empty and _has_proto(lsp_a, {'DNA Quantification', 'NGS Sequence Confirmation', 'Fragment Analyzer'}):
+            return 'LSP QC'
+        if not lsp_a.empty: return 'LSP'
+
+        asm_types = {'golden_gate_workorder', 'gibson_workorder', 'transformation_workorder',
+                     'streakout_operation', 'transformation_offline_operation'}
+        asm = active[active['type'].isin(asm_types)]
+        if _has_proto(asm, {'Rearray 96 to 384', 'DNA Quantification', 'NGS Sequence Confirmation'}):
+            return 'Assembly QC'
+        if not asm[asm['visual_status'].isin(ACTIVE_VIS | {'BLOCKED'})].empty:
+            return 'Assembly'
+
+        pcr_a = active[(active['type'] == 'pcr_workorder') & active['visual_status'].isin(ACTIVE_VIS)]
+        if not pcr_a.empty: return 'PCR'
+
+        pl1_a = active[
+            (active['type'] == 'plasmid_synthesis_workorder') &
+            (active['workorder_id'].astype(str) != active['root_work_order_id'].astype(str)) &
+            active['visual_status'].isin(ACTIVE_VIS)
+        ]
+        if not pl1_a.empty: return 'PL1 Build'
+
+        parts_a = active[
+            active['type'].isin({'oligo_synthesis_workorder', 'syn_part_synthesis_workorder',
+                                  'plasmid_synthesis_workorder'}) &
+            active['visual_status'].isin(ACTIVE_VIS)
+        ]
+        if not parts_a.empty: return 'Parts'
+
+        return 'Stalled'
+
+    def _render_bucket_chart(stage_counts):
+        """Render a compact horizontal bar chart for process bucket view."""
+        total = sum(stage_counts.values())
+        if total == 0:
+            return '<div style="color:rgba(255,255,255,0.5);text-align:center;padding:16px;font-size:10px;">No active requests</div>'
+        max_c = max(stage_counts.values())
+        rows  = ''
+        for stage_key, color in _BUCKET_STAGES:
+            cnt = stage_counts.get(stage_key, 0)
+            if cnt == 0: continue
+            bar_w = max(4, int((cnt / max_c) * 160))
+            rows += f'''<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+                <div style="width:88px;font-size:9px;color:rgba(255,255,255,0.8);text-align:right;white-space:nowrap;font-family:monospace;font-weight:600;">{stage_key}</div>
+                <div style="width:{bar_w}px;height:14px;background:{color};border-radius:3px;flex-shrink:0;"></div>
+                <span style="font-size:10px;color:white;font-weight:700;font-family:monospace;">{cnt}</span>
+            </div>'''
+        return f'''<div style="padding:10px 14px 8px 14px;">
+            <div style="font-size:9px;color:rgba(255,255,255,0.45);margin-bottom:8px;font-family:monospace;">{total} active request{"s" if total != 1 else ""}</div>
+            {rows}
+        </div>'''
 
     for experiment_name, project_df in df.groupby('experiment_name', sort=False):
         # FIX: Filter out Canceled requests that have no real workorders
@@ -1778,7 +1876,7 @@ def render_all_projects_dashboard(
             f'<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px;background:{bg};color:{fg};border:1px solid {bd};">{lbl}</span>'
             for _, lbl, bg, fg, bd in _exp_customers
         )
-        dots_html = ""
+        dots_html = ""; stage_counts = {}
         # Sort requests: newest first, but group base+variant construct names together.
         # Strip trailing _identifier suffix to find the base construct name, then use
         # the newest request_created_at in the base group as the anchor date so variants
@@ -1881,6 +1979,10 @@ def render_all_projects_dashboard(
                 )
             )
 
+            if not is_finished and status != 'CANCELED' and has_real_workorders:
+                _stage = _classify_stage(r_df, is_stalled, is_blocked)
+                stage_counts[_stage] = stage_counts.get(_stage, 0) + 1
+
             if is_finished: count_fulfilled += 1; fulfilled_req_list.append((rid, r_df))
             elif status == 'CANCELED':
                 if has_real_workorders: count_canceled += 1; canceled_req_list.append((rid, r_df))
@@ -1980,7 +2082,11 @@ def render_all_projects_dashboard(
                         </div>
                         <div style="font-size: 1px;">{avg_tat_html}</div>
                     </div>
-                    <div style="margin-bottom: 10px;">{timeline_bar}</div>
+                    <div style="position:relative; margin-bottom:10px;">
+                        <button id="bucket_btn_{safe_exp_id}" onclick="event.stopPropagation();toggleBucketView('{safe_exp_id}')" style="position:absolute;right:0;top:0;z-index:50;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.35);color:white;font-size:9px;padding:3px 9px;border-radius:4px;cursor:pointer;font-family:monospace;font-weight:600;letter-spacing:0.5px;">Process Bucket</button>
+                        <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
+                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts)}</div>
+                    </div>
                     <div class="header-stats" style="margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap;">
                         {f'<span class="stat-item" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
                         {f'<span class="stat-item" style="background:rgba(34,197,94,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_ship_ready}</span> <span style="font-size:10px;">Ship Ready</span></span>' if count_ship_ready > 0 else ''}
