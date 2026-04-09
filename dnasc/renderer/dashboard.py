@@ -1839,10 +1839,11 @@ def render_all_projects_dashboard(
         idx = min(int(age_weeks / max_idx * (len(_BLUE_RAMP) - 1)), len(_BLUE_RAMP) - 1)
         return _BLUE_RAMP[idx]
 
-    def _render_bucket_chart(stage_counts, yellow_limit, red_limit):
+    def _render_bucket_chart(stage_counts, fulfilled_week_counts, yellow_limit, red_limit):
         """Render a horizontal bar chart showing all pipeline stages.
         On-track buckets use a light→dark sky-blue gradient (colorblind-safe).
-        Warning uses amber-gold. Overdue uses solid red."""
+        Warning uses amber-gold. Overdue uses solid red.
+        When no active requests remain, shows fulfilled TAT distribution instead."""
         def _seg_color(bucket):
             return _age_color(bucket, yellow_limit, red_limit)
 
@@ -1853,6 +1854,33 @@ def render_all_projects_dashboard(
             return 'rgba(255,255,255,0.95)'
 
         total = sum(sum(wc.values()) for wc in stage_counts.values()) if stage_counts else 0
+
+        # When all requests are fulfilled, show TAT distribution instead of stage rows
+        if total == 0 and fulfilled_week_counts:
+            f_total = sum(fulfilled_week_counts.values())
+            f_max   = max(fulfilled_week_counts.values(), default=1)
+            segs = ''
+            for bucket in range(9):
+                bc = fulfilled_week_counts.get(bucket, 0)
+                if bc == 0: continue
+                seg_w = max(22, int((bc / f_total) * 400))
+                color = _age_color(bucket, yellow_limit, red_limit)
+                tc = 'rgba(15,23,42,0.9)' if bucket < yellow_limit and bucket < 2 else 'rgba(255,255,255,0.95)'
+                age_label = f'{bucket}w' if bucket < 8 else '8w+'
+                segs += (
+                    f'<div style="width:{seg_w}px;height:24px;background:{color};flex-shrink:0;'
+                    f'display:flex;flex-direction:column;align-items:center;justify-content:center;'
+                    f'overflow:hidden;cursor:default;" title="Fulfilled in {age_label}: {bc}">'
+                    f'<span style="font-size:10px;font-weight:700;color:{tc};line-height:1;">{bc}</span>'
+                    f'<span style="font-size:7px;color:{tc};opacity:0.8;line-height:1;">{age_label}</span>'
+                    f'</div>'
+                )
+            return f'''<div style="padding:10px 14px 8px 14px;">
+                <div style="font-size:9px;color:rgba(255,255,255,0.45);margin-bottom:8px;font-family:monospace;">{f_total} fulfilled — production TAT distribution</div>
+                <div style="display:flex;border-radius:4px;overflow:hidden;gap:1px;">{segs}</div>
+                <div style="font-size:8px;color:rgba(255,255,255,0.35);margin-top:6px;">weeks from request creation to LSP ready-to-ship</div>
+            </div>'''
+
         max_c = max((sum(wc.values()) for wc in stage_counts.values()), default=1)
         rows  = ''
         for stage_key, _ in _BUCKET_STAGES:
@@ -1930,7 +1958,7 @@ def render_all_projects_dashboard(
             f'<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px;background:{bg};color:{fg};border:1px solid {bd};">{lbl}</span>'
             for _, lbl, bg, fg, bd in _exp_customers
         )
-        dots_html = ""; stage_counts = {}
+        dots_html = ""; stage_counts = {}; fulfilled_week_counts = {}
         # Sort requests: newest first, but group base+variant construct names together.
         # Strip trailing _identifier suffix to find the base construct name, then use
         # the newest request_created_at in the base group as the anchor date so variants
@@ -2040,7 +2068,10 @@ def render_all_projects_dashboard(
                     stage_counts.setdefault(_stage, {})
                     stage_counts[_stage][_week_bucket] = stage_counts[_stage].get(_week_bucket, 0) + 1
 
-            if is_finished: count_fulfilled += 1; fulfilled_req_list.append((rid, r_df))
+            if is_finished:
+                count_fulfilled += 1; fulfilled_req_list.append((rid, r_df))
+                _wb = min(int(age_weeks), 8)
+                fulfilled_week_counts[_wb] = fulfilled_week_counts.get(_wb, 0) + 1
             elif status == 'CANCELED':
                 if has_real_workorders: count_canceled += 1; canceled_req_list.append((rid, r_df))
             elif has_real_workorders or status == 'PLANNED':
@@ -2142,7 +2173,7 @@ def render_all_projects_dashboard(
                     </div>
                     <div style="margin-bottom:10px;">
                         <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
-                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, orange_week, red_week)}</div>
+                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week)}</div>
                     </div>
                     <div class="header-stats" style="margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap;">
                         {f'<span class="stat-item" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
