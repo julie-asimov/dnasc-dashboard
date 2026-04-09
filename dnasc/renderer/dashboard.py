@@ -1757,6 +1757,7 @@ def render_all_projects_dashboard(
     # =========================================================================
 
     _BUCKET_STAGES = [
+        ('In Design',    '#cbd5e1'),
         ('Vendor Parts', '#94a3b8'),
         ('PL1 Build',   '#60a5fa'),
         ('PCR',         '#38bdf8'),
@@ -1984,9 +1985,12 @@ def render_all_projects_dashboard(
                 )
             )
 
-            if not is_finished and status != 'CANCELED' and has_real_workorders:
-                _stage = _classify_stage(r_df, is_stalled, is_blocked)
-                stage_counts[_stage] = stage_counts.get(_stage, 0) + 1
+            if not is_finished and status != 'CANCELED':
+                if not has_real_workorders:
+                    stage_counts['In Design'] = stage_counts.get('In Design', 0) + 1
+                else:
+                    _stage = _classify_stage(r_df, is_stalled, is_blocked)
+                    stage_counts[_stage] = stage_counts.get(_stage, 0) + 1
 
             if is_finished: count_fulfilled += 1; fulfilled_req_list.append((rid, r_df))
             elif status == 'CANCELED':
