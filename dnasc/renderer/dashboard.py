@@ -579,7 +579,15 @@ def render_all_projects_dashboard(
     /* PART TAGS */
     .part-tag { background: #f0f0f2; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; margin-right: 2px; border: 1px solid #e5e5e7; }
     .part-tag.in-production { background: #fffbeb; color: #d97706; border: 1px dashed #fcd34d; }
-    .part-tag.missing { background: #fdf2f8; color: #be185d; border: 1px solid #f9a8d4; font-weight: 700; }
+    .part-tag.missing { background: #fdf2f8; color: #be185d; border: 1px solid #f9a8d4; font-weight: 700; cursor: default; }
+    .missing-tip-wrap { position: relative; display: inline-block; }
+    .missing-tip { display: none; position: absolute; bottom: calc(100% + 4px); left: 0; background: #1e293b;
+        border: 1px solid #334155; border-radius: 4px; padding: 5px 8px; z-index: 9999; min-width: 220px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4); pointer-events: none; }
+    .missing-tip-wrap:hover .missing-tip { display: block; }
+    .missing-tip-req { font-family: monospace; font-size: 8px; color: #94a3b8; margin-bottom: 2px; }
+    .missing-tip-exp { font-size: 9px; font-weight: 700; color: #e2e8f0; }
+    .missing-tip-status { font-size: 8px; color: #be185d; font-weight: 600; margin-top: 2px; }
     .colony-badge { font-size: 7px; padding: 1px 3px; border-radius: 2px; font-weight: 600; }
     .tat-cell { font-family: monospace; color: #86868b; font-size: 8px; white-space: nowrap; }
 
@@ -1453,9 +1461,24 @@ def render_all_projects_dashboard(
                     clean_name = part_name.split(':')[0].strip()
                     if not clean_name: return ""
                     if clean_name in waiting_items:
-                        if clean_name in tree_stock_ids: return f'<span class="part-tag in-production" title="Being made in this workflow">{label_prefix}{clean_name}</span>'
-                        else: return f'<span class="part-tag missing" title="Missing material">{label_prefix}{clean_name}</span>'
-                    else: return f'<span class="part-tag">{label_prefix}{clean_name}</span>'
+                        if clean_name in tree_stock_ids:
+                            return f'<span class="part-tag in-production" title="Being made in this workflow">{label_prefix}{clean_name}</span>'
+                        else:
+                            _tip_info = _stock_to_req.get(clean_name)
+                            if _tip_info:
+                                _tip_req = _tip_info['req_id'][:8] + '…' if len(_tip_info['req_id']) > 8 else _tip_info['req_id']
+                                _tip_html = (
+                                    f'<div class="missing-tip">'
+                                    f'<div class="missing-tip-req">REQ: {_tip_info["req_id"]}</div>'
+                                    f'<div class="missing-tip-exp">{_tip_info["exp_name"]}</div>'
+                                    f'<div class="missing-tip-status">In Progress · Part Waiting</div>'
+                                    f'</div>'
+                                )
+                                return f'<span class="missing-tip-wrap"><span class="part-tag missing">{label_prefix}{clean_name}</span>{_tip_html}</span>'
+                            else:
+                                return f'<span class="part-tag missing" title="Being built outside this workflow">{label_prefix}{clean_name}</span>'
+                    else:
+                        return f'<span class="part-tag">{label_prefix}{clean_name}</span>'
                 inputs_html = '<div class="parts-container">'
                 bb = row.get('backbone', '')
                 if pd.notna(bb) and ':' in bb: inputs_html += render_part_tag(bb, "BB: ")
@@ -1759,7 +1782,7 @@ def render_all_projects_dashboard(
     _BUCKET_STAGES = [
         ('In Design',    '#cbd5e1'),
         ('Vendor Parts', '#94a3b8'),
-        ('PL1 Build',   '#60a5fa'),
+        ('DV/PL1 Build', '#60a5fa'),
         ('PCR',         '#38bdf8'),
         ('Assembly',    '#a78bfa'),
         ('Assembly QC', '#818cf8'),
@@ -1769,60 +1792,6 @@ def render_all_projects_dashboard(
         ('Releasing',   '#f97316'),
         ('Stalled',     '#f87171'),
     ]
-
-    def _classify_stage(r_df, is_stalled, is_blocked):
-        """Return the pipeline stage bucket for a single active request."""
-        if is_stalled:
-            return 'Stalled'
-        ACTIVE_VIS    = {'WAITING', 'RUNNING', 'IN_PROGRESS', 'READY'}
-        ACTIVE_STATES = {'RD', 'RU'}
-
-        def _get(v):
-            return list(v) if isinstance(v, (list, np.ndarray)) else []
-
-        def _has_proto(rows_df, proto_set):
-            for _, _r in rows_df.iterrows():
-                for _p, _s in zip(_get(_r.get('protocol_name')), _get(_r.get('operation_state'))):
-                    if str(_p) in proto_set and str(_s) in ACTIVE_STATES:
-                        return True
-            return False
-
-        active = r_df[r_df['wo_status'] != 'CANCELED']
-        lsp    = active[active['type'] == 'lsp_workorder']
-        lsp_a  = lsp[lsp['visual_status'].isin(ACTIVE_VIS)]
-
-        if _has_proto(lsp_a, {'LSP Releasing'}):  return 'Releasing'
-        if _has_proto(lsp_a, {'LSP Reviewing'}):  return 'Reviewing'
-        if not lsp_a.empty and _has_proto(lsp_a, {'DNA Quantification', 'NGS Sequence Confirmation', 'Fragment Analyzer'}):
-            return 'LSP QC'
-        if not lsp_a.empty: return 'LSP'
-
-        asm_types = {'golden_gate_workorder', 'gibson_workorder', 'transformation_workorder',
-                     'streakout_operation', 'transformation_offline_operation'}
-        asm = active[active['type'].isin(asm_types)]
-        if _has_proto(asm, {'Rearray 96 to 384', 'DNA Quantification', 'NGS Sequence Confirmation'}):
-            return 'Assembly QC'
-        if not asm[asm['visual_status'].isin(ACTIVE_VIS | {'BLOCKED'})].empty:
-            return 'Assembly'
-
-        pcr_a = active[(active['type'] == 'pcr_workorder') & active['visual_status'].isin(ACTIVE_VIS)]
-        if not pcr_a.empty: return 'PCR'
-
-        pl1_a = active[
-            (active['type'] == 'plasmid_synthesis_workorder') &
-            (active['workorder_id'].astype(str) != active['root_work_order_id'].astype(str)) &
-            active['visual_status'].isin(ACTIVE_VIS)
-        ]
-        if not pl1_a.empty: return 'PL1 Build'
-
-        parts_a = active[
-            active['type'].isin({'oligo_synthesis_workorder', 'syn_part_synthesis_workorder',
-                                  'plasmid_synthesis_workorder'}) &
-            active['visual_status'].isin(ACTIVE_VIS)
-        ]
-        if not parts_a.empty: return 'Vendor Parts'
-
-        return 'Stalled'
 
     # Shared age-color palette — used by both timeline dots and stage view bars
     _BLUE_RAMP  = ['#bae6fd','#7dd3fc','#38bdf8','#0ea5e9','#0284c7','#0369a1','#075985','#0c4a6e']
@@ -1925,6 +1894,23 @@ def render_all_projects_dashboard(
             <div style="font-size:9px;color:rgba(255,255,255,0.45);margin-bottom:8px;font-family:monospace;">{total_str}</div>
             {rows}{legend}
         </div>'''
+
+    # Build STOCK_ID → request info lookup for missing-part tooltips.
+    # For each active (non-finished, non-canceled) workorder, map its STOCK_ID
+    # to the req_id and experiment_name that is building it.
+    _ACTIVE_VS = {'WAITING', 'RUNNING', 'IN_PROGRESS', 'READY', 'BLOCKED', 'LSP_RUNNING'}
+    _active_wo = df[df['visual_status'].isin(_ACTIVE_VS) & df['STOCK_ID'].notna()]
+    _stock_to_req: dict = {}
+    for _, _wr in _active_wo.iterrows():
+        _sid = str(_wr.get('STOCK_ID', '') or '').strip()
+        if not _sid or _sid in ('nan', 'None'): continue
+        if _sid in _stock_to_req: continue  # keep first hit
+        _stock_to_req[_sid] = {
+            'req_id':   str(_wr.get('req_id') or _wr.get('request_id') or ''),
+            'exp_name': str(_wr.get('experiment_name') or ''),
+            'status':   str(_wr.get('visual_status') or ''),
+            'wo_type':  str(_wr.get('type') or ''),
+        }
 
     for experiment_name, project_df in df.groupby('experiment_name', sort=False):
         # FIX: Filter out Canceled requests that have no real workorders
@@ -2064,7 +2050,70 @@ def render_all_projects_dashboard(
                     stage_counts.setdefault(_s, {})
                     stage_counts[_s][_week_bucket] = stage_counts[_s].get(_week_bucket, 0) + 1
                 else:
-                    _stage = _classify_stage(r_df, is_stalled, is_blocked)
+                    # Use same phase detection as the request badge (all_root_stocks-based)
+                    _rsm = {}
+                    for _rid2, _rdf2 in r_df.groupby('root_work_order_id'):
+                        _rw2 = _rdf2[_rdf2['workorder_id'] == _rid2]['STOCK_ID']
+                        _rs2 = str(_rw2.iloc[0]) if not _rw2.empty and pd.notna(_rw2.iloc[0]) else str(_rdf2['STOCK_ID'].iloc[0])
+                        if _rs2 not in ('nan', 'None', 'N/A'): _rsm[_rid2] = _rs2
+                    _ars = set(_rsm.values())
+                    _eff_a = active_rows[active_rows['visual_status'].isin({'RUNNING','READY','WAITING','BLOCKED','IN_PROGRESS','LSP_RUNNING'})]
+                    _lsp_s = _eff_a[_eff_a['type'] == 'lsp_workorder']
+                    _asm_s = _eff_a[(_eff_a['type'] != 'lsp_workorder') & _eff_a['STOCK_ID'].astype(str).isin(_ars)]
+                    _prt_s = _eff_a[(_eff_a['type'] != 'lsp_workorder') & ~_eff_a['STOCK_ID'].astype(str).isin(_ars)]
+                    def _ap(row):
+                        def _to_list(v):
+                            if isinstance(v, (list, np.ndarray)): return list(v)
+                            if isinstance(v, pd.Series): return list(v.dropna())
+                            if v is None or (isinstance(v, float) and pd.isna(v)): return []
+                            return list(v) if v else []
+                        pn = _to_list(row.get('protocol_name'))
+                        ps = _to_list(row.get('operation_state'))
+                        return {p for p, s in zip(pn, ps) if s in ('RD', 'RU')}
+                    if is_stalled:
+                        _stage = 'Stalled'
+                    elif not _lsp_s.empty:
+                        _tr = _lsp_s.iloc[0]; _p = _ap(_tr)
+                        if 'LSP Releasing' in _p: _stage = 'Releasing'
+                        elif 'LSP Reviewing' in _p: _stage = 'Reviewing'
+                        elif _p & {'DNA Quantification','NGS Sequence Confirmation','Fragment Analyzer'}: _stage = 'LSP QC'
+                        else: _stage = 'LSP'
+                    elif not _asm_s.empty:
+                        _asm_prog = _asm_s[_asm_s['visual_status'].isin({'RUNNING','READY','IN_PROGRESS','BLOCKED'})]
+                        if not _asm_prog.empty:
+                            _asm_prog = _asm_prog.copy()
+                            _asm_prog['_r'] = _asm_prog['visual_status'].map({'RUNNING':0,'READY':1,'IN_PROGRESS':2,'BLOCKED':3}).fillna(99)
+                            _tr = _asm_prog.sort_values('_r').iloc[0]; _p = _ap(_tr)
+                            if _p & {'DNA Quantification','NGS Sequence Confirmation'}: _stage = 'Assembly QC'
+                            else: _stage = 'Assembly'
+                        else:
+                            if not _prt_s.empty:
+                                _tr = _prt_s.iloc[0]
+                                if _tr['type'] == 'pcr_workorder': _stage = 'PCR'
+                                elif _tr['type'] == 'plasmid_synthesis_workorder' and str(_tr.get('workorder_id')) != str(_tr.get('root_work_order_id')): _stage = 'DV/PL1 Build'
+                                else: _stage = 'Vendor Parts'
+                            else:
+                                # WAITING GG, no parts in tree — look up backbone in full df
+                                _bb_stage = 'Vendor Parts'
+                                for _, _aw in _asm_s[_asm_s['visual_status'] == 'WAITING'].iterrows():
+                                    _bb = str(_aw.get('backbone') or '')
+                                    _bb_sid = _bb.split(':')[0].strip()
+                                    if _bb_sid and _bb_sid not in ('nan', 'None', ''):
+                                        _bb_info = _stock_to_req.get(_bb_sid)
+                                        if _bb_info:
+                                            _wt = _bb_info.get('wo_type', '')
+                                            if 'syn_part' in _wt or 'oligo' in _wt: _bb_stage = 'Vendor Parts'
+                                            else: _bb_stage = 'DV/PL1 Build'  # plasmid_synthesis, gibson, GG all = DV build
+                                        else:
+                                            _bb_stage = 'DV/PL1 Build'
+                                        break
+                                _stage = _bb_stage
+                    elif not _prt_s.empty:
+                        _tr = _prt_s.iloc[0]
+                        if _tr['type'] == 'pcr_workorder': _stage = 'PCR'
+                        elif _tr['type'] == 'plasmid_synthesis_workorder' and str(_tr.get('workorder_id')) != str(_tr.get('root_work_order_id')): _stage = 'DV/PL1 Build'
+                        else: _stage = 'Vendor Parts'
+                    else: _stage = 'Stalled'
                     stage_counts.setdefault(_stage, {})
                     stage_counts[_stage][_week_bucket] = stage_counts[_stage].get(_week_bucket, 0) + 1
 
