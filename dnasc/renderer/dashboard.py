@@ -1824,30 +1824,78 @@ def render_all_projects_dashboard(
 
         return 'Stalled'
 
-    def _render_bucket_chart(stage_counts):
-        """Render a horizontal bar chart showing all pipeline stages — zero counts
-        displayed as empty/dimmed so the full progression is always visible."""
-        total = sum(stage_counts.values())
-        max_c = max(stage_counts.values()) if total > 0 else 1
+    # Shared age-color palette — used by both timeline dots and stage view bars
+    _BLUE_RAMP  = ['#bae6fd','#7dd3fc','#38bdf8','#0ea5e9','#0284c7','#0369a1','#075985','#0c4a6e']
+    _WARN_COLOR = '#b45309'   # amber-700 — muted warm gold, easier on eyes
+    _OVER_COLOR = '#dc2626'   # red-600
+
+    def _age_color(age_weeks, yellow_limit, red_limit):
+        """Return hex color for a request based on its age and per-experiment thresholds."""
+        if age_weeks >= red_limit:
+            return _OVER_COLOR
+        if age_weeks >= yellow_limit:
+            return _WARN_COLOR
+        max_idx = max(yellow_limit - 1, 1)
+        idx = min(int(age_weeks / max_idx * (len(_BLUE_RAMP) - 1)), len(_BLUE_RAMP) - 1)
+        return _BLUE_RAMP[idx]
+
+    def _render_bucket_chart(stage_counts, yellow_limit, red_limit):
+        """Render a horizontal bar chart showing all pipeline stages.
+        On-track buckets use a light→dark sky-blue gradient (colorblind-safe).
+        Warning uses amber-gold. Overdue uses solid red."""
+        def _seg_color(bucket):
+            return _age_color(bucket, yellow_limit, red_limit)
+
+        def _txt_color(bucket):
+            # Lightest two blues need dark text for contrast; everything else white
+            if bucket < yellow_limit and bucket < 2:
+                return 'rgba(15,23,42,0.9)'
+            return 'rgba(255,255,255,0.95)'
+
+        total = sum(sum(wc.values()) for wc in stage_counts.values()) if stage_counts else 0
+        max_c = max((sum(wc.values()) for wc in stage_counts.values()), default=1)
         rows  = ''
-        for stage_key, color in _BUCKET_STAGES:
-            cnt   = stage_counts.get(stage_key, 0)
-            bar_w = max(3, int((cnt / max_c) * 160)) if cnt > 0 else 0
-            label_style = f"color:rgba(255,255,255,0.8);font-weight:600;" if cnt > 0 else "color:rgba(255,255,255,0.3);font-weight:400;"
-            bar_html = (
-                f'<div style="width:{bar_w}px;height:14px;background:{color};border-radius:3px;flex-shrink:0;"></div>'
-                if cnt > 0 else
-                f'<div style="width:100%;height:14px;background:rgba(255,255,255,0.07);border-radius:3px;border:1px dashed rgba(255,255,255,0.15);"></div>'
-            )
-            count_html = f'<span style="font-size:10px;color:white;font-weight:700;font-family:monospace;">{cnt}</span>' if cnt > 0 else ''
+        for stage_key, _ in _BUCKET_STAGES:
+            wc  = stage_counts.get(stage_key, {})
+            cnt = sum(wc.values())
+            label_style = "color:rgba(255,255,255,0.8);font-weight:600;" if cnt > 0 else "color:rgba(255,255,255,0.3);font-weight:400;"
+            if cnt == 0:
+                bar_html = '<div style="flex:1;height:20px;background:rgba(255,255,255,0.07);border-radius:3px;border:1px dashed rgba(255,255,255,0.15);"></div>'
+            else:
+                bar_total_w = max(20, int((cnt / max_c) * 200))
+                segs = ''
+                for bucket in range(9):
+                    bc = wc.get(bucket, 0)
+                    if bc == 0: continue
+                    seg_w = max(22, int((bc / cnt) * bar_total_w))
+                    color = _seg_color(bucket)
+                    tc    = _txt_color(bucket)
+                    age_label = f'{bucket}w' if bucket < 8 else '8w+'
+                    segs += (
+                        f'<div style="width:{seg_w}px;height:20px;background:{color};flex-shrink:0;'
+                        f'display:flex;flex-direction:column;align-items:center;justify-content:center;'
+                        f'overflow:hidden;cursor:default;" title="{age_label}: {bc}">'
+                        f'<span style="font-size:9px;font-weight:700;color:{tc};line-height:1;">{bc}</span>'
+                        f'<span style="font-size:7px;color:{tc};opacity:0.8;line-height:1;">{age_label}</span>'
+                        f'</div>'
+                    )
+                bar_html = f'<div style="display:flex;border-radius:3px;overflow:hidden;gap:1px;">{segs}</div>'
+            count_html = f'<span style="font-size:10px;color:white;font-weight:700;font-family:monospace;margin-left:4px;">{cnt}</span>' if cnt > 0 else ''
             rows += f'''<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
                 <div style="width:88px;font-size:9px;{label_style}text-align:right;white-space:nowrap;font-family:monospace;">{stage_key}</div>
-                <div style="flex:1;display:flex;align-items:center;gap:6px;">{bar_html}{count_html}</div>
+                <div style="flex:1;display:flex;align-items:center;">{bar_html}{count_html}</div>
             </div>'''
         total_str = f'{total} active request{"s" if total != 1 else ""}' if total > 0 else 'No active requests'
+        _mid_blue = _BLUE_RAMP[len(_BLUE_RAMP) // 2]
+        legend = f'''<div style="display:flex;gap:12px;margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.1);">
+            <span style="font-size:8px;color:rgba(255,255,255,0.5);display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_BLUE_RAMP[0]};border:1px solid rgba(255,255,255,0.25);border-radius:2px;display:inline-block;"></span>Newer</span>
+            <span style="font-size:8px;color:rgba(255,255,255,0.5);display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_mid_blue};border-radius:2px;display:inline-block;"></span>On Track</span>
+            <span style="font-size:8px;color:rgba(255,255,255,0.5);display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_WARN_COLOR};border-radius:2px;display:inline-block;"></span>Warning</span>
+            <span style="font-size:8px;color:rgba(255,255,255,0.5);display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_OVER_COLOR};border-radius:2px;display:inline-block;"></span>Overdue</span>
+        </div>'''
         return f'''<div style="padding:10px 14px 8px 14px;">
             <div style="font-size:9px;color:rgba(255,255,255,0.45);margin-bottom:8px;font-family:monospace;">{total_str}</div>
-            {rows}
+            {rows}{legend}
         </div>'''
 
     for experiment_name, project_df in df.groupby('experiment_name', sort=False):
@@ -1912,7 +1960,7 @@ def render_all_projects_dashboard(
             status = str(r_df.get('request_status', ['NEW']).iloc[0]).upper()
             is_partner = 'true' in str(r_df.get('for_partner', ['false']).iloc[0]).lower()
             if is_partner: yellow_limit, red_limit = 4.0, 5.0
-            else: yellow_limit, red_limit = 6.0, 7.0
+            else: yellow_limit, red_limit = 5.0, 6.0
 
             ready_to_ship_time = None; final_release_time = None
             lsp_rows = r_df[r_df['type'] == 'lsp_workorder']
@@ -1934,14 +1982,10 @@ def render_all_projects_dashboard(
                 age_weeks = (production_end - r_created).days / 7
                 production_tats.append((production_end - r_created).days)
                 total_tats.append((total_end - r_created).days)
-                if age_weeks < yellow_limit: dot_color = "#0891b2"
-                elif age_weeks < red_limit: dot_color = "#f97316"
-                else: dot_color = "#be185d"
+                dot_color = _age_color(age_weeks, yellow_limit, red_limit)
             else:
                 age_weeks = (now - r_created).days / 7
-                if age_weeks >= red_limit: dot_color = "#be185d"
-                elif age_weeks >= yellow_limit: dot_color = "#f97316"
-                else: dot_color = "#0891b2"
+                dot_color = _age_color(age_weeks, yellow_limit, red_limit)
             pos = max(0, min(100, (age_weeks / 8) * 100))
 
             active_rows = r_df[r_df['wo_status'] != 'CANCELED']
@@ -1986,11 +2030,15 @@ def render_all_projects_dashboard(
             )
 
             if not is_finished and status != 'CANCELED':
+                _week_bucket = min(int(age_weeks), 8)
                 if not has_real_workorders:
-                    stage_counts['In Design'] = stage_counts.get('In Design', 0) + 1
+                    _s = 'In Design'
+                    stage_counts.setdefault(_s, {})
+                    stage_counts[_s][_week_bucket] = stage_counts[_s].get(_week_bucket, 0) + 1
                 else:
                     _stage = _classify_stage(r_df, is_stalled, is_blocked)
-                    stage_counts[_stage] = stage_counts.get(_stage, 0) + 1
+                    stage_counts.setdefault(_stage, {})
+                    stage_counts[_stage][_week_bucket] = stage_counts[_stage].get(_week_bucket, 0) + 1
 
             if is_finished: count_fulfilled += 1; fulfilled_req_list.append((rid, r_df))
             elif status == 'CANCELED':
@@ -2040,7 +2088,7 @@ def render_all_projects_dashboard(
                 tat_parts.append(f"<span style='background:rgba(255,255,255,0.2); color:white; padding:2px 6px; border-radius:3px; font-size:10px; white-space:nowrap;'>Avg Total: <span style='color:#67e8f9; font-weight:700;'>{weeks}w {days}d</span></span>")
             avg_tat_html = f'''<div style="display:flex; gap:10px; font-weight:700;">{" ".join(tat_parts)}</div>'''
 
-        orange_week = 4 if has_ptr else 6; red_week = 5 if has_ptr else 7
+        orange_week = 4 if has_ptr else 5; red_week = 5 if has_ptr else 6
         timeline_bar = f"""<div style="margin: 10px 12px 8px 12px; padding: 10px; background: rgba(0,0,0,0.15); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);"><div style="display:flex; justify-content:space-between; font-size:11px; color:rgba(255,255,255,1); margin-bottom:8px; font-family:monospace; font-weight:900; letter-spacing:1px; text-shadow: 0 1px 3px rgba(0,0,0,0.4);"><span>START</span><span>1w</span><span>2w</span><span>3w</span><span>4w</span><span>5w</span><span>6w</span><span>7w</span><span>8w+</span></div><div style="position:relative; width:100%; height:22px; background:rgba(255,255,255,0.15); border-radius:11px; box-shadow: inset 0 1px 4px rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2);">{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; width:1px; height:100%; background:rgba(255,255,255,0.1); z-index:1;"></div>' for w in range(1,8)])}<div style="position:absolute; left:{(orange_week/8)*100}%; width:2px; height:28px; background:#f97316; top:-3px; border-radius:1px; box-shadow: 0 0 6px rgba(249,115,22,0.6); z-index:2;"></div><div style="position:absolute; left:{(red_week/8)*100}%; width:2px; height:28px; background:#be185d; top:-3px; border-radius:1px; box-shadow: 0 0 6px rgba(190,24,93,0.6); z-index:2;"></div><div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div></div>
             <div style="display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:10px; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
               <div style="display:flex; align-items:center; gap:8px; color:white; font-size:9px; font-weight:600;">
@@ -2094,7 +2142,7 @@ def render_all_projects_dashboard(
                     </div>
                     <div style="margin-bottom:10px;">
                         <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
-                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts)}</div>
+                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, orange_week, red_week)}</div>
                     </div>
                     <div class="header-stats" style="margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap;">
                         {f'<span class="stat-item" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
