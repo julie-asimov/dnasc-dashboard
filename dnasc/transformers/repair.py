@@ -272,11 +272,29 @@ class RepairTransformer:
             .map(id_to_root)
             .fillna(df.loc[tfm_mask, "source_asm_process_id"])
         )
-        # Clear BIOS-derived request assignment for any Transformation whose
-        # root was resolved from its source well (source_asm_process_id set).
+        # Cross-request batch transformations: the transformation's own request_id
+        # differs from the GG root's request_id (i.e. a batch GG that assembled
+        # constructs for multiple requests simultaneously).  These should self-root
+        # so they appear in their own request section, not under the batch GG.
+        # Same-request transformations (the actual target for that GG) clear
+        # req_id/experiment_name as before so _finalize_metadata inherits from root.
+        root_req_map = df.set_index("workorder_id")["req_id"].to_dict()
         has_source = tfm_mask & df["source_asm_process_id"].notna()
-        df.loc[has_source, "req_id"]          = None
-        df.loc[has_source, "experiment_name"] = None
+        # Prefer the resolved root's req_id; if the root isn't in df (e.g. an
+        # older pre-cutoff GG that plan_roots picked but wasn't fetched), fall
+        # back to the direct source workorder's req_id.  This prevents a NaN
+        # root_req from falsely triggering cross-request self-rooting.
+        source_req = df.loc[has_source, "source_asm_process_id"].map(root_req_map)
+        root_req   = df.loc[has_source, "root_work_order_id"].map(root_req_map).fillna(source_req)
+        own_req    = df.loc[has_source, "req_id"]
+        cross_req  = own_req.notna() & root_req.notna() & (own_req != root_req)
+        # Revert cross-request transformations to self-root (keep their own req_id)
+        df.loc[has_source & cross_req, "root_work_order_id"] = (
+            df.loc[has_source & cross_req, "workorder_id"]
+        )
+        # Clear only same-request transformations so _finalize_metadata picks up root metadata
+        df.loc[has_source & ~cross_req, "req_id"]          = None
+        df.loc[has_source & ~cross_req, "experiment_name"] = None
         id_to_root.update(
             df[tfm_mask].dropna(subset=["root_work_order_id"])
             .set_index("workorder_id")["root_work_order_id"].astype(str).to_dict()

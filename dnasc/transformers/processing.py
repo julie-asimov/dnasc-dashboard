@@ -37,21 +37,9 @@ class ProcessingTransformer:
         # ── Cleanup: remove experiments with only canceled/empty work ─────────
         df = ProcessingTransformer._filter_canceled_experiments(df)
 
-        # ── Dedup on workorder_id ─────────────────────────────────────────────
-        # When a workorder appears in multiple AssemblyDesigns (multiple BQ rows),
-        # prefer: (1) the row where the workorder IS the AD root (is_fulfillment),
-        # then (2) the EARLIEST ad_created_at — the original AD context wins over
-        # later ADs that retroactively pulled the workorder in as a shared input.
-        df["is_fulfillment"] = df["workorder_id"] == df["root_work_order_id"]
-        sort_cols = ["workorder_id", "is_fulfillment"]
-        sort_asc  = [True, False]
-        if "ad_created_at" in df.columns:
-            sort_cols.append("ad_created_at")
-            sort_asc.append(True)
-        df = (
-            df.sort_values(sort_cols, ascending=sort_asc)
-            .drop_duplicates(subset=["workorder_id"])
-        )
+        # ── Dedup on workorder_id (safety net) ───────────────────────────────
+        # BQ now returns 1 row per workorder via assembly_plan_id join.
+        df = df.drop_duplicates(subset=["workorder_id"])
 
         # ── JSON parsing ──────────────────────────────────────────────────────
         df["backbone_json"] = df["backbone_json"].fillna("{}")

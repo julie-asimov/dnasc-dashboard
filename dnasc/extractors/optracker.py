@@ -28,13 +28,11 @@ class OpTrackerExtractor:
 
         query = f"""
         WITH kicked_back_jobs AS (
-          -- Pattern 1: Failed Precheck (PCR, Gibson, GoldenGate)
+          -- Pattern 1: Failed Precheck where user chose "Retry all Operations" (user_input=0).
+          -- user_input=1 means "Continue with manual protocol" — PCR still ran, not a kickback.
           SELECT id AS job_id
           FROM `{proj}.op_tracker__src.op_tracker_api_job`
-          WHERE EXISTS (
-            SELECT 1 FROM UNNEST(JSON_EXTRACT_ARRAY(step_groups)) AS sg
-            WHERE JSON_EXTRACT_SCALAR(sg, '$.name') = 'Failed Precheck'
-          )
+          WHERE REGEXP_CONTAINS(step_groups, r'"tag":\s*"manual-run"[^}}]*"user_input":\s*0')
           UNION DISTINCT
           -- Pattern 2: Confirmation step where user actually chose Retry.
           -- user_input=0 means "Continue" was selected (job ran fine, not a kickback).

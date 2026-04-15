@@ -263,6 +263,27 @@ def render_all_projects_dashboard(
             found_wells = re.findall(r'\b(\d{5,8})\b', search_text)
             for w in found_wells: well_to_root[w] = root
 
+    # Global parts lookup: stock_id → list of parts row dicts across ALL requests.
+    # Lets GG/Gibson sections fan in syn parts / PCR workorders that belong to a
+    # different request but are referenced in the GG's parts_json / backbone_json.
+    # Also includes fulfills_request=False GG/Gibson workorders (intermediate plasmids
+    # assembled as inputs) so they can be fanned in to the main assembly's Parts section.
+    _global_parts_rows_by_stock: dict = {}
+    _global_parts_types = {'oligo_synthesis_workorder', 'pcr_workorder',
+                           'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder'}
+    _global_asm_types = {'gibson_workorder', 'golden_gate_workorder'}
+    for _, _gpr in df[df['type'].isin(_global_parts_types | _global_asm_types)].iterrows():
+        if _gpr.get('type') in _global_asm_types and _gpr.get('fulfills_request') != False:
+            continue
+        _gsid = str(_gpr.get('STOCK_ID', '') or '').strip()
+        if _gsid and _gsid not in ('nan', 'None', ''):
+            _global_parts_rows_by_stock.setdefault(_gsid, []).append(_gpr.to_dict())
+
+    # Lookup: workorder_id → assembly_plan_id (used to validate cross-request fan-in)
+    _wid_to_assembly_plan_id: dict = {}
+    for _, _r in df[df['assembly_plan_id'].notna()].iterrows():
+        _wid_to_assembly_plan_id[str(_r['workorder_id'])] = str(_r['assembly_plan_id'])
+
     for _, row in df.iterrows():
         wid = str(row['workorder_id'])
         _jid = row.get('job_id')
@@ -639,15 +660,18 @@ def render_all_projects_dashboard(
     var _filterTimer = null;
     function filterDashboardDebounced() {
         clearTimeout(_filterTimer);
-        _filterTimer = setTimeout(filterDashboard, 300);
+        _filterTimer = setTimeout(filterDashboard, 400);
     }
     function filterDashboard() {
         var searchTerm = document.getElementById('search_box').value.toLowerCase().trim();
         var activeOnly = document.getElementById('active_toggle').checked;
+        // Don't search on a single character — too many matches causes DOM freeze
+        if (searchTerm.length === 1) { return; }
         try { localStorage.setItem('dash_activeOnly', activeOnly ? '1' : '0'); } catch(e) {}
         try { localStorage.setItem('dash_search', document.getElementById('search_box').value); } catch(e) {}
         document.querySelectorAll('.search-match').forEach(function(el) { el.classList.remove('search-match'); });
         document.querySelectorAll('.search-match-section').forEach(function(el) { el.classList.remove('search-match-section'); });
+        document.querySelectorAll('.req-card').forEach(function(el) { el.style.display = ''; });
         var projects = document.getElementsByClassName('project-wrapper');
         var firstTarget = null;
         for (var i = 0; i < projects.length; i++) {
@@ -657,35 +681,32 @@ def render_all_projects_dashboard(
             if (searchTerm) {
                 if (!project.textContent.toLowerCase().includes(searchTerm)) { project.style.display = 'none'; continue; }
                 project.style.display = 'block';
-                project.querySelectorAll('details').forEach(function(d) {
-                    if (d.textContent.toLowerCase().includes(searchTerm)) d.open = true;
-                });
-                project.querySelectorAll('div[id^="req_"]').forEach(function(reqEl) {
-                    if (!reqEl.textContent.toLowerCase().includes(searchTerm)) return;
-                    reqEl.style.display = 'block';
-                    var reqIcon = document.getElementById(reqEl.id + '_icon');
-                    if (reqIcon) reqIcon.classList.add('open');
-                    reqEl.querySelectorAll('.assembly-section').forEach(function(section) {
-                        if (!section.textContent.toLowerCase().includes(searchTerm)) return;
-                        section.classList.add('search-match-section');
-                        var pane = section.querySelector('.content-pane');
-                        if (pane) {
-                            pane.style.display = 'block';
-                            var paneBtn = document.getElementById(pane.id + '_btn');
-                            if (paneBtn) paneBtn.classList.add('active-header');
-                            var paneIcon = document.getElementById(pane.id + '_icon');
-                            if (paneIcon) paneIcon.classList.add('open');
+                project.querySelectorAll('.req-card').forEach(function(reqCard) {
+                    if (!reqCard.textContent.toLowerCase().includes(searchTerm)) {
+                        reqCard.style.display = 'none'; return;
+                    }
+                    reqCard.style.display = 'block';
+                    // Open the parent <details> so the card is actually visible.
+                    var parentDetails = reqCard.closest('details');
+                    if (parentDetails) parentDetails.open = true;
+                    // Highlight the title bar — don't touch the content pane (that would open the dropdown).
+                    var titleBar = reqCard.querySelector('.req-title-bar');
+                    if (titleBar) {
+                        titleBar.classList.add('search-match-section');
+                        if (!firstTarget) firstTarget = reqCard;
+                    }
+                    // Pre-mark matching rows inside so they're highlighted when opened manually.
+                    reqCard.querySelectorAll('tr').forEach(function(row) {
+                        if (row.textContent.toLowerCase().includes(searchTerm)) {
+                            row.classList.add('search-match');
                         }
-                        section.querySelectorAll('tr').forEach(function(row) {
-                            if (row.textContent.toLowerCase().includes(searchTerm)) {
-                                row.classList.add('search-match');
-                                if (!firstTarget) firstTarget = row;
-                            }
-                        });
                     });
                 });
             } else {
                 project.style.display = 'block';
+                project.querySelectorAll('.req-card').forEach(function(reqCard) {
+                    reqCard.style.display = 'block';
+                });
             }
         }
         if (firstTarget && searchTerm) {
@@ -881,7 +902,28 @@ def render_all_projects_dashboard(
                         parts_active['_rank'] = parts_active['_eff_status'].map(_parts_priority).fillna(99)
                         target_row = parts_active.sort_values('_rank').iloc[0]
                     else:
-                        target_row = asm_active.iloc[0]
+                        # parts_active empty — check cross-request fanned-in parts via
+                        # global lookup (parts belonging to other req_ids but referenced
+                        # in this GG's backbone/parts_json).
+                        _xreq_candidates = []
+                        for _aw in asm_active.itertuples():
+                            for _fld in ('backbone', 'parts'):
+                                _raw = getattr(_aw, _fld, None) or ''
+                                if pd.isna(_raw): continue
+                                for _tok in str(_raw).split(','):
+                                    _sname = _tok.split(':')[0].strip()
+                                    for _gpr in _global_parts_rows_by_stock.get(_sname, []):
+                                        _xreq_candidates.append(_gpr)
+                        if _xreq_candidates:
+                            _xdf = pd.DataFrame(_xreq_candidates)
+                            _xdf['_eff_status'] = _xdf.apply(lambda r: get_visual_status(r)[0], axis=1)
+                            _xdf_active = _xdf[_xdf['_eff_status'].isin(_parts_priority)]
+                            if not _xdf_active.empty:
+                                _xdf_active = _xdf_active.copy()
+                                _xdf_active['_rank'] = _xdf_active['_eff_status'].map(_parts_priority).fillna(99)
+                                target_row = _xdf_active.sort_values('_rank').iloc[0].to_dict()
+                        if target_row is None:
+                            target_row = asm_active.iloc[0]
                     phase_label = "PARTS"
                     phase_bg = "#ffedd5"
                     phase_color = "#c2410c"
@@ -1025,7 +1067,10 @@ def render_all_projects_dashboard(
                             <div style="font-size: 1px;">{time_badges_html}</div>
                         </div>
                     </div>
-                    <div style="margin-top: 4px; color: #94a3b8; font-size: 10px; font-family: monospace; letter-spacing: -0.2px;">REQ ID: {req_id}{(' · ' + _req_email) if _req_email else ''}</div>
+                    <div style="margin-top: 4px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <span style="color: #94a3b8; font-size: 10px; font-family: monospace; letter-spacing: -0.2px;">REQ ID: {req_id}</span>
+                        {(f'<span style="color: #1e40af; font-size: 10px; font-family: monospace; font-weight: 600;">{_req_email}</span>') if _req_email else ''}
+                    </div>
                 </div>
                 <div style="display: flex; gap: 8px; align-items: center;">
                     {customer_badge}{partner_badge}
@@ -1047,7 +1092,16 @@ def render_all_projects_dashboard(
         is_req_fulfilled = str(req_status).upper() in ['FULFILLED', 'SUCCEEDED']
         root_status_map = {}
         has_winner = False
+        _req_wid_set = set(req_df['workorder_id'].astype(str))
         for root_id, r_df in req_df.groupby('root_work_order_id'):
+            # Skip roots whose root workorder belongs to a different request.
+            # These are cross-request synthesis parts (e.g. synparts ordered for
+            # another GG) — they'll appear fanned in under that GG's section.
+            # Exempt LSP workorders: their root may be a source Gibson from a
+            # different request (or a LIMS batch ID), but they belong here.
+            has_lsp = r_df['type'].eq('lsp_workorder').any()
+            if not has_lsp and str(root_id) not in _req_wid_set:
+                continue
             is_winner = False
             if is_req_fulfilled:
                 if r_df['fulfills_request'].any() or r_df['wo_status'].isin(['SUCCEEDED', 'FULFILLED']).any():
@@ -1058,14 +1112,212 @@ def render_all_projects_dashboard(
             root_status_map[root_id] = {'is_winner': is_winner, 'rank': min_rank}
         sorted_roots = sorted(root_status_map.keys(), key=lambda r: (not root_status_map[r]['is_winner'], root_status_map[r]['rank']))
 
+        # Pre-compute request-level attempt numbering for assembly roots.
+        # With self-rooting each Gibson/GG is its own root section, so per-section
+        # attempt counting always gives len=1 and never fires. We need to count
+        # across all root sections in the request.
+        _asm_types_req = {'golden_gate_workorder', 'gibson_workorder'}
+        _asm_types_dfs = _asm_types_req
+        _parts_types_dfs = {'oligo_synthesis_workorder', 'pcr_workorder',
+                            'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder'}
+
+        # Pre-compute parts fan-out: parts with an assembly_plan_id shared by GG/Gibson
+        # sections should display under EVERY assembly section in the request, not just one.
+        _plan_to_asm_root_ids: dict = {}   # plan_id → set of root_work_order_ids that contain GG rows
+        _plan_to_part_rows: dict   = {}    # plan_id → list of parts row dicts (from any root)
+        _suppress_part_root_ids: set = set()  # standalone parts-only root_ids to skip
+        if 'assembly_plan_id' in req_df.columns:
+            for _, _fan_r in req_df.iterrows():
+                _fan_pid  = _fan_r.get('assembly_plan_id')
+                _fan_type = _fan_r.get('type', '')
+                _fan_rwid = str(_fan_r.get('root_work_order_id', ''))
+                if pd.isna(_fan_pid) or not _fan_pid:
+                    continue
+                if _fan_type in _asm_types_dfs:
+                    _plan_to_asm_root_ids.setdefault(_fan_pid, set()).add(_fan_rwid)
+                elif _fan_type in _parts_types_dfs:
+                    _plan_to_part_rows.setdefault(_fan_pid, []).append(_fan_r.to_dict())
+            # Plans that have both GG sections and parts: parts outside an asm root get suppressed
+            for _fan_pid in set(_plan_to_asm_root_ids) & set(_plan_to_part_rows):
+                for _fan_prow in _plan_to_part_rows[_fan_pid]:
+                    _fan_prwid = str(_fan_prow.get('root_work_order_id', ''))
+                    if _fan_prwid not in _plan_to_asm_root_ids.get(_fan_pid, set()):
+                        _suppress_part_root_ids.add(_fan_prwid)
+
+        # Pre-compute request-level attempt map for self-rooted GG/Gibson sections.
+        # Pass 1: same-plan RETRY grouping — same-plan GGs collapse into one section via
+        # plan_attempt_roots so each plan has at most one self-rooted anchor here.
+        # Pass 2: cross-plan MANUAL grouping — catches manual retries where a new assembly
+        # plan is created for the same construct. Groups by (STOCK_ID, backbone_json,
+        # parts_json) so only identical-design GGs are grouped; different designs that
+        # happen to share a STOCK_ID are NOT grouped. CANCELED already excluded below.
+        _req_asm_attempt_map: dict = {}  # root_id → (attempt_number, attempt_total, attempt_kind)
+        _req_asm_roots_info = []  # (root_id, plan, wo_created_at, stock_id, backbone, parts)
+        for _r in sorted_roots:
+            _rrows = req_df[req_df['workorder_id'] == _r]
+            if _rrows.empty:
+                continue
+            _rrow = _rrows.iloc[0]
+            if _rrow.get('type', '') not in _asm_types_req:
+                continue
+            if str(_rrow.get('wo_status', '') or '') in ('DRAFT', 'CANCELED'):
+                continue
+            # Only count sections where the root GG/Gibson is self-rooted
+            if str(_rrow.get('root_work_order_id', '')) != str(_r):
+                continue
+            _rplan = str(_rrow.get('assembly_plan_id', '') or '')
+            if not _rplan or _rplan in ('nan', 'None', ''):
+                continue
+            _rts = _rrow.get('wo_created_at') or pd.Timestamp.min
+            _rstock = str(_rrow.get('STOCK_ID', '') or '')
+            if _rstock in ('nan', 'None'): _rstock = ''
+            _rbb = str(_rrow.get('backbone_json', '') or '')
+            if _rbb in ('nan', 'None'): _rbb = ''
+            _rparts = str(_rrow.get('parts_json', '') or '')
+            if _rparts in ('nan', 'None'): _rparts = ''
+            _req_asm_roots_info.append((_r, _rplan, _rts, _rstock, _rbb, _rparts))
+        # Pass 1: same-plan RETRY
+        _req_asm_by_plan: dict = {}
+        for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
+            _req_asm_by_plan.setdefault(_rplan, []).append((_r, _rts))
+        for _plan, _ars in _req_asm_by_plan.items():
+            if len(_ars) > 1:
+                _ars.sort(key=lambda x: x[1])
+                for _ai, (_r, _) in enumerate(_ars, 1):
+                    _kind = '' if _ai == 1 else 'RETRY'
+                    _req_asm_attempt_map[_r] = (_ai, len(_ars), _kind)
+        # Pass 2: cross-plan MANUAL — group by (STOCK_ID, backbone, parts)
+        _req_asm_by_design_xplan: dict = {}
+        for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
+            if not _rstock or _r in _req_asm_attempt_map:
+                continue
+            _design_key = (_rstock, _rbb, _rparts)
+            _req_asm_by_design_xplan.setdefault(_design_key, []).append((_r, _rplan, _rts))
+        # Cross-plan sub-roots: fold into primary section (same as same-plan retries).
+        # _sec_asm_by_stock within the merged section handles attempt numbering.
+        _cross_plan_sub_roots: set = set()
+        _cross_plan_sub_roots_for: dict = {}  # primary_root → [sub_roots]
+        for _design_key, _ars in _req_asm_by_design_xplan.items():
+            if len(_ars) > 1:
+                _ars.sort(key=lambda x: x[2])
+                _primary = _ars[0][0]
+                for _r, _, _ in _ars[1:]:
+                    _cross_plan_sub_roots.add(_r)
+                    _cross_plan_sub_roots_for.setdefault(_primary, []).append(_r)
+                # Remove from attempt map — within-section numbering takes over
+                for _r, _, _ in _ars:
+                    _req_asm_attempt_map.pop(_r, None)
+
         for root_id in sorted_roots:
+            if root_id in _cross_plan_sub_roots:
+                continue
             root_df = req_df[req_df['root_work_order_id'] == root_id]
+            # Fold cross-plan same-design sub-roots into this primary section
+            for _sub in _cross_plan_sub_roots_for.get(root_id, []):
+                _sub_df = req_df[req_df['root_work_order_id'] == _sub]
+                if not _sub_df.empty:
+                    root_df = pd.concat([root_df, _sub_df]).drop_duplicates(subset='workorder_id')
+            # Fan in cross-request parts (synthesis types) routed here by ADWOA.
+            # These have root_work_order_id == root_id but belong to a different req_id.
+            # Only fan in when root_id belongs to this request — foreign-root sections
+            # (e.g. LSP sourced from another request's Gibson) must not pull in that
+            # Gibson's unrelated parts from other requests.
+            if str(root_id) in _req_wid_set:
+                _xreq_parts = df[
+                    (df['root_work_order_id'] == root_id) &
+                    ~df['workorder_id'].isin(req_df['workorder_id']) &
+                    df['type'].isin(_parts_types_dfs)
+                ]
+                if not _xreq_parts.empty:
+                    root_df = pd.concat([root_df, _xreq_parts]).drop_duplicates(subset='workorder_id')
+            # Skip parts-only roots whose rows will appear fanned under assembly sections
+            if root_id in _suppress_part_root_ids:
+                if not root_df['type'].isin(_asm_types_dfs | {'transformation_workorder', 'lsp_workorder'}).any():
+                    continue
             is_this_winner = root_status_map[root_id]['is_winner']
             section_class = "assembly-section"
             if is_req_fulfilled and has_winner and not is_this_winner: section_class += " dimmed"
-            row_map = {row['workorder_id']: row for _, row in root_df.iterrows()}
+            row_map = {row['workorder_id']: row.to_dict() for _, row in root_df.iterrows()}
             adj = defaultdict(list)
             roots_in_view = []
+            # Fan in parts rows from other roots that share the same assembly plan
+            _fanned_wids: set = set()
+            if 'assembly_plan_id' in req_df.columns:
+                _sec_plan_ids = {
+                    str(rrow.get('assembly_plan_id'))
+                    for rrow in row_map.values()
+                    if pd.notna(rrow.get('assembly_plan_id'))
+                }
+                for _fan_pid in _sec_plan_ids:
+                    if root_id in _plan_to_asm_root_ids.get(_fan_pid, set()):
+                        for _fan_prow in _plan_to_part_rows.get(_fan_pid, []):
+                            _fan_pwid  = str(_fan_prow.get('workorder_id', ''))
+                            _fan_prwid = str(_fan_prow.get('root_work_order_id', ''))
+                            # Only fan in parts already rooted to an asm section in
+                            # this request (retry case). Cross-request batch parts
+                            # that belong to other requests' GG roots are excluded
+                            # here and handled by the stock-ID fan-in below.
+                            if _fan_prwid not in _plan_to_asm_root_ids.get(_fan_pid, set()):
+                                continue
+                            if _fan_pwid not in row_map:
+                                row_map[_fan_pwid] = dict(_fan_prow)
+                                _fanned_wids.add(_fan_pwid)
+
+            # Cross-request STOCK_ID fan-in: for active assemblies, pull in parts
+            # referenced by STOCK_ID that have no direct ADWOA root here. Validate
+            # each candidate by checking that its root GG shares the same
+            # assembly_plan_id as the current GG — confirming they are part of the
+            # same design, not just a coincidental stock name match.
+            for _gg_wid, _gg_row in list(row_map.items()):
+                if _gg_row.get('type') not in _asm_types_dfs:
+                    continue
+                # Skip completed assemblies — parts already consumed.
+                if str(_gg_row.get('wo_status', '') or '') in ('SUCCEEDED', 'FAILED', 'CANCELED'):
+                    continue
+                _gg_plan_id = str(_gg_row.get('assembly_plan_id', '') or '')
+                if not _gg_plan_id or _gg_plan_id in ('nan', 'None', ''):
+                    continue
+                _needed_stocks: set = set()
+                _bb = _gg_row.get('backbone', '')
+                if _bb and pd.notna(_bb):
+                    _bb_name = str(_bb).split(':')[0].strip()
+                    if _bb_name:
+                        _needed_stocks.add(_bb_name)
+                _pts = _gg_row.get('parts', '')
+                if _pts and pd.notna(_pts):
+                    for _pt in str(_pts).split(','):
+                        _pt_name = _pt.split(':')[0].strip()
+                        if _pt_name:
+                            _needed_stocks.add(_pt_name)
+                for _ns in _needed_stocks:
+                    _candidates = _global_parts_rows_by_stock.get(_ns, [])
+                    if not _candidates:
+                        continue
+                    if any(str(_c.get('workorder_id', '')) in row_map for _c in _candidates):
+                        continue
+                    # Only include candidates whose root GG shares the same assembly_plan_id
+                    _valid = []
+                    for _c in _candidates:
+                        _c_root = str(_c.get('root_work_order_id', '') or '')
+                        _c_plan = _wid_to_assembly_plan_id.get(_c_root, '') or str(_c.get('assembly_plan_id', '') or '')
+                        if _c_plan == _gg_plan_id:
+                            _valid.append(_c)
+                    if not _valid:
+                        continue
+                    # Among valid candidates pick the most active, then most recent
+                    _status_rank = {'RUNNING': 0, 'READY': 1, 'WAITING': 2,
+                                    'IN_PROGRESS': 3, 'SUCCEEDED': 4, 'FAILED': 5, 'CANCELED': 6}
+                    def _fan_rank(r):
+                        st = str(r.get('visual_status') or r.get('wo_status') or '')
+                        ts = r.get('wo_created_at')
+                        try: neg_ts = -ts.timestamp()
+                        except Exception: neg_ts = 0
+                        return (_status_rank.get(st, 99), neg_ts)
+                    _best = min(_valid, key=_fan_rank)
+                    _gpwid = str(_best.get('workorder_id', ''))
+                    if _gpwid not in row_map:
+                        row_map[_gpwid] = dict(_best)
+                        _fanned_wids.add(_gpwid)
 
             for _, row in root_df.iterrows():
                 wid = row['workorder_id']
@@ -1107,10 +1359,12 @@ def render_all_projects_dashboard(
                         except:
                             pass
             roots_in_view.sort(key=lambda x: 0 if x == root_id else 1)
+            # Fanned-in parts have no parent in this section — add them as roots
+            for _fan_pwid in _fanned_wids:
+                if _fan_pwid not in adj:
+                    roots_in_view.append(_fan_pwid)
 
             # Separate assembly roots from vendor parts roots so they render in distinct sections
-            _asm_types_dfs = {'golden_gate_workorder', 'gibson_workorder'}
-            _parts_types_dfs = {'oligo_synthesis_workorder', 'pcr_workorder', 'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder'}
             def _root_will_render(wid):
                 """Returns True if this root row will not be skipped by the CANCELED+no-ops filter."""
                 r = row_map.get(wid, {})
@@ -1119,14 +1373,22 @@ def render_all_projects_dashboard(
                 if hasattr(_pn, 'tolist'): _pn = _pn.tolist()
                 return isinstance(_pn, list) and len(_pn) > 0
 
-            asm_roots_list = [r for r in roots_in_view if r in row_map and row_map[r].get('type') in _asm_types_dfs]
-            parts_roots_list = [r for r in roots_in_view if r in row_map and row_map[r].get('type') in _parts_types_dfs]
-            other_roots_list = [r for r in roots_in_view if r not in asm_roots_list and r not in parts_roots_list]
+            # fulfills_request=False GG/Gibson are intermediate plasmids assembled as
+            # inputs to the main assembly — treat them as parts, not as assembly sections.
+            asm_roots_list = [r for r in roots_in_view if r in row_map
+                              and row_map[r].get('type') in _asm_types_dfs
+                              and row_map[r].get('fulfills_request', True) != False]
+            parts_roots_list = [r for r in roots_in_view if r in row_map
+                                and (
+                                    (row_map[r].get('type') in _parts_types_dfs and row_map[r].get('wo_status') != 'DRAFT')
+                                    or (row_map[r].get('type') in _asm_types_dfs and row_map[r].get('fulfills_request', True) == False)
+                                )]
+            other_roots_list = [r for r in roots_in_view if r not in asm_roots_list and r not in parts_roots_list and not (row_map.get(r, {}).get('type') in _parts_types_dfs and row_map.get(r, {}).get('wo_status') == 'DRAFT')]
 
             # Sort assembly roots by created_at and assign attempt numbers when there are retries.
             # Only count roots that will actually render (not CANCELED with no queue data).
             asm_roots_list.sort(key=lambda x: (row_map[x].get('wo_created_at') or pd.Timestamp.min))
-            visible_asm_roots = [r for r in asm_roots_list if _root_will_render(r)]
+            visible_asm_roots = [r for r in asm_roots_list if _root_will_render(r) and row_map[r].get('wo_status') != 'DRAFT']
             # Compute best downstream status for each assembly root's chain
             _chain_status_rank = {'SUCCEEDED': 0, 'READY': 1, 'RUNNING': 2, 'IN_PROGRESS': 3, 'WAITING': 4, 'BLOCKED': 5, 'FAILED': 6, 'CANCELED': 7}
             def _subtree_best_status(node_id):
@@ -1137,15 +1399,39 @@ def render_all_projects_dashboard(
                         best = child_best
                 return best
 
+            # Section-level attempt numbering: only group roots with the same STOCK_ID.
+            # Fanned-in Gibsons from other requests may appear in visible_asm_roots but
+            # have different STOCK_IDs — they must NOT be numbered as attempts of each other.
             if len(visible_asm_roots) > 1:
-                for _ai, _ar in enumerate(visible_asm_roots, 1):
-                    row_map[_ar]['_attempt_number'] = _ai
-                    row_map[_ar]['_attempt_total'] = len(visible_asm_roots)
+                _sec_asm_by_stock: dict = {}
+                for _ar in visible_asm_roots:
+                    _arstock = str(row_map[_ar].get('STOCK_ID', '') or '')
+                    _sec_asm_by_stock.setdefault(_arstock, []).append(_ar)
+                for _arstock, _ars in _sec_asm_by_stock.items():
+                    if len(_ars) > 1:
+                        for _ai, _ar in enumerate(_ars, 1):
+                            row_map[_ar]['_attempt_number'] = _ai
+                            row_map[_ar]['_attempt_total'] = len(_ars)
+                            if _ai > 1:
+                                _ar_resubmit = row_map[_ar].get('resubmit_count')
+                                _ar_is_retry = (isinstance(_ar_resubmit, (int, float))
+                                                and not pd.isna(_ar_resubmit)
+                                                and int(_ar_resubmit) > 0)
+                                row_map[_ar]['_attempt_kind'] = 'RETRY' if _ar_is_retry else 'MANUAL'
             # Always assign chain status for assembly roots (even single-attempt, used in banner)
             for _ar in visible_asm_roots:
                 row_map[_ar]['_attempt_chain_status'] = _subtree_best_status(_ar)
+            # Apply request-level attempt numbers to the section root (self-rooted GGs only).
+            # Multiple GGs within one section are already handled by _sec_asm_by_stock above.
+            if root_id in _req_asm_attempt_map and root_id in row_map:
+                row_map[root_id]['_attempt_number'] = _req_asm_attempt_map[root_id][0]
+                row_map[root_id]['_attempt_total'] = _req_asm_attempt_map[root_id][1]
+                if _req_asm_attempt_map[root_id][2]:
+                    row_map[root_id]['_attempt_kind'] = _req_asm_attempt_map[root_id][2]
 
-            # Assign attempt numbers within parts: group by (type, STOCK_ID), sort by wo_created_at
+            # Assign attempt numbers within parts: group by (type, STOCK_ID), sort by wo_created_at.
+            # A retry = same part ordered again for a DIFFERENT root (GG retry attempt).
+            # Multiple parts with same STOCK_ID under the SAME root = parallel scale-up, not retries.
             from collections import defaultdict as _dd
             _parts_by_key = _dd(list)
             for _pr in parts_roots_list:
@@ -1153,7 +1439,16 @@ def render_all_projects_dashboard(
                 _key = (_prow.get('type', ''), str(_prow.get('STOCK_ID', '') or ''))
                 _parts_by_key[_key].append(_pr)
             for _key, _prs in _parts_by_key.items():
-                if len(_prs) > 1:
+                if len(_prs) > 1 and _key[0] == 'pcr_workorder':
+                    # Use resubmit_count from BIOS as the authoritative retry signal.
+                    # resubmit_count > 0 means BIOS created this workorder as a resubmission.
+                    # Only label the group when at least one workorder was resubmitted.
+                    _has_resubmit = any(
+                        (row_map[x].get('resubmit_count') or 0) > 0
+                        for x in _prs
+                    )
+                    if not _has_resubmit:
+                        continue
                     _prs.sort(key=lambda x: (row_map[x].get('wo_created_at') or pd.Timestamp.min))
                     for _pi, _pr in enumerate(_prs, 1):
                         row_map[_pr]['_attempt_number'] = _pi
@@ -1167,6 +1462,31 @@ def render_all_projects_dashboard(
                 row_map[x].get('wo_created_at') or pd.Timestamp.min
             ))
             parts_roots_list = _single_parts + _retry_parts
+
+            # Filter parts to only those whose STOCK_ID is explicitly referenced
+            # in a GG/Gibson row's backbone or parts columns.  Batch assembly plans
+            # order syn parts for many constructs under one plan root; without this
+            # filter all batch parts pile up under the single winning GG.
+            _needed_stocks: set = set()
+            for _nrow in row_map.values():
+                if _nrow.get('type') not in _asm_types_dfs:
+                    continue
+                _bb = _nrow.get('backbone', '')
+                if _bb and pd.notna(_bb):
+                    _bn = str(_bb).split(':')[0].strip()
+                    if _bn: _needed_stocks.add(_bn)
+                _pts = _nrow.get('parts', '')
+                if _pts and pd.notna(_pts):
+                    for _pt in str(_pts).split(','):
+                        _pn = _pt.split(':')[0].strip()
+                        if _pn: _needed_stocks.add(_pn)
+            if _needed_stocks:
+                # Only filter fanned-in parts (cross-request/plan) by stock match.
+                # Native parts already rooted here (not in _fanned_wids) always show —
+                # oligo primers etc. aren't in the GG's parts/backbone columns.
+                parts_roots_list = [r for r in parts_roots_list
+                                    if r not in _fanned_wids
+                                    or str(row_map[r].get('STOCK_ID', '') or '') in _needed_stocks]
 
             ordered_data = []
             parts_ordered = []
@@ -1203,7 +1523,19 @@ def render_all_projects_dashboard(
                 elif not completed_lsps.empty: target_row = completed_lsps.iloc[0]
                 elif not failed_lsps.empty: target_row = failed_lsps.iloc[0]
                 else: target_row = lsp_rows.sort_values('wo_created_at', ascending=False).iloc[0]
-            if target_row is None: target_row = sorted_root_df.iloc[0] if not sorted_root_df.empty else root_df.iloc[0]
+            if target_row is None:
+                if asm_roots_list:
+                    # Multiple assembly attempts may exist (FAILED + RUNNING). Pick the most active.
+                    _asr = {'RUNNING': 0, 'IN_PROGRESS': 0, 'READY': 1, 'WAITING': 2, 'BLOCKED': 3, 'SUCCEEDED': 4, 'FAILED': 5, 'CANCELED': 6}
+                    _best_asm = min(asm_roots_list, key=lambda r: (
+                        _asr.get(str(row_map[r].get('visual_status') or row_map[r].get('wo_status') or ''), 99),
+                        -(row_map[r].get('wo_created_at').timestamp() if hasattr(row_map[r].get('wo_created_at'), 'timestamp') else 0)
+                    ))
+                    target_row = row_map[_best_asm]
+                elif not sorted_root_df.empty:
+                    target_row = sorted_root_df.iloc[0]
+                else:
+                    target_row = root_df.iloc[0]
             status = target_row['visual_status']
             # If the root assembly failed but a downstream streakout recovered
             # colonies, show SUCCEEDED in the header.  Only check streakout_operation
@@ -1244,21 +1576,32 @@ def render_all_projects_dashboard(
             root_workorder_row = root_df[root_df['workorder_id'] == root_id]
             if not root_workorder_row.empty: root_stock = root_workorder_row['STOCK_ID'].iloc[0]
             else: root_stock = root_df['STOCK_ID'].iloc[0]
-            if pd.isna(root_stock): root_stock = "N/A"
+            if pd.isna(root_stock) or str(root_stock).startswith('#'): root_stock = "N/A"
             assembly_types = [format_type_label(t) for t in ['golden_gate_workorder', 'gibson_workorder'] if (root_df['type'] == t).any()]
             assembly_label_text = ' + '.join(assembly_types) if assembly_types else 'Workflow'
             assembly_label = f"<b>{assembly_label_text}</b>"
             div_id = f"group_{req_id.replace('-', '_')}_{root_id.replace('-', '_')}"
-            type_counts = root_df['type'].value_counts()
+            _countable_df = root_df[~((root_df['wo_status'] == 'DRAFT') & root_df['type'].isin(_parts_types_dfs))]
+            type_counts = _countable_df['type'].value_counts()
             count_str = ", ".join([f"{count} {format_type_label(k).split()[0].upper()}" for k, count in type_counts.items()])
 
             html += f"""<div class="{section_class}"><button id="{div_id}_btn" class="dropdown-btn" onclick="toggleSection('{div_id}')"><span id="{div_id}_icon" class="dropdown-icon">▶</span><div class="assembly-info"><span class="assembly-type">{assembly_label}</span><span class="stock-tag" style="font-size:9px; padding:3px 8px; background:#ede9fe; color:#6d28d9; border: 1px solid #c4b5fd;">{root_stock}</span><span class="assembly-counts" style="font-weight: 600;">{count_str}</span><span class="wo-id-tag">Root: {root_id}</span></div><div class="status-badges">{badges_html}</div></button><div id="{div_id}" class="content-pane"><table class="wo-table"><thead><tr><th>Type</th><th>Workorder ID</th><th>Status</th><th>Stock ID</th><th>Created</th><th>TAT</th><th>Details</th><th style="width: 350px;">Queue</th></tr></thead><tbody>"""
 
             _emitted_parts_header = False
             _emitted_retry_header = False
+            # Pre-check: does this section have any non-CANCELED rows other than the root?
+            # Used to show a CANCELED root assembly that has no lab data of its own but
+            # whose inputs DID have work done (e.g. Gibson canceled after parts were built).
+            _section_inputs_have_work = any(
+                r.get('wo_status') != 'CANCELED'
+                for _, r in sorted_root_df.iterrows()
+                if str(r.get('workorder_id', '')) != str(root_id)
+            )
             for _, row in sorted_root_df.iterrows():
                 # Skip CANCELED workorders that never ran (no queue data) —
                 # these are abandoned attempts that clutter the timeline.
+                # Exception: show a CANCELED fulfills_request root when its input parts
+                # had real work done (the root is needed for context).
                 if row.get('wo_status') == 'CANCELED':
                     _pn = row.get('protocol_name')
                     if hasattr(_pn, 'tolist'):
@@ -1266,8 +1609,15 @@ def render_all_projects_dashboard(
                     if not isinstance(_pn, list):
                         _pn = []
                     if not _pn:
-                        continue
-                _is_parts_row = row.get('type') in _parts_types_dfs
+                        if (row.get('fulfills_request') == True
+                                and row.get('type') in ('gibson_workorder', 'golden_gate_workorder')
+                                and _section_inputs_have_work):
+                            pass  # show it — parts had work done
+                        else:
+                            continue
+                _is_parts_row = (row.get('type') in _parts_types_dfs
+                                 or (row.get('type') in _asm_types_dfs
+                                     and row.get('fulfills_request') == False))
                 _attempt_num = row.get('_attempt_number')
                 _has_attempt = isinstance(_attempt_num, (int, float)) and not (isinstance(_attempt_num, float) and pd.isna(_attempt_num))
                 _status_colors = {'SUCCEEDED': '#15803d', 'FAILED': '#be185d', 'RUNNING': '#0891b2', 'WAITING': '#d97706', 'READY': '#0d9488', 'DRAFT': '#64748b'}
@@ -1286,7 +1636,7 @@ def render_all_projects_dashboard(
                     _alabel = format_type_label(_atype)
                     _attempt_total = int(row.get('_attempt_total', 1))
                     _sid_raw = row.get('STOCK_ID')
-                    _sid_lbl = '' if (_sid_raw is None or (isinstance(_sid_raw, float) and pd.isna(_sid_raw)) or str(_sid_raw).lower() in ('nan', 'none', '')) else str(_sid_raw).strip()
+                    _sid_lbl = '' if (_sid_raw is None or (isinstance(_sid_raw, float) and pd.isna(_sid_raw)) or str(_sid_raw).lower() in ('nan', 'none', '') or str(_sid_raw).startswith('#')) else str(_sid_raw).strip()
                     _vstatus = row.get('visual_status', '') or ''
                     _vstatus = '' if (isinstance(_vstatus, float) and pd.isna(_vstatus)) else str(_vstatus)
                     _vcolor = _status_colors.get(_vstatus, '#64748b')
@@ -1302,7 +1652,10 @@ def render_all_projects_dashboard(
                     _astatus = row.get('visual_status', '') if (_cs_raw is None or (isinstance(_cs_raw, float) and pd.isna(_cs_raw))) else str(_cs_raw)
                     _astatus_color = _status_colors.get(_astatus, '#64748b')
                     _status_icon = '✓ ' if _astatus == 'SUCCEEDED' else '✗ ' if _astatus == 'FAILED' else ''
-                    html += f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:2px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{_alabel} — Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_astatus_color};">{_status_icon}{_astatus}</span></td></tr>"""
+                    _akind_raw = row.get('_attempt_kind', '')
+                    _akind = '' if (_akind_raw is None or (isinstance(_akind_raw, float) and pd.isna(_akind_raw)) or str(_akind_raw).lower() in ('nan', 'none', '')) else str(_akind_raw).strip()
+                    _akind_prefix = f'{_akind} ' if _akind else ''
+                    html += f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:2px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{_alabel} — {_akind_prefix}Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_astatus_color};">{_status_icon}{_astatus}</span></td></tr>"""
                 depth = row.get('tree_depth', 0)
                 row_class = f"tree-row-{min(depth, 2)}"  # CSS only has 0, 1, 2
                 spacer = ""
@@ -1764,6 +2117,8 @@ def render_all_projects_dashboard(
                             else: details_info += f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>'
                 _sid = row.get("STOCK_ID", "N/A")
                 _sid_str = str(_sid)
+                if _sid_str.startswith('#'):  # placeholder, not a real stock ID
+                    _sid_str = ""; _sid = ""
                 if _sid_str not in ("N/A", "nan", "None") and _sid_str in _primary_root_stocks:
                     _sid_class = "stock-id-badge matches-root"
                 elif _sid_str not in ("N/A", "nan", "None") and _sid_str in _secondary_root_stocks:
@@ -1808,7 +2163,7 @@ def render_all_projects_dashboard(
         idx = min(int(age_weeks / max_idx * (len(_BLUE_RAMP) - 1)), len(_BLUE_RAMP) - 1)
         return _BLUE_RAMP[idx]
 
-    def _render_bucket_chart(stage_counts, fulfilled_week_counts, yellow_limit, red_limit):
+    def _render_bucket_chart(stage_counts, fulfilled_week_counts, yellow_limit, red_limit, stage_items=None):
         """Render a horizontal bar chart showing all pipeline stages.
         On-track buckets use a light→dark sky-blue gradient (colorblind-safe).
         Warning uses amber-gold. Overdue uses solid red.
@@ -1868,10 +2223,19 @@ def render_all_projects_dashboard(
                     color = _seg_color(bucket)
                     tc    = _txt_color(bucket)
                     age_label = f'{bucket}w' if bucket < 8 else '8w+'
+                    _items = (stage_items or {}).get(stage_key, {}).get(bucket, [])
+                    if _items:
+                        _MAX = 12
+                        _shown = _items[:_MAX]
+                        _rest = len(_items) - _MAX
+                        _tip = f"{age_label}: {bc}\n" + "\n".join(_shown)
+                        if _rest > 0: _tip += f"\n… and {_rest} more"
+                    else:
+                        _tip = f"{age_label}: {bc}"
                     segs += (
                         f'<div style="width:{seg_w}px;height:20px;background:{color};flex-shrink:0;'
                         f'display:flex;flex-direction:column;align-items:center;justify-content:center;'
-                        f'overflow:hidden;cursor:default;" title="{age_label}: {bc}">'
+                        f'overflow:hidden;cursor:default;" title="{_tip}">'
                         f'<span style="font-size:9px;font-weight:700;color:{tc};line-height:1;">{bc}</span>'
                         f'<span style="font-size:7px;color:{tc};opacity:0.8;line-height:1;">{age_label}</span>'
                         f'</div>'
@@ -1912,6 +2276,19 @@ def render_all_projects_dashboard(
             'wo_type':  str(_wr.get('type') or ''),
         }
 
+    # Pre-compute canonical experiment for each req_id so that requests whose parts
+    # belong to a different experiment (cross-experiment fanning) are only rendered
+    # once — in the experiment that owns the root GG/Gibson workorder.
+    # Without this, a req_id appears in multiple project groups → duplicate div IDs
+    # → the second card's toggle never works (getElementById finds the first).
+    _asm_types_canon = {'golden_gate_workorder', 'gibson_workorder'}
+    _req_canon_exp: dict = {}
+    for _rc_rid, _rc_df in df.groupby('req_id'):
+        _gg = _rc_df[_rc_df['type'].isin(_asm_types_canon) & (_rc_df['fulfills_request'] == True)]
+        _exp_vals = _gg['experiment_name'].dropna() if not _gg.empty else _rc_df['experiment_name'].dropna()
+        if not _exp_vals.empty:
+            _req_canon_exp[_rc_rid] = _exp_vals.mode().iloc[0]
+
     for experiment_name, project_df in df.groupby('experiment_name', sort=False):
         # FIX: Filter out Canceled requests that have no real workorders
         # (This prevents 'Ghost' requests from inflating the count)
@@ -1944,7 +2321,7 @@ def render_all_projects_dashboard(
             f'<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px;background:{bg};color:{fg};border:1px solid {bd};">{lbl}</span>'
             for _, lbl, bg, fg, bd in _exp_customers
         )
-        dots_html = ""; stage_counts = {}; fulfilled_week_counts = {}
+        dots_html = ""; stage_counts = {}; stage_items = {}; fulfilled_week_counts = {}
         # Sort requests: newest first, but group base+variant construct names together.
         # Strip trailing _identifier suffix to find the base construct name, then use
         # the newest request_created_at in the base group as the anchor date so variants
@@ -1955,7 +2332,10 @@ def render_all_projects_dashboard(
         def _req_date(r_df):
             d = r_df['request_created_at'].iloc[0] if 'request_created_at' in r_df.columns else None
             return pd.Timestamp(d) if d and pd.notna(d) else pd.Timestamp.min
-        _raw_groups = list(project_df.groupby('req_id'))
+        _raw_groups = [
+            (rid, rdf) for rid, rdf in project_df.groupby('req_id')
+            if _req_canon_exp.get(rid, experiment_name) == experiment_name
+        ]
         _base_anchor = {}
         for _rid, _rdf in _raw_groups:
             _bc = _base_construct(_rdf)
@@ -2045,10 +2425,16 @@ def render_all_projects_dashboard(
 
             if not is_finished and status != 'CANCELED':
                 _week_bucket = min(int(age_weeks), 8)
+                # Build tooltip label: "STOCK_ID: construct_name" for this request
+                _tip_cn = str(r_df['construct_name'].iloc[0] if 'construct_name' in r_df.columns and not r_df['construct_name'].dropna().empty else '') or ''
+                _tip_sids = r_df[r_df['STOCK_ID'].notna()]['STOCK_ID'].dropna().unique().tolist()
+                _tip_sid = str(_tip_sids[0]) if _tip_sids else ''
+                _tip_label = f"{_tip_sid}: {_tip_cn}".strip(': ') if (_tip_sid or _tip_cn) else str(rid)[:8]
                 if not has_real_workorders:
                     _s = 'In Design'
                     stage_counts.setdefault(_s, {})
                     stage_counts[_s][_week_bucket] = stage_counts[_s].get(_week_bucket, 0) + 1
+                    stage_items.setdefault(_s, {}).setdefault(_week_bucket, []).append(_tip_label)
                 else:
                     # Use same phase detection as the request badge (all_root_stocks-based)
                     _rsm = {}
@@ -2090,12 +2476,34 @@ def render_all_projects_dashboard(
                             if not _prt_s.empty:
                                 _tr = _prt_s.iloc[0]
                                 if _tr['type'] == 'pcr_workorder': _stage = 'PCR'
-                                elif _tr['type'] == 'plasmid_synthesis_workorder' and str(_tr.get('workorder_id')) != str(_tr.get('root_work_order_id')): _stage = 'DV/PL1 Build'
+                                elif _tr['type'] == 'plasmid_synthesis_workorder' and not (_tr.get('vendor') and str(_tr.get('vendor')) not in ('nan','None','')): _stage = 'DV/PL1 Build'
                                 else: _stage = 'Vendor Parts'
                             else:
-                                # WAITING GG, no parts in tree — look up backbone in full df
+                                # WAITING GG, no parts in tree — check global parts lookup
+                                # then fall back to backbone lookup in full df.
                                 _bb_stage = 'Vendor Parts'
+                                _determined = False
                                 for _, _aw in _asm_s[_asm_s['visual_status'] == 'WAITING'].iterrows():
+                                    # Check parts list first against global lookup
+                                    for _fld in ('parts', 'backbone'):
+                                        _raw = str(_aw.get(_fld) or '')
+                                        for _tok in _raw.split(','):
+                                            _psid = _tok.split(':')[0].strip()
+                                            if not _psid or _psid in ('nan', 'None', ''): continue
+                                            for _gpr in _global_parts_rows_by_stock.get(_psid, []):
+                                                _gwt = str(_gpr.get('type', '') or '')
+                                                if 'syn_part' in _gwt or 'oligo' in _gwt:
+                                                    _bb_stage = 'Vendor Parts'; _determined = True; break
+                                                elif 'pcr' in _gwt:
+                                                    _bb_stage = 'PCR'; _determined = True; break
+                                                elif 'plasmid_synthesis' in _gwt:
+                                                    _v = str(_gpr.get('vendor') or '')
+                                                    _bb_stage = 'Vendor Parts' if _v not in ('', 'nan', 'None') else 'DV/PL1 Build'
+                                                    _determined = True; break
+                                            if _determined: break
+                                        if _determined: break
+                                    if _determined: break
+                                    # Backbone lookup via _stock_to_req as secondary check
                                     _bb = str(_aw.get('backbone') or '')
                                     _bb_sid = _bb.split(':')[0].strip()
                                     if _bb_sid and _bb_sid not in ('nan', 'None', ''):
@@ -2103,19 +2511,23 @@ def render_all_projects_dashboard(
                                         if _bb_info:
                                             _wt = _bb_info.get('wo_type', '')
                                             if 'syn_part' in _wt or 'oligo' in _wt: _bb_stage = 'Vendor Parts'
-                                            else: _bb_stage = 'DV/PL1 Build'  # plasmid_synthesis, gibson, GG all = DV build
-                                        else:
-                                            _bb_stage = 'DV/PL1 Build'
+                                            elif 'plasmid_synthesis' in _wt:
+                                                _bb_rows = _global_parts_rows_by_stock.get(_bb_sid, [])
+                                                _has_vendor = any(str(_r.get('vendor') or '') not in ('', 'nan', 'None') for _r in _bb_rows)
+                                                _bb_stage = 'Vendor Parts' if _has_vendor else 'DV/PL1 Build'
+                                            else: _bb_stage = 'DV/PL1 Build'
+                                        # else: backbone not being built → default Vendor Parts
                                         break
                                 _stage = _bb_stage
                     elif not _prt_s.empty:
                         _tr = _prt_s.iloc[0]
                         if _tr['type'] == 'pcr_workorder': _stage = 'PCR'
-                        elif _tr['type'] == 'plasmid_synthesis_workorder' and str(_tr.get('workorder_id')) != str(_tr.get('root_work_order_id')): _stage = 'DV/PL1 Build'
+                        elif _tr['type'] == 'plasmid_synthesis_workorder' and not (_tr.get('vendor') and str(_tr.get('vendor')) not in ('nan','None','')): _stage = 'DV/PL1 Build'
                         else: _stage = 'Vendor Parts'
                     else: _stage = 'Stalled'
                     stage_counts.setdefault(_stage, {})
                     stage_counts[_stage][_week_bucket] = stage_counts[_stage].get(_week_bucket, 0) + 1
+                    stage_items.setdefault(_stage, {}).setdefault(_week_bucket, []).append(_tip_label)
 
             if is_finished:
                 count_fulfilled += 1; fulfilled_req_list.append((rid, r_df))
@@ -2210,8 +2622,8 @@ def render_all_projects_dashboard(
                                 <div class="header-title" style="margin-bottom: 0; white-space: nowrap;">{experiment_name}</div>
                                 {exp_customer_tags}
                             </div>
-                            <div style="font-size: 9px; color: rgba(255,255,255,0.6); font-weight: 500; margin-top: 2px; font-family: monospace;">
-                                Created: {exp_created_str}{(f' &nbsp;<span style="color:rgba(255,255,255,0.85);font-weight:700;">' + _exp_email_str + '</span>') if _exp_email_str else ''}
+                            <div style="font-size: 11px; color: rgba(255,255,255,0.75); font-weight: 400; margin-top: 3px; font-family: inherit; letter-spacing: 0;">
+                                <span style="font-size: 10px; color: rgba(255,255,255,0.55);">Created: {exp_created_str}</span>{(f' &nbsp;<span style="color:#e0e7ff; font-weight:600; font-size:13px;">' + _exp_email_str + '</span>') if _exp_email_str else ''}
                             </div>
                         </div>
                         <div class="header-main-stat" style="margin-bottom: 0; font-size: 11px;">
@@ -2222,7 +2634,7 @@ def render_all_projects_dashboard(
                     </div>
                     <div style="margin-bottom:10px;">
                         <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
-                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week)}</div>
+                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week, stage_items)}</div>
                     </div>
                     <div class="header-stats" style="margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap;">
                         {f'<span class="stat-item" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
