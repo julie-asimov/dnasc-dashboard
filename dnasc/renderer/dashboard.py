@@ -1171,9 +1171,9 @@ def render_all_projects_dashboard(
             _rts = _rrow.get('wo_created_at') or pd.Timestamp.min
             _rstock = str(_rrow.get('STOCK_ID', '') or '')
             if _rstock in ('nan', 'None'): _rstock = ''
-            _rbb = str(_rrow.get('backbone_json', '') or '')
+            _rbb = str(_rrow.get('backbone', '') or '')
             if _rbb in ('nan', 'None'): _rbb = ''
-            _rparts = str(_rrow.get('parts_json', '') or '')
+            _rparts = str(_rrow.get('parts', '') or '')
             if _rparts in ('nan', 'None'): _rparts = ''
             _req_asm_roots_info.append((_r, _rplan, _rts, _rstock, _rbb, _rparts))
         # Pass 1: same-plan RETRY
