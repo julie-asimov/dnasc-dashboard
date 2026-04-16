@@ -35,12 +35,17 @@ class PipelineConfig:
     ENABLE_VALIDATION: bool = True
     YIELD_TOLERANCE: float = 0.1             # µg tolerance for yield validation
 
+    # ── Due-date Google Sheet ─────────────────────────────────────────────────
+    DUE_DATES_SHEET_ID: str     = "1qnZdQcviM83FW2ELC-KUAYYLaZoC8GDfjNjjFyB4z0k"
+    DUE_DATES_QUOTA_PROJECT: str = ""   # set to GCP project once Ben enables Sheets API
+    DUE_DATES_CSV_FALLBACK: str = "/Users/juliehachey/Downloads/Experiment Due Date Overrides - Sheet1.csv"
+
     # ── LSP ───────────────────────────────────────────────────────────────────
     LSP_BLACKLIST: list[str] = ["LSP-7602"]
     LSP_CUTOFF_DATE: str = "2025-11-01"      # Secondary-pass identity recovery cutoff
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.4.7"
+    PIPELINE_VERSION: str = "1.8.5"
 
     @classmethod
     def get_date_filter(cls) -> str:

@@ -33,6 +33,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 # ── Imports ───────────────────────────────────────────────────────────────────
 from dnasc import run_pipeline, render_dashboard, PipelineConfig
+from dnasc.extractors.sheets import fetch_due_dates
 
 # ── Pipeline version (bump this string when you push new code) ───────────────
 PIPELINE_VERSION = PipelineConfig.PIPELINE_VERSION
@@ -54,7 +55,11 @@ def main():
     LAST_SYNC.write_text(str(datetime.now(pytz.UTC).timestamp()))
     print(f"   ✅ Baseline saved ({len(final_df):,} rows)")
 
-    # 3. Render HTML
+    # 3. Fetch due dates from Google Sheet (or CSV fallback)
+    print("\n📅 Fetching experiment due dates...")
+    fetch_due_dates()
+
+    # 4. Render HTML
     print("\n🎨 Rendering dashboard...")
     html = render_dashboard(final_df)
 

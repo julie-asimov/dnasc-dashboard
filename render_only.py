@@ -2,12 +2,14 @@
 import time
 import pandas as pd
 from dnasc.renderer import render_dashboard
+from dnasc.extractors.sheets import fetch_due_dates
 from pathlib import Path
 
 BASELINE = Path(__file__).parent / "dashboard_state" / "baseline.parquet"
 HTML_OUT  = Path(__file__).parent.parent / "www" / "dna_sc_dashboard.html"
 WWW_DIR   = HTML_OUT.parent
 
+fetch_due_dates()
 df = pd.read_parquet(BASELINE)
 print(f"Loaded {len(df)} rows from {BASELINE}")
 html = render_dashboard(df)

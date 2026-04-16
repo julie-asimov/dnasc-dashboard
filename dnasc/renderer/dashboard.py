@@ -211,11 +211,15 @@ def render_all_projects_dashboard(
             }
 
             # Grouping Engine
+            def _job_null(j):
+                return j is None or (isinstance(j, float) and pd.isna(j))
             if not current_group:
                 current_group.append(clean_op)
             else:
                 prev_op = current_group[-1]
-                if protocol == prev_op['queue'] and protocol in groupable_protocols:
+                same_job = (_job_null(clean_op['job_id']) and _job_null(prev_op['job_id'])) or \
+                           (not _job_null(clean_op['job_id']) and not _job_null(prev_op['job_id']) and clean_op['job_id'] == prev_op['job_id'])
+                if protocol == prev_op['queue'] and protocol in groupable_protocols and same_job:
                     # Merge wells and run numbers; update state if necessary
                     prev_op['wells'].extend(clean_op['wells'])
                     prev_op['run_numbers'].extend(clean_op['run_numbers'])
@@ -657,6 +661,37 @@ def render_all_projects_dashboard(
         if (el.style.display === "block") { el.style.display = "none"; if(icon) icon.classList.remove('open'); if(btn) btn.classList.remove('active-header'); }
         else { el.style.display = "block"; if(icon) icon.classList.add('open'); if(btn) btn.classList.add('active-header'); }
     }
+    var _sortedByDue = false;
+    var _originalOrder = null;
+    function sortByDueDate() {
+        var container = document.querySelector('#tab-tracking > div[style*="padding"]');
+        if (!container) return;
+        var cards = Array.from(container.querySelectorAll(':scope > .project-wrapper'));
+        if (!_sortedByDue) {
+            // Save original order
+            _originalOrder = cards.slice();
+            // Sort ascending by data-due-date (no date = end)
+            cards.sort(function(a, b) {
+                var da = a.getAttribute('data-due-date') || '9999-99-99';
+                var db = b.getAttribute('data-due-date') || '9999-99-99';
+                return da < db ? -1 : da > db ? 1 : 0;
+            });
+            cards.forEach(function(c) { container.appendChild(c); });
+            _sortedByDue = true;
+            document.getElementById('sort_due_btn').textContent = 'Sort: Default';
+            document.getElementById('sort_due_btn').style.background = '#e8f4fd';
+            document.getElementById('sort_due_btn').style.borderColor = '#0891b2';
+            document.getElementById('sort_due_btn').style.color = '#0891b2';
+        } else {
+            // Restore original order
+            if (_originalOrder) { _originalOrder.forEach(function(c) { container.appendChild(c); }); }
+            _sortedByDue = false;
+            document.getElementById('sort_due_btn').textContent = 'Sort: Due Date';
+            document.getElementById('sort_due_btn').style.background = '#fff';
+            document.getElementById('sort_due_btn').style.borderColor = '#d1d1d6';
+            document.getElementById('sort_due_btn').style.color = '#1d1d1f';
+        }
+    }
     var _filterTimer = null;
     function filterDashboardDebounced() {
         clearTimeout(_filterTimer);
@@ -787,6 +822,9 @@ def render_all_projects_dashboard(
                             <span class="slider"></span>
                         </label>
                     </div>
+                    <div class="toggle-wrapper">
+                        <button id="sort_due_btn" onclick="sortByDueDate()" style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:4px;border:1px solid #d1d1d6;background:#fff;color:#1d1d1f;cursor:pointer;white-space:nowrap;">Sort: Due Date</button>
+                    </div>
                 </div>
                 <div style="padding: 10px;">
     """
@@ -794,7 +832,7 @@ def render_all_projects_dashboard(
     # =========================================================================
     # 3. HELPER: RENDER SINGLE REQUEST
     # =========================================================================
-    def render_single_request_html(req_id, req_df, is_stalled=False):
+    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False):
         html = ""
         construct = req_df['construct_name'].iloc[0] or "Unknown Construct"
         req_status = req_df['request_status'].iloc[0] if 'request_status' in req_df.columns else "Unknown"
@@ -1000,6 +1038,7 @@ def render_all_projects_dashboard(
         is_done = str(req_status).upper() in ['FULFILLED', 'SUCCEEDED', 'CANCELED']
 
         stalled_badge = '<span class="badge" style="background:#be185d; color:white; border:2px solid #9f1239; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span>' if is_stalled else ""
+        asm_review_badge = '<span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span>' if is_asm_review else ""
 
         ready_to_ship_time = None
         final_release_time = None
@@ -1077,6 +1116,7 @@ def render_all_projects_dashboard(
                     <span class="badge status-{str(req_status).replace(" ", "_")}" style="font-size: 10px; padding: 2px 8px;">{req_status}</span>
                     {status_badge_html}
                     {stalled_badge}
+                    {asm_review_badge}
                 </div>
             </div>
         """
@@ -1652,10 +1692,7 @@ def render_all_projects_dashboard(
                     _astatus = row.get('visual_status', '') if (_cs_raw is None or (isinstance(_cs_raw, float) and pd.isna(_cs_raw))) else str(_cs_raw)
                     _astatus_color = _status_colors.get(_astatus, '#64748b')
                     _status_icon = '✓ ' if _astatus == 'SUCCEEDED' else '✗ ' if _astatus == 'FAILED' else ''
-                    _akind_raw = row.get('_attempt_kind', '')
-                    _akind = '' if (_akind_raw is None or (isinstance(_akind_raw, float) and pd.isna(_akind_raw)) or str(_akind_raw).lower() in ('nan', 'none', '')) else str(_akind_raw).strip()
-                    _akind_prefix = f'{_akind} ' if _akind else ''
-                    html += f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:2px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{_alabel} — {_akind_prefix}Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_astatus_color};">{_status_icon}{_astatus}</span></td></tr>"""
+                    html += f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:2px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{_alabel} — Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_astatus_color};">{_status_icon}{_astatus}</span></td></tr>"""
                 depth = row.get('tree_depth', 0)
                 row_class = f"tree-row-{min(depth, 2)}"  # CSS only has 0, 1, 2
                 spacer = ""
@@ -2070,6 +2107,7 @@ def render_all_projects_dashboard(
                     _pickable = row.get('pickable_colonies')
                     _picked   = row.get('picked_colonies')
                     if any(pd.notna(v) for v in [_imaged, _pickable, _picked]):
+                        # Colony counts (plain, no link wrapping)
                         details_info += (
                             f"<div style='display:grid;grid-template-columns:58px 1fr;gap:1px 4px;margin-top:3px;'>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Imaged</span><span style='font-size:10px;color:#1e293b;'>{int(_imaged)}</span>"
@@ -2077,6 +2115,32 @@ def render_all_projects_dashboard(
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Picked</span><span style='font-size:10px;color:#1e293b;'>{int(_picked) if pd.notna(_picked) else 0}</span>"
                             f"</div>"
                         )
+                        # Agar plate link — plate_id + alphanumeric well from colonypickingcounts
+                        _cpid   = row.get('colony_plate_id')
+                        _cwpos  = row.get('colony_well_position')
+                        _cwcnt  = row.get('colony_plate_well_count')
+                        if _cpid and pd.notna(_cpid) and str(_cpid) not in ('nan', 'None', ''):
+                            _plate_url  = f'https://bios.asimov.io/inventory/plates/{int(_cpid)}'
+                            _well_alpha = ''
+                            try:
+                                if pd.notna(_cwpos) and pd.notna(_cwcnt):
+                                    _ncols = 24 if int(_cwcnt) == 384 else 12
+                                    _pos   = int(_cwpos)
+                                    _row_i = (_pos - 1) // _ncols
+                                    _col_i = (_pos - 1) %  _ncols + 1
+                                    _well_alpha = chr(65 + _row_i) + str(_col_i)
+                            except Exception:
+                                pass
+                            _well_label = f' · {_well_alpha}' if _well_alpha else ''
+                            details_info += (
+                                f"<div style='margin-top:4px;margin-bottom:4px;'>"
+                                f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-right:4px;'>Agar</span>"
+                                f"<a href='{_plate_url}' target='_blank' "
+                                f"style='font-size:9px;font-family:monospace;"
+                                f"color:#0369a1;text-decoration:underline dotted;'>"
+                                f"Plate {int(_cpid)}{_well_label}</a>"
+                                f"</div>"
+                            )
                     if row['visual_status'] == 'FAILED' and str(row['wo_status']).upper() == 'SUCCEEDED' and not row['is_software_fail']:
                         _tot = row.get('total_colonies')
                         if pd.isna(_tot) or int(_tot) == 0:
@@ -2149,27 +2213,29 @@ def render_all_projects_dashboard(
     ]
 
     # Shared age-color palette — used by both timeline dots and stage view bars
-    _BLUE_RAMP  = ['#bae6fd','#7dd3fc','#38bdf8','#0ea5e9','#0284c7','#0369a1','#075985','#0c4a6e']
+    _BLUE_RAMP   = ['#bae6fd','#7dd3fc','#38bdf8','#0ea5e9','#0284c7','#0369a1','#075985','#0c4a6e']
+    _PURPLE_RAMP = ['#f5d0fe','#e879f9','#d946ef','#c026d3','#a21caf','#86198f','#701a75','#4a044e']
     _WARN_COLOR = '#b45309'   # amber-700 — muted warm gold, easier on eyes
     _OVER_COLOR = '#dc2626'   # red-600
 
-    def _age_color(age_weeks, yellow_limit, red_limit):
+    def _age_color(age_weeks, yellow_limit, red_limit, ramp=None):
         """Return hex color for a request based on its age and per-experiment thresholds."""
+        if ramp is None: ramp = _BLUE_RAMP
         if age_weeks >= red_limit:
             return _OVER_COLOR
         if age_weeks >= yellow_limit:
             return _WARN_COLOR
         max_idx = max(yellow_limit - 1, 1)
-        idx = min(int(age_weeks / max_idx * (len(_BLUE_RAMP) - 1)), len(_BLUE_RAMP) - 1)
-        return _BLUE_RAMP[idx]
+        idx = min(int(age_weeks / max_idx * (len(ramp) - 1)), len(ramp) - 1)
+        return ramp[idx]
 
-    def _render_bucket_chart(stage_counts, fulfilled_week_counts, yellow_limit, red_limit, stage_items=None):
+    def _render_bucket_chart(stage_counts, fulfilled_week_counts, yellow_limit, red_limit, stage_items=None, ramp=None):
         """Render a horizontal bar chart showing all pipeline stages.
-        On-track buckets use a light→dark sky-blue gradient (colorblind-safe).
+        On-track buckets use a light→dark gradient (colorblind-safe).
         Warning uses amber-gold. Overdue uses solid red.
         When no active requests remain, shows fulfilled TAT distribution instead."""
         def _seg_color(bucket):
-            return _age_color(bucket, yellow_limit, red_limit)
+            return _age_color(bucket, yellow_limit, red_limit, ramp=ramp)
 
         def _txt_color(bucket):
             # Lightest two blues need dark text for contrast; everything else white
@@ -2276,6 +2342,14 @@ def render_all_projects_dashboard(
             'wo_type':  str(_wr.get('type') or ''),
         }
 
+    # Load experiment due dates (written by fetch_due_dates() before render)
+    _due_date_map: dict[str, str] = {}
+    try:
+        from dnasc.extractors.sheets import load_due_dates
+        _due_date_map = load_due_dates()
+    except Exception:
+        pass
+
     # Pre-compute canonical experiment for each req_id so that requests whose parts
     # belong to a different experiment (cross-experiment fanning) are only rendered
     # once — in the experiment that owns the root GG/Gibson workorder.
@@ -2299,10 +2373,10 @@ def render_all_projects_dashboard(
         safe_exp_id = "exp_" + hashlib.md5(experiment_name.encode()).hexdigest()
         now = datetime.now(pytz.timezone('US/Eastern'))
         count_fulfilled = 0; count_canceled = 0; count_new = 0; count_planned = 0
-        count_blocked = 0; count_stalled = 0; count_in_lsp = 0
+        count_blocked = 0; count_stalled = 0; count_in_lsp = 0; count_asm_review = 0
         count_in_assembly = 0; count_active_waiting = 0; count_ship_ready = 0
         new_req_list = []; active_req_list = []; fulfilled_req_list = []; canceled_req_list = []
-        stalled_reqs = set(); production_tats = []; total_tats = []
+        stalled_reqs = set(); asm_review_reqs = set(); production_tats = []; total_tats = []
         has_ptr = project_df['for_partner'].astype(str).str.lower().str.contains('true').any()
         _exp_customer_styles = {
             'R_D':              ('R&D',           '#cffafe', '#0e7490', '#a5f3fc'),
@@ -2376,10 +2450,10 @@ def render_all_projects_dashboard(
                 age_weeks = (production_end - r_created).days / 7
                 production_tats.append((production_end - r_created).days)
                 total_tats.append((total_end - r_created).days)
-                dot_color = _age_color(age_weeks, yellow_limit, red_limit)
+                dot_color = _age_color(age_weeks, yellow_limit, red_limit, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)
             else:
                 age_weeks = (now - r_created).days / 7
-                dot_color = _age_color(age_weeks, yellow_limit, red_limit)
+                dot_color = _age_color(age_weeks, yellow_limit, red_limit, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)
             pos = max(0, min(100, (age_weeks / 8) * 100))
 
             active_rows = r_df[r_df['wo_status'] != 'CANCELED']
@@ -2421,6 +2495,20 @@ def render_all_projects_dashboard(
                     or (root_chain_exists and root_chain_finished)  # root chain dead even if parts running
                     or asm_blocked_and_stuck  # BLOCKED ASM with no active LSP downstream
                 )
+            )
+
+            # ASM REVIEW: a winner assembly already succeeded for this root, but another
+            # GG or Gibson is still READY or WAITING — likely should be canceled.
+            _asm_types_flag = {'golden_gate_workorder', 'gibson_workorder'}
+            _asm_rows = active_rows[active_rows['type'].isin(_asm_types_flag)]
+            _has_succeeded_asm = _asm_rows['visual_status'].eq('SUCCEEDED').any()
+            _has_ready_asm     = _asm_rows['visual_status'].isin(['READY', 'WAITING']).any()
+            is_asm_review = (
+                has_real_workorders
+                and not is_finished
+                and status != 'CANCELED'
+                and _has_succeeded_asm
+                and _has_ready_asm
             )
 
             if not is_finished and status != 'CANCELED':
@@ -2539,6 +2627,7 @@ def render_all_projects_dashboard(
                 active_req_list.append((rid, r_df))
                 if not has_real_workorders: count_planned += 1
                 elif is_stalled: count_stalled += 1; stalled_reqs.add(rid)
+                if is_asm_review: count_asm_review += 1; asm_review_reqs.add(rid)
                 elif is_blocked: count_blocked += 1
                 else:
                     is_ship_ready = False
@@ -2580,8 +2669,248 @@ def render_all_projects_dashboard(
                 tat_parts.append(f"<span style='background:rgba(255,255,255,0.2); color:white; padding:2px 6px; border-radius:3px; font-size:10px; white-space:nowrap;'>Avg Total: <span style='color:#67e8f9; font-weight:700;'>{weeks}w {days}d</span></span>")
             avg_tat_html = f'''<div style="display:flex; gap:10px; font-weight:700;">{" ".join(tat_parts)}</div>'''
 
+        # ── Experiment creation date (needed for due date marker) ────────────
+        exp_created_str = "N/A"
+        exp_created_dt = None
+        if 'experiment_created_at' in project_df.columns:
+            exp_created_raw = project_df['experiment_created_at'].iloc[0]
+            exp_created_dt = to_est(exp_created_raw)
+            if exp_created_dt:
+                exp_created_str = exp_created_dt.strftime('%Y-%m-%d')
+
+        # ── Due date (from Google Sheet / CSV override) ───────────────────────
+        _NO_TIMELINE_MARKERS = {"LSP Refill Requests", "A469-Build DNASC CHO Destination Vectors"}
+        _is_infra_exp = experiment_name in _NO_TIMELINE_MARKERS
+        _due_raw         = None if _is_infra_exp else _due_date_map.get(experiment_name)
+        _due_badge_html  = ""
+        _due_marker_html = ""
+        _sort_due_date   = "9999-99-99"   # default: no due date → sorts to end
+
+        # Normalize due entry — use the first (or only) entry from the sheet
+        if _due_raw is None:
+            _due_entry_data = None
+        elif isinstance(_due_raw, str):
+            _due_entry_data = {"due_date": _due_raw, "date_in_cld_gnatt": ""}
+        elif isinstance(_due_raw, dict):
+            _due_entry_data = _due_raw
+        else:
+            _due_entry_data = _due_raw[0] if _due_raw else None
+
+        _due_entry = bool(_due_entry_data)   # truthy flag used by bracket/sort logic
+
+        if _due_entry_data:
+            try:
+                _now_utc      = datetime.now(pytz.UTC)
+                _8w_days      = 56.0
+                _ec_date      = exp_created_dt.date() if exp_created_dt else None
+                def _pos(dt):
+                    if not _ec_date: return 0
+                    d = dt.date() if hasattr(dt, 'date') else dt
+                    return min(100, max(0, (d - _ec_date).days / _8w_days * 100))
+
+                _due_date_str = _due_entry_data.get("due_date", "")
+                _gantt_str    = _due_entry_data.get("date_in_cld_gnatt", "")
+                if _due_date_str:
+                    _due_dt   = datetime.strptime(_due_date_str, "%Y-%m-%d").replace(tzinfo=pytz.UTC)
+                    _sort_due_date = _due_date_str
+                    _days_remaining = (_due_dt.date() - _now_utc.date()).days
+                    if _days_remaining < 0:
+                        _dbg, _dfg = "#be185d", "white"
+                        _dlabel = f"Overdue by {abs(_days_remaining)}d"
+                    elif _days_remaining <= 7:
+                        _dbg, _dfg = "#d97706", "white"
+                        _dlabel = f"Due in {_days_remaining}d"
+                    elif _days_remaining <= 14:
+                        _dbg, _dfg = "#0891b2", "white"
+                        _dlabel = f"Due in {_days_remaining}d"
+                    else:
+                        _dbg, _dfg = "rgba(255,255,255,0.18)", "rgba(255,255,255,0.95)"
+                        _dlabel = f"Due {_due_dt.strftime('%b %-d')}"
+                    _due_badge_html = (
+                        f'<span style="font-size:9px;font-weight:700;padding:2px 8px;border-radius:3px;'
+                        f'background:{_dbg};color:{_dfg};border:1px solid rgba(255,255,255,0.25);white-space:nowrap;">'
+                        f'{_dlabel}</span>'
+                    )
+
+                    if exp_created_dt:
+                        _ngs_dt    = _due_dt - pd.Timedelta(days=1)
+                        _gantt_dt  = datetime.strptime(_gantt_str, "%Y-%m-%d").replace(tzinfo=pytz.UTC) if _gantt_str else None
+                        _ngs_pos   = _pos(_ngs_dt)
+                        _due_pos   = _pos(_due_dt)
+                        _gantt_pos = _pos(_gantt_dt) if _gantt_dt else _due_pos
+                        if 0 < _due_pos <= 100:
+                            _dr            = (_due_dt.date() - _now_utc.date()).days
+                            _urgency_color = "#f87171" if _dr < 0 else "#fcd34d" if _dr <= 7 else "#6ee7b7"
+                            _range_width   = max(0.5, _gantt_pos - _ngs_pos)
+                            _ngs_label     = _ngs_dt.strftime("%a %b %-d")
+                            _due_label     = _due_dt.strftime("%a %b %-d")
+                            _gantt_label   = _gantt_dt.strftime("%a %-m/%-d") if _gantt_dt else ""
+                            _pop_id        = f"duepop_{safe_exp_id}"
+                            _pill_text     = f"DUE {_due_dt.strftime('%a %-m/%-d')}"
+                            _due_marker_html = (
+                                # Range bar
+                                f'<div style="position:absolute;left:{_ngs_pos:.2f}%;top:0;'
+                                f'width:{_range_width:.2f}%;height:100%;'
+                                f'background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.4);'
+                                f'border-radius:3px;z-index:1;pointer-events:none;"></div>'
+                                # Vertical line
+                                f'<div style="position:absolute;left:{_due_pos:.2f}%;top:-3px;'
+                                f'width:4px;height:28px;background:white;border-radius:1px;'
+                                f'box-shadow:0 0 8px rgba(0,0,0,0.5);z-index:4;transform:translateX(-50%);pointer-events:none;"></div>'
+                                # Hover wrapper + pill
+                                f'<div style="position:absolute;left:{_due_pos:.2f}%;top:-74px;'
+                                f'width:90px;height:72px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
+                                f' onmouseenter="document.getElementById(\'{_pop_id}\').style.display=\'block\'"'
+                                f' onmouseleave="document.getElementById(\'{_pop_id}\').style.display=\'none\'">'
+                                f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
+                                f'background:white;color:#1e1b4b;font-size:10px;font-weight:800;'
+                                f'padding:3px 7px;border-radius:4px;white-space:nowrap;letter-spacing:0.03em;'
+                                f'box-shadow:0 2px 8px rgba(0,0,0,0.5);">{_pill_text}</div>'
+                                # Popover
+                                f'<div id="{_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
+                                f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
+                                f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid rgba(255,255,255,0.3);">'
+                                f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Due Date</div>'
+                                f'<div style="display:grid;grid-template-columns:72px 1fr;gap:2px 8px;">'
+                                f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Last NGS</span>'
+                                f'<span style="font-weight:600;">{_ngs_label}</span>'
+                                f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Due</span>'
+                                f'<span style="font-weight:700;color:{_urgency_color};">{_due_label}</span>'
+                                + (f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">CLD Gantt</span>'
+                                   f'<span style="font-weight:600;">{_gantt_label}</span>' if _gantt_dt else '') +
+                                f'</div></div></div>'
+                            )
+            except Exception:
+                pass
+
+        # ── Default NGS window bracket + light-purple DUE flag (no CLD override)
+        # Bracket: white semi-transparent, Last NGS → red threshold.
+        # Purple DUE pill at day-after-last-NGS (aligned with TAT threshold, based on exp_created_dt).
+        _default_bracket_html = ""
+        if not _due_entry and exp_created_dt and not _is_infra_exp:
+            try:
+                from datetime import timedelta as _td2
+                _tat_weeks = 5 if has_ptr else 6
+                _red_thresh_dt = exp_created_dt + _td2(weeks=_tat_weeks)
+                def _last_ngs_b(dt):
+                    for i in range(7):
+                        c = dt - _td2(days=i)
+                        if c.weekday() in (0, 3): return c
+                    return dt
+                _def_ngs_dt  = _last_ngs_b(_red_thresh_dt - _td2(days=1))
+                _def_due_dt  = _def_ngs_dt + _td2(days=1)   # day after last NGS = standard due
+                _sort_due_date = _def_due_dt.strftime("%Y-%m-%d")  # ISO for sort
+                _8w = 56.0
+                _ec_date2 = exp_created_dt.date()
+                def _pos2(dt):
+                    d = dt.date() if hasattr(dt, 'date') else dt
+                    return min(100, max(0, (d - _ec_date2).days / _8w * 100))
+                _def_ngs_pos = _pos2(_def_ngs_dt)
+                _def_red_pos = _pos2(_red_thresh_dt)
+                _def_due_pos = _pos2(_def_due_dt)
+                _def_width   = max(0.5, _def_red_pos - _def_ngs_pos)
+                _def_pop_id  = f"defduepop_{safe_exp_id}"
+                _def_ngs_str = _def_ngs_dt.strftime("%a %b %-d")
+                _def_due_str = _def_due_dt.strftime("%a %-m/%-d")
+                _def_red_str = _red_thresh_dt.strftime("%a %b %-d")
+                _default_bracket_html = (
+                    # White semi-transparent bracket: NGS → red threshold
+                    f'<div style="position:absolute;left:{_def_ngs_pos:.2f}%;top:0;'
+                    f'width:{_def_width:.2f}%;height:100%;'
+                    f'background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.45);'
+                    f'border-radius:3px;z-index:1;pointer-events:none;"></div>'
+                    + (
+                    # Light-purple vertical line at day-after-NGS
+                    f'<div style="position:absolute;left:{_def_due_pos:.2f}%;top:-3px;'
+                    f'width:4px;height:28px;background:#c4b5fd;border-radius:1px;'
+                    f'box-shadow:0 0 8px rgba(167,139,250,0.7);z-index:4;transform:translateX(-50%);pointer-events:none;"></div>'
+                    # Hover wrapper: pill + popover
+                    f'<div style="position:absolute;left:{_def_due_pos:.2f}%;top:-74px;'
+                    f'width:80px;height:72px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
+                    f' onmouseenter="document.getElementById(\'{_def_pop_id}\').style.display=\'block\'"'
+                    f' onmouseleave="document.getElementById(\'{_def_pop_id}\').style.display=\'none\'">'
+                    # Light-purple DUE pill
+                    f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
+                    f'background:#7c3aed;color:white;font-size:11px;font-weight:800;'
+                    f'padding:3px 8px;border-radius:4px;white-space:nowrap;letter-spacing:0.04em;'
+                    f'box-shadow:0 2px 8px rgba(0,0,0,0.5);border:2px solid #c4b5fd;">'
+                    f'DUE {_def_due_str}</div>'
+                    # Popover
+                    f'<div id="{_def_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
+                    f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
+                    f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #7c3aed;">'
+                    f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Standard TAT</div>'
+                    f'<div style="display:grid;grid-template-columns:80px 1fr;gap:2px 8px;">'
+                    f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Last NGS</span>'
+                    f'<span style="font-weight:600;">{_def_ngs_str}</span>'
+                    f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Due</span>'
+                    f'<span style="font-weight:600;color:#c4b5fd;">{_def_due_str}</span>'
+                    f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Threshold</span>'
+                    f'<span style="font-weight:600;color:#f87171;">{_def_red_str}</span>'
+                    f'</div></div></div>'
+                )
+                )
+            except Exception:
+                pass
+
         orange_week = 4 if has_ptr else 5; red_week = 5 if has_ptr else 6
-        timeline_bar = f"""<div style="margin: 10px 12px 8px 12px; padding: 10px; background: rgba(0,0,0,0.15); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);"><div style="display:flex; justify-content:space-between; font-size:11px; color:rgba(255,255,255,1); margin-bottom:8px; font-family:monospace; font-weight:900; letter-spacing:1px; text-shadow: 0 1px 3px rgba(0,0,0,0.4);"><span>START</span><span>1w</span><span>2w</span><span>3w</span><span>4w</span><span>5w</span><span>6w</span><span>7w</span><span>8w+</span></div><div style="position:relative; width:100%; height:22px; background:rgba(255,255,255,0.15); border-radius:11px; box-shadow: inset 0 1px 4px rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2);">{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; width:1px; height:100%; background:rgba(255,255,255,0.1); z-index:1;"></div>' for w in range(1,8)])}<div style="position:absolute; left:{(orange_week/8)*100}%; width:2px; height:28px; background:#f97316; top:-3px; border-radius:1px; box-shadow: 0 0 6px rgba(249,115,22,0.6); z-index:2;"></div><div style="position:absolute; left:{(red_week/8)*100}%; width:2px; height:28px; background:#be185d; top:-3px; border-radius:1px; box-shadow: 0 0 6px rgba(190,24,93,0.6); z-index:2;"></div><div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div></div>
+        from datetime import timedelta as _td
+        def _last_ngs_before(dt):
+            """Most recent Monday (0) or Thursday (3) on or before dt."""
+            for i in range(7):
+                cand = dt - _td(days=i)
+                if cand.weekday() in (0, 3):
+                    return cand
+            return dt
+        _is_refill = _is_infra_exp
+        def _threshold_html(week, color, glow, pop_id, show_popover=True):
+            if not exp_created_dt or _is_refill:
+                return ""
+            _thresh_dt = exp_created_dt + _td(weeks=week)
+            _left      = f"{(week/8)*100}%"
+            _thresh_str = _thresh_dt.strftime("%a %-m/%-d")
+            _bar = (f'<div style="position:absolute;left:{_left};width:2px;height:28px;background:{color};'
+                    f'top:-3px;border-radius:1px;box-shadow:0 0 6px {glow};z-index:2;"></div>')
+            if show_popover:
+                _ngs_dt    = _last_ngs_before(_thresh_dt - _td(days=1))
+                _ngs_str   = _ngs_dt.strftime("%a %b %-d")
+                _thresh_full = _thresh_dt.strftime("%a %b %-d")
+                _label = (
+                    f'<div style="position:absolute;left:{_left};top:-52px;transform:translateX(-50%);'
+                    f'background:{color};color:white;font-size:11px;font-weight:800;'
+                    f'padding:3px 8px;border-radius:4px;white-space:nowrap;letter-spacing:0.04em;'
+                    f'box-shadow:0 2px 8px rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.7);'
+                    f'z-index:20;cursor:pointer;"'
+                    f' onmouseenter="document.getElementById(\'{pop_id}\').style.display=\'block\'"'
+                    f' onmouseleave="document.getElementById(\'{pop_id}\').style.display=\'none\'">'
+                    f'{_thresh_str}'
+                    f'<div id="{pop_id}" style="display:none;position:absolute;left:50%;top:28px;transform:translateX(-50%);'
+                    f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
+                    f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid {color};font-weight:400;">'
+                    f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">{int(week)}w Threshold</div>'
+                    f'<div style="display:grid;grid-template-columns:80px 1fr;gap:2px 8px;">'
+                    f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Last NGS</span>'
+                    f'<span style="font-weight:600;">{_ngs_str}</span>'
+                    f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Threshold</span>'
+                    f'<span style="font-weight:600;color:{color};">{_thresh_full}</span>'
+                    f'</div></div></div>'
+                )
+            else:
+                # No popover — plain pill only
+                _label = (
+                    f'<div style="position:absolute;left:{_left};top:-52px;transform:translateX(-50%);'
+                    f'background:{color};color:white;font-size:11px;font-weight:800;'
+                    f'padding:3px 8px;border-radius:4px;white-space:nowrap;letter-spacing:0.04em;'
+                    f'box-shadow:0 2px 8px rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.7);z-index:20;">'
+                    f'{_thresh_str}</div>'
+                )
+            return _label + _bar
+        _orange_html = _threshold_html(orange_week, "#f97316", "rgba(249,115,22,0.6)", f"tpop_o_{safe_exp_id}", show_popover=False)
+        _red_html    = _threshold_html(red_week,    "#be185d", "rgba(190,24,93,0.6)",  f"tpop_r_{safe_exp_id}", show_popover=True)
+        if _is_refill:
+            _default_bracket_html = ""
+            _due_marker_html = ""
+        timeline_bar = f"""<div style="margin: 10px 12px 8px 12px; padding: 10px; background: rgba(0,0,0,0.15); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);"><div style="display:flex; justify-content:space-between; font-size:11px; color:rgba(255,255,255,1); margin-bottom:8px; font-family:monospace; font-weight:900; letter-spacing:1px; text-shadow: 0 1px 3px rgba(0,0,0,0.4);"><span>START</span><span>1w</span><span>2w</span><span>3w</span><span>4w</span><span>5w</span><span>6w</span><span>7w</span><span>8w+</span></div><div style="position:relative; width:100%; height:22px; background:rgba(255,255,255,0.15); border-radius:11px; box-shadow: inset 0 1px 4px rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2);">{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; width:1px; height:100%; background:rgba(255,255,255,0.1); z-index:1;"></div>' for w in range(1,8)])}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}</div>
             <div style="display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:10px; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
               <div style="display:flex; align-items:center; gap:8px; color:white; font-size:9px; font-weight:600;">
                   <span style="color:rgba(255,255,255,0.7);">IN PROGRESS:</span>
@@ -2602,18 +2931,11 @@ def render_all_projects_dashboard(
         db_active = str(project_df.get('experiment_active', ['true']).iloc[0]).lower() in ['true', '1', 't']
         exp_header_gradient = "linear-gradient(135deg, #7c3aed 0%, #be185d 100%)" if has_ptr else "linear-gradient(135deg, #1e3a5f 0%, #0891b2 100%)"
 
-        exp_created_str = "N/A"
-        if 'experiment_created_at' in project_df.columns:
-            exp_created_raw = project_df['experiment_created_at'].iloc[0]
-            exp_created_dt = to_est(exp_created_raw)
-            if exp_created_dt:
-                exp_created_str = exp_created_dt.strftime('%Y-%m-%d')
-
         _exp_emails_raw = [str(e).strip() for e in project_df['submitter_email'].dropna().unique() if str(e).strip() not in ('', 'nan', 'none', 'None')] if 'submitter_email' in project_df.columns else []
         _exp_email_str = ' / '.join(_exp_emails_raw[:2]) if 1 <= len(_exp_emails_raw) <= 2 else ''
 
         html += f"""
-            <div class="project-wrapper" data-active="{"true" if db_active else "false"}">
+            <div class="project-wrapper" data-active="{"true" if db_active else "false"}" data-due-date="{_sort_due_date}">
                 <div class="header-banner" style="background: {exp_header_gradient}; min-height: auto; padding: 12px 18px;" onclick="toggleSection('{safe_exp_id}')">
                     <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
                         <button id="bucket_btn_{safe_exp_id}" onclick="event.stopPropagation();toggleBucketView('{safe_exp_id}')" style="margin-left:auto;order:99;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.35);color:white;font-size:9px;padding:3px 9px;border-radius:4px;cursor:pointer;font-family:monospace;font-weight:600;letter-spacing:0.5px;white-space:nowrap;flex-shrink:0;">Stage View</button>
@@ -2621,6 +2943,7 @@ def render_all_projects_dashboard(
                             <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                                 <div class="header-title" style="margin-bottom: 0; white-space: nowrap;">{experiment_name}</div>
                                 {exp_customer_tags}
+                                {_due_badge_html}
                             </div>
                             <div style="font-size: 11px; color: rgba(255,255,255,0.75); font-weight: 400; margin-top: 3px; font-family: inherit; letter-spacing: 0;">
                                 <span style="font-size: 10px; color: rgba(255,255,255,0.55);">Created: {exp_created_str}</span>{(f' &nbsp;<span style="color:#e0e7ff; font-weight:600; font-size:13px;">' + _exp_email_str + '</span>') if _exp_email_str else ''}
@@ -2634,7 +2957,7 @@ def render_all_projects_dashboard(
                     </div>
                     <div style="margin-bottom:10px;">
                         <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
-                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week, stage_items)}</div>
+                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week, stage_items, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)}</div>
                     </div>
                     <div class="header-stats" style="margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap;">
                         {f'<span class="stat-item" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
@@ -2652,11 +2975,12 @@ def render_all_projects_dashboard(
             html += f"""
                 <details>
                     <summary class="group-header in-progress">
-                        <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''})
+                        <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''}{f' - 🔬 {count_asm_review} ASM Review' if count_asm_review > 0 else ''})
                     </summary>"""
             for rid, r_df in active_req_list:
                 is_stalled_req = rid in stalled_reqs
-                req_html = render_single_request_html(rid, r_df, is_stalled_req)
+                is_asm_review_req = rid in asm_review_reqs
+                req_html = render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req)
                 html += req_html
             html += "</details>"
         if new_req_list:

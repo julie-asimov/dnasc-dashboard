@@ -193,11 +193,15 @@ class LIMSExtractor:
             query = f"""
             SELECT
                 w.process_id AS workorder_id,
+                ANY_VALUE(w.plate_id)   AS colony_plate_id,
+                ANY_VALUE(w.position)   AS colony_well_position,
+                ANY_VALUE(p.well_count) AS colony_plate_well_count,
                 SUM(cpc.imaged) AS imaged_colonies,
                 SUM(COALESCE(cpc.pickable_automated, 0) + COALESCE(cpc.pickable_manual, 0)) AS pickable_colonies,
                 SUM(COALESCE(cpc.picked_automated, 0)  + COALESCE(cpc.picked_manual, 0))  AS picked_colonies
             FROM `{proj}.bios__src.colonypickingcounts` cpc
-            JOIN `{proj}.lims__src.well` w ON w.id = cpc.well_id
+            JOIN `{proj}.lims__src.well` w  ON w.id  = cpc.well_id
+            JOIN `{proj}.lims__src.plate` p ON p.id  = w.plate_id
             WHERE w.process_id IN ('{ids_str}')
               AND cpc.deleted_at IS NULL
             GROUP BY w.process_id
