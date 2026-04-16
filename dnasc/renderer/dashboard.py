@@ -2763,9 +2763,9 @@ def render_all_projects_dashboard(
                                 f' onmouseenter="document.getElementById(\'{_pop_id}\').style.display=\'block\'"'
                                 f' onmouseleave="document.getElementById(\'{_pop_id}\').style.display=\'none\'">'
                                 f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
-                                f'background:white;color:#1e1b4b;font-size:10px;font-weight:800;'
-                                f'padding:3px 7px;border-radius:4px;white-space:nowrap;letter-spacing:0.03em;'
-                                f'box-shadow:0 2px 8px rgba(0,0,0,0.5);">{_pill_text}</div>'
+                                f'background:white;color:#1e1b4b;font-size:9px;font-weight:700;'
+                                f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
+                                f'box-shadow:0 1px 5px rgba(0,0,0,0.4);">{_pill_text}</div>'
                                 # Popover
                                 f'<div id="{_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
                                 f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
@@ -2831,9 +2831,9 @@ def render_all_projects_dashboard(
                     f' onmouseleave="document.getElementById(\'{_def_pop_id}\').style.display=\'none\'">'
                     # Light-purple DUE pill
                     f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
-                    f'background:#7c3aed;color:white;font-size:11px;font-weight:800;'
-                    f'padding:3px 8px;border-radius:4px;white-space:nowrap;letter-spacing:0.04em;'
-                    f'box-shadow:0 2px 8px rgba(0,0,0,0.5);border:2px solid #c4b5fd;">'
+                    f'background:#7c3aed;color:white;font-size:9px;font-weight:700;'
+                    f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
+                    f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid #c4b5fd;">'
                     f'DUE {_def_due_str}</div>'
                     # Popover
                     f'<div id="{_def_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
@@ -2863,7 +2863,7 @@ def render_all_projects_dashboard(
                     return cand
             return dt
         _is_refill = _is_infra_exp
-        def _threshold_html(week, color, glow, pop_id, show_popover=True):
+        def _threshold_html(week, color, glow, pop_id, show_popover=True, label_top=-52):
             if not exp_created_dt or _is_refill:
                 return ""
             _thresh_dt = exp_created_dt + _td(weeks=week)
@@ -2876,15 +2876,15 @@ def render_all_projects_dashboard(
                 _ngs_str   = _ngs_dt.strftime("%a %b %-d")
                 _thresh_full = _thresh_dt.strftime("%a %b %-d")
                 _label = (
-                    f'<div style="position:absolute;left:{_left};top:-52px;transform:translateX(-50%);'
-                    f'background:{color};color:white;font-size:11px;font-weight:800;'
-                    f'padding:3px 8px;border-radius:4px;white-space:nowrap;letter-spacing:0.04em;'
-                    f'box-shadow:0 2px 8px rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.7);'
+                    f'<div style="position:absolute;left:{_left};top:{label_top}px;transform:translateX(-50%);'
+                    f'background:{color};color:white;font-size:9px;font-weight:700;'
+                    f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
+                    f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.6);'
                     f'z-index:20;cursor:pointer;"'
                     f' onmouseenter="document.getElementById(\'{pop_id}\').style.display=\'block\'"'
                     f' onmouseleave="document.getElementById(\'{pop_id}\').style.display=\'none\'">'
                     f'{_thresh_str}'
-                    f'<div id="{pop_id}" style="display:none;position:absolute;left:50%;top:28px;transform:translateX(-50%);'
+                    f'<div id="{pop_id}" style="display:none;position:absolute;left:50%;top:22px;transform:translateX(-50%);'
                     f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
                     f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid {color};font-weight:400;">'
                     f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">{int(week)}w Threshold</div>'
@@ -2898,10 +2898,10 @@ def render_all_projects_dashboard(
             else:
                 # No popover — plain pill only
                 _label = (
-                    f'<div style="position:absolute;left:{_left};top:-52px;transform:translateX(-50%);'
-                    f'background:{color};color:white;font-size:11px;font-weight:800;'
-                    f'padding:3px 8px;border-radius:4px;white-space:nowrap;letter-spacing:0.04em;'
-                    f'box-shadow:0 2px 8px rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.7);z-index:20;">'
+                    f'<div style="position:absolute;left:{_left};top:{label_top}px;transform:translateX(-50%);'
+                    f'background:{color};color:white;font-size:9px;font-weight:700;'
+                    f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
+                    f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.6);z-index:20;">'
                     f'{_thresh_str}</div>'
                 )
             return _label + _bar
@@ -2943,7 +2943,6 @@ def render_all_projects_dashboard(
                             <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                                 <div class="header-title" style="margin-bottom: 0; white-space: nowrap;">{experiment_name}</div>
                                 {exp_customer_tags}
-                                {_due_badge_html}
                             </div>
                             <div style="font-size: 11px; color: rgba(255,255,255,0.75); font-weight: 400; margin-top: 3px; font-family: inherit; letter-spacing: 0;">
                                 <span style="font-size: 10px; color: rgba(255,255,255,0.55);">Created: {exp_created_str}</span>{(f' &nbsp;<span style="color:#e0e7ff; font-weight:600; font-size:13px;">' + _exp_email_str + '</span>') if _exp_email_str else ''}
@@ -2955,7 +2954,7 @@ def render_all_projects_dashboard(
                         </div>
                         <div style="font-size: 1px;">{avg_tat_html}</div>
                     </div>
-                    <div style="margin-bottom:10px;">
+                    <div style="margin-bottom:10px; margin-top:52px;">
                         <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
                         <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week, stage_items, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)}</div>
                     </div>
