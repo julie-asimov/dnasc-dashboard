@@ -37,7 +37,7 @@ class PipelineConfig:
 
     # ── Due-date Google Sheet ─────────────────────────────────────────────────
     DUE_DATES_SHEET_ID: str     = "1qnZdQcviM83FW2ELC-KUAYYLaZoC8GDfjNjjFyB4z0k"
-    DUE_DATES_QUOTA_PROJECT: str = "foundry-prd"
+    DUE_DATES_QUOTA_PROJECT: str = ""
     DUE_DATES_CSV_FALLBACK: str = "due_dates_override.csv"   # place in scripts/ root on any host
 
     # ── LSP ───────────────────────────────────────────────────────────────────
@@ -45,7 +45,7 @@ class PipelineConfig:
     LSP_CUTOFF_DATE: str = "2025-11-01"      # Secondary-pass identity recovery cutoff
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.8.9"
+    PIPELINE_VERSION: str = "1.8.10"
 
     @classmethod
     def get_date_filter(cls) -> str:
