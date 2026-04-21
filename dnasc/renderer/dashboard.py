@@ -2606,6 +2606,18 @@ def render_all_projects_dashboard(
                         pn = _to_list(row.get('protocol_name'))
                         ps = _to_list(row.get('operation_state'))
                         return {p for p, s in zip(pn, ps) if s in ('RD', 'RU')}
+                    def _stage_from_parts(prt_df):
+                        # Prefer real parts types over stray assembly-sibling rows in _prt_s
+                        for _pt in ('pcr_workorder', 'plasmid_synthesis_workorder',
+                                    'syn_part_synthesis_workorder', 'oligo_synthesis_workorder'):
+                            _subset = prt_df[prt_df['type'] == _pt]
+                            if _subset.empty: continue
+                            _tr2 = _subset.iloc[0]
+                            if _pt == 'pcr_workorder': return 'PCR'
+                            if _pt == 'plasmid_synthesis_workorder':
+                                return 'DV/PL1 Build' if not (_tr2.get('vendor') and str(_tr2.get('vendor')) not in ('nan','None','')) else 'Vendor Parts'
+                            return 'Vendor Parts'
+                        return 'Vendor Parts'
                     if is_stalled:
                         _stage = 'Stalled'
                     elif not _lsp_s.empty:
@@ -2624,10 +2636,7 @@ def render_all_projects_dashboard(
                             else: _stage = 'Assembly'
                         else:
                             if not _prt_s.empty:
-                                _tr = _prt_s.iloc[0]
-                                if _tr['type'] == 'pcr_workorder': _stage = 'PCR'
-                                elif _tr['type'] == 'plasmid_synthesis_workorder' and not (_tr.get('vendor') and str(_tr.get('vendor')) not in ('nan','None','')): _stage = 'DV/PL1 Build'
-                                else: _stage = 'Vendor Parts'
+                                _stage = _stage_from_parts(_prt_s)
                             else:
                                 # WAITING GG, no parts in tree — check global parts lookup
                                 # then fall back to backbone lookup in full df.
@@ -2670,10 +2679,7 @@ def render_all_projects_dashboard(
                                         break
                                 _stage = _bb_stage
                     elif not _prt_s.empty:
-                        _tr = _prt_s.iloc[0]
-                        if _tr['type'] == 'pcr_workorder': _stage = 'PCR'
-                        elif _tr['type'] == 'plasmid_synthesis_workorder' and not (_tr.get('vendor') and str(_tr.get('vendor')) not in ('nan','None','')): _stage = 'DV/PL1 Build'
-                        else: _stage = 'Vendor Parts'
+                        _stage = _stage_from_parts(_prt_s)
                     else: _stage = 'Stalled'
                     stage_counts.setdefault(_stage, {})
                     stage_counts[_stage][_week_bucket] = stage_counts[_stage].get(_week_bucket, 0) + 1
