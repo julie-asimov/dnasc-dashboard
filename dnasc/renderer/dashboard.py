@@ -267,26 +267,30 @@ def render_all_projects_dashboard(
             found_wells = re.findall(r'\b(\d{5,8})\b', search_text)
             for w in found_wells: well_to_root[w] = root
 
-    # Global parts lookup: stock_id → list of parts row dicts across ALL requests.
-    # Lets GG/Gibson sections fan in syn parts / PCR workorders that belong to a
-    # different request but are referenced in the GG's parts_json / backbone_json.
-    # Also includes fulfills_request=False GG/Gibson workorders (intermediate plasmids
-    # assembled as inputs) so they can be fanned in to the main assembly's Parts section.
-    _global_parts_rows_by_stock: dict = {}
     _global_parts_types = {'oligo_synthesis_workorder', 'pcr_workorder',
                            'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder'}
     _global_asm_types = {'gibson_workorder', 'golden_gate_workorder'}
+
+    # ADWOA-based fan-in lookup: gg_workorder_id → [part row dicts].
+    # consuming_root_ids populated by bios.py CTE from assemblydesignworkorderassociation.
+    _parts_by_consuming_root: dict = {}
+    # Stock-keyed lookup retained for stage-summary type/vendor checks (not fan-in).
+    _global_parts_rows_by_stock: dict = {}
     for _, _gpr in df[df['type'].isin(_global_parts_types | _global_asm_types)].iterrows():
         if _gpr.get('type') in _global_asm_types and _gpr.get('fulfills_request') != False:
             continue
+        _prow = _gpr.to_dict()
+        # ADWOA fan-in index
+        _cr = _gpr.get('consuming_root_ids')
+        if _cr and not pd.isna(_cr):
+            for _gg_wid in str(_cr).split(','):
+                _gg_wid = _gg_wid.strip()
+                if _gg_wid:
+                    _parts_by_consuming_root.setdefault(_gg_wid, []).append(_prow)
+        # Stock-ID index for stage summary lookups
         _gsid = str(_gpr.get('STOCK_ID', '') or '').strip()
         if _gsid and _gsid not in ('nan', 'None', ''):
-            _global_parts_rows_by_stock.setdefault(_gsid, []).append(_gpr.to_dict())
-
-    # Lookup: workorder_id → assembly_plan_id (used to validate cross-request fan-in)
-    _wid_to_assembly_plan_id: dict = {}
-    for _, _r in df[df['assembly_plan_id'].notna()].iterrows():
-        _wid_to_assembly_plan_id[str(_r['workorder_id'])] = str(_r['assembly_plan_id'])
+            _global_parts_rows_by_stock.setdefault(_gsid, []).append(_prow)
 
     for _, row in df.iterrows():
         wid = str(row['workorder_id'])
@@ -644,6 +648,9 @@ def render_all_projects_dashboard(
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
         document.querySelector('[data-tab="' + tabName + '"]').classList.add('active');
         document.getElementById('tab-' + tabName).classList.add('active');
+        if (tabName === 'capacity' && typeof window.lspInitChart === 'function') {
+            setTimeout(window.lspInitChart, 0);
+        }
     }
     function toggleBucketView(expId) {
         var tl  = document.getElementById('timeline_' + expId);
@@ -1303,60 +1310,19 @@ def render_all_projects_dashboard(
                                 row_map[_fan_pwid] = dict(_fan_prow)
                                 _fanned_wids.add(_fan_pwid)
 
-            # Cross-request STOCK_ID fan-in: for active assemblies, pull in parts
-            # referenced by STOCK_ID that have no direct ADWOA root here. Validate
-            # each candidate by checking that its root GG shares the same
-            # assembly_plan_id as the current GG — confirming they are part of the
-            # same design, not just a coincidental stock name match.
+            # ADWOA-based fan-in: for each GG/Gibson in this section, pull in part
+            # workorders whose consuming_root_ids (set at BQ extraction time) lists
+            # this GG's workorder_id. This is authoritative — BIOS explicitly records
+            # which assembly designs each part belongs to.
             for _gg_wid, _gg_row in list(row_map.items()):
                 if _gg_row.get('type') not in _asm_types_dfs:
                     continue
-                # Skip completed assemblies — parts already consumed.
                 if str(_gg_row.get('wo_status', '') or '') in ('SUCCEEDED', 'FAILED', 'CANCELED'):
                     continue
-                _gg_plan_id = str(_gg_row.get('assembly_plan_id', '') or '')
-                if not _gg_plan_id or _gg_plan_id in ('nan', 'None', ''):
-                    continue
-                _needed_stocks: set = set()
-                _bb = _gg_row.get('backbone', '')
-                if _bb and pd.notna(_bb):
-                    _bb_name = str(_bb).split(':')[0].strip()
-                    if _bb_name:
-                        _needed_stocks.add(_bb_name)
-                _pts = _gg_row.get('parts', '')
-                if _pts and pd.notna(_pts):
-                    for _pt in str(_pts).split(','):
-                        _pt_name = _pt.split(':')[0].strip()
-                        if _pt_name:
-                            _needed_stocks.add(_pt_name)
-                for _ns in _needed_stocks:
-                    _candidates = _global_parts_rows_by_stock.get(_ns, [])
-                    if not _candidates:
-                        continue
-                    if any(str(_c.get('workorder_id', '')) in row_map for _c in _candidates):
-                        continue
-                    # Only include candidates whose root GG shares the same assembly_plan_id
-                    _valid = []
-                    for _c in _candidates:
-                        _c_root = str(_c.get('root_work_order_id', '') or '')
-                        _c_plan = _wid_to_assembly_plan_id.get(_c_root, '') or str(_c.get('assembly_plan_id', '') or '')
-                        if _c_plan == _gg_plan_id:
-                            _valid.append(_c)
-                    if not _valid:
-                        continue
-                    # Among valid candidates pick the most active, then most recent
-                    _status_rank = {'RUNNING': 0, 'READY': 1, 'WAITING': 2,
-                                    'IN_PROGRESS': 3, 'SUCCEEDED': 4, 'FAILED': 5, 'CANCELED': 6}
-                    def _fan_rank(r):
-                        st = str(r.get('visual_status') or r.get('wo_status') or '')
-                        ts = r.get('wo_created_at')
-                        try: neg_ts = -ts.timestamp()
-                        except Exception: neg_ts = 0
-                        return (_status_rank.get(st, 99), neg_ts)
-                    _best = min(_valid, key=_fan_rank)
-                    _gpwid = str(_best.get('workorder_id', ''))
-                    if _gpwid not in row_map:
-                        row_map[_gpwid] = dict(_best)
+                for _prow in _parts_by_consuming_root.get(_gg_wid, []):
+                    _gpwid = str(_prow.get('workorder_id', ''))
+                    if _gpwid and _gpwid not in row_map:
+                        row_map[_gpwid] = dict(_prow)
                         _fanned_wids.add(_gpwid)
 
             for _, row in root_df.iterrows():
@@ -3037,7 +3003,7 @@ def render_all_projects_dashboard(
                     f'<div id="{_chain_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
                     f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
                     f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #34d399;">'
-                    f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Target Cycle</div>'
+                    f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Last Feasible Cycle</div>'
                     f'<div style="display:grid;grid-template-columns:90px 1fr;gap:2px 8px;">{_pop_grid}</div>'
                     f'</div>'
                 )
@@ -3071,7 +3037,7 @@ def render_all_projects_dashboard(
                         f'<div id="{_lsp_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
                         f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
                         f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #38bdf8;">'
-                        f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Target Cycle</div>'
+                        f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Last Feasible Cycle</div>'
                         f'<div style="display:grid;grid-template-columns:90px 1fr;gap:2px 8px;">{_pop_grid}</div>'
                         f'</div>'
                     )
@@ -3285,6 +3251,7 @@ def render_dashboard(df: pd.DataFrame) -> str:
         _checkVersion();
     }})();
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 {html}

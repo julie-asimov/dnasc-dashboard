@@ -101,6 +101,27 @@ class BIOSExtractor:
               AND wo.request_id IS NOT NULL
               AND wo.resubmit_count > 0
             GROUP BY wo.id
+        ),
+
+        consuming_roots AS (
+            -- For each workorder, find the fulfills_request=TRUE GG/Gibson workorder IDs
+            -- that share an assembly design with it (via ADWOA). These are the assemblies
+            -- that consume this workorder as an input (parts, PCR, oligos, etc.).
+            -- Stored as a comma-separated string for pandas compatibility.
+            SELECT
+                adwoa1.workorder_id AS part_workorder_id,
+                STRING_AGG(DISTINCT gg_wo.id ORDER BY gg_wo.id) AS consuming_root_ids
+            FROM `{proj}.bios__src.assemblydesignworkorderassociation` adwoa1
+            JOIN `{proj}.bios__src.assemblydesignworkorderassociation` adwoa2
+                ON adwoa1.assemblydesign_id = adwoa2.assemblydesign_id
+               AND adwoa1.workorder_id != adwoa2.workorder_id
+            JOIN `{proj}.bios__src.workorder` gg_wo
+                ON adwoa2.workorder_id = gg_wo.id
+               AND gg_wo.fulfills_request = TRUE
+               AND gg_wo.type IN ('gibson_workorder', 'golden_gate_workorder')
+               AND gg_wo.deleted_at IS NULL
+               AND gg_wo.status NOT IN ('DRAFT')
+            GROUP BY adwoa1.workorder_id
         )
 
         -- 1. Standard Workorders
@@ -153,10 +174,12 @@ class BIOSExtractor:
             COALESCE(tw.antibiotic, gw.antibiotic, ggw.antibiotic) AS antibiotic,
             COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
             COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
+            cr.consuming_root_ids,
             'BIOS' AS data_source
         FROM `{proj}.bios__src.workorder` wo
         LEFT JOIN ad_roots ad_root ON ad_root.workorder_id = wo.id
         LEFT JOIN plan_attempt_roots par ON par.workorder_id = wo.id
+        LEFT JOIN consuming_roots cr ON cr.part_workorder_id = wo.id
         LEFT JOIN `{proj}.bios__src.assemblyplan` ap ON ap.id = wo.assembly_plan_id
         LEFT JOIN `{proj}.bios__src.experiment` exp ON exp.id = ap.experiment_id
         LEFT JOIN `{proj}.bios__src.gibsonworkorder` gw ON wo.id = gw.id
@@ -224,6 +247,7 @@ class BIOSExtractor:
             COALESCE(tw.antibiotic, gw.antibiotic, ggw.antibiotic) AS antibiotic,
             COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
             COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
+            NULL AS consuming_root_ids,
             'BIOS_DRAFT' AS data_source
         FROM `{proj}.bios__src.workorder` wo
         LEFT JOIN `{proj}.bios__src.assemblyplan` ap ON ap.id = wo.assembly_plan_id
@@ -285,6 +309,7 @@ class BIOSExtractor:
             NULL AS product_json, NULL AS backbone_json, NULL AS parts_json,
             NULL AS cloning_strain, NULL AS antibiotic,
             NULL AS expected_color, NULL AS background_color,
+            NULL AS consuming_root_ids,
             'BIOS_REQUEST' AS data_source
         FROM `{proj}.bios__src.request` req
         LEFT JOIN `{proj}.bios__src.plasmidrequest` pr ON req.id = pr.id
