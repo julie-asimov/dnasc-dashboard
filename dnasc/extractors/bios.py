@@ -75,10 +75,10 @@ class BIOSExtractor:
         ),
 
         plan_attempt_roots AS (
-            -- For each fulfills_request=TRUE GG/Gibson, find the earliest sibling
-            -- with the same assembly_plan_id, same request_id, and same type that is
-            -- not DRAFT/CANCELED/FAILED. That earliest workorder is the "first attempt"
-            -- anchor; all later retries route to it, collapsing into one dashboard section.
+            -- For each fulfills_request=TRUE GG/Gibson that is an explicit BIOS retry
+            -- (resubmit_count > 0), find the earliest active sibling in the same plan.
+            -- Only retries collapse under an anchor — co-designs (resubmit_count = 0)
+            -- are independent submissions and must self-root so each gets its own section.
             -- Matching on request_id prevents cross-construct grouping when a single plan
             -- covers multiple constructs (each construct has its own request).
             SELECT
@@ -99,6 +99,7 @@ class BIOSExtractor:
               AND wo.type IN ('gibson_workorder', 'golden_gate_workorder')
               AND wo.status NOT IN ('DRAFT', 'CANCELED')
               AND wo.request_id IS NOT NULL
+              AND wo.resubmit_count > 0
             GROUP BY wo.id
         )
 

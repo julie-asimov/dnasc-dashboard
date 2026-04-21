@@ -1216,11 +1216,11 @@ def render_all_projects_dashboard(
             _rparts = str(_rrow.get('parts', '') or '')
             if _rparts in ('nan', 'None'): _rparts = ''
             _req_asm_roots_info.append((_r, _rplan, _rts, _rstock, _rbb, _rparts))
-        # Pass 1: same-plan RETRY
+        # Pass 1: same-plan RETRY — must be same design (backbone + parts), not just same plan
         _req_asm_by_plan: dict = {}
         for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
-            _req_asm_by_plan.setdefault(_rplan, []).append((_r, _rts))
-        for _plan, _ars in _req_asm_by_plan.items():
+            _req_asm_by_plan.setdefault((_rplan, _rbb, _rparts), []).append((_r, _rts))
+        for (_plan, _bb, _pts), _ars in _req_asm_by_plan.items():
             if len(_ars) > 1:
                 _ars.sort(key=lambda x: x[1])
                 for _ai, (_r, _) in enumerate(_ars, 1):
@@ -1439,15 +1439,20 @@ def render_all_projects_dashboard(
                         best = child_best
                 return best
 
-            # Section-level attempt numbering: only group roots with the same STOCK_ID.
+            # Section-level attempt numbering: only group roots with the same STOCK_ID + design.
             # Fanned-in Gibsons from other requests may appear in visible_asm_roots but
             # have different STOCK_IDs — they must NOT be numbered as attempts of each other.
+            # Different backbone/parts = different design, not a retry — don't assign attempt numbers.
             if len(visible_asm_roots) > 1:
                 _sec_asm_by_stock: dict = {}
                 for _ar in visible_asm_roots:
                     _arstock = str(row_map[_ar].get('STOCK_ID', '') or '')
-                    _sec_asm_by_stock.setdefault(_arstock, []).append(_ar)
-                for _arstock, _ars in _sec_asm_by_stock.items():
+                    _arbb = str(row_map[_ar].get('backbone', '') or '').strip()
+                    if _arbb in ('nan', 'None'): _arbb = ''
+                    _arpts = str(row_map[_ar].get('parts', '') or '').strip()
+                    if _arpts in ('nan', 'None'): _arpts = ''
+                    _sec_asm_by_stock.setdefault((_arstock, _arbb, _arpts), []).append(_ar)
+                for (_arstock, _, _), _ars in _sec_asm_by_stock.items():
                     if len(_ars) > 1:
                         for _ai, _ar in enumerate(_ars, 1):
                             row_map[_ar]['_attempt_number'] = _ai
