@@ -2072,26 +2072,83 @@ def render_all_projects_dashboard(
                             </div>
                         </div>""")
 
-                    metrics_list = []
-                    strain = row.get('comp_cell') or row.get('cloning_strain')
-                    conc = row.get('qubit_concentration_ngul')
-                    yld = row.get('qubit_yield')
-                    dl_fmt = row.get('delivery_format')
-                    if pd.notna(dl_fmt) and str(dl_fmt) not in ('nan', ''): metrics_list.append(("Format", str(dl_fmt)))
-                    if pd.notna(strain) and str(strain) != 'nan': metrics_list.append(("Strain", str(strain)))
-                    if pd.notna(conc) and str(conc) != 'nan': metrics_list.append(("Qubit", f"{conc} ng/µL"))
-                    if pd.notna(yld) and str(yld) != 'nan': metrics_list.append(("Yield", f"{yld} µg"))
-                    loc = row.get('location')
-                    if pd.notna(loc) and str(loc) != 'nan' and str(loc).strip():
-                        metrics_list.append(("Location", str(loc)))
-                    if metrics_list:
+                    import re as _re
+                    def _fv(v):
+                        try: return f"{float(v):.1f}"
+                        except: return str(v)
+                    _lbl = 'color:#6b7280;font-size:9px;font-weight:700;text-transform:uppercase;'
+                    _val = 'font-size:10px;color:#1e293b;'
+                    def _ok(v): return pd.notna(v) and str(v) not in ('nan', 'None', '')
+                    strain    = row.get('comp_cell') or row.get('cloning_strain')
+                    dl_fmt    = row.get('delivery_format')
+                    q_conc    = row.get('qubit_concentration_ngul')
+                    q_yld     = row.get('qubit_yield')
+                    nd_conc   = row.get('nanodrop_concentration_ngul')
+                    nd_yld    = row.get('nanodrop_yield')
+                    r_260_280 = row.get('ratio_260_280')
+                    r_260_230 = row.get('ratio_260_230')
+                    loc       = row.get('location')
+                    # Parse format threshold: e.g. MIDIPREP_LSP_60_UG_800_NG_UL → conc=800, yld=60
+                    _fmt_str  = str(dl_fmt) if _ok(dl_fmt) else ""
+                    _customer = str(row.get('customer') or "").upper()
+                    _use_nd   = "TECH_OUT" in _customer
+                    _conc_thr, _yld_thr = None, None
+                    _m = _re.search(r'(\d+)_UG[_\s].*?(\d+)_NG_UL', _fmt_str)
+                    if _m:
+                        try: _yld_thr  = float(_m.group(1))
+                        except: pass
+                        try: _conc_thr = float(_m.group(2))
+                        except: pass
+                    def _pass_badge(val, thr):
+                        if thr is None or not _ok(val): return ""
+                        try:
+                            ok = float(val) >= thr
+                            return (' <span style="font-size:9px;font-weight:700;color:%s;">%s</span>'
+                                    % ("#16a34a" if ok else "#dc2626", "✓" if ok else "✗"))
+                        except: return ""
+                    rows2 = []
+                    if _ok(dl_fmt): rows2.append(("Format", str(dl_fmt)))
+                    if _ok(strain): rows2.append(("Strain", str(strain)))
+                    # Qubit row — badge if qubit is the QC measurement
+                    if _ok(q_conc) or _ok(q_yld):
+                        _qv = []
+                        if _ok(q_conc):
+                            _badge = "" if _use_nd else _pass_badge(q_conc, _conc_thr)
+                            _qv.append(f"{_fv(q_conc)} ng/µL{_badge}")
+                        if _ok(q_yld):
+                            _badge = "" if _use_nd else _pass_badge(q_yld, _yld_thr)
+                            _qv.append(f"{_fv(q_yld)} µg{_badge}")
+                        rows2.append(("Qubit", " · ".join(_qv)))
+                    # Nanodrop row — badge if nanodrop is the QC measurement
+                    if _ok(nd_conc) or _ok(nd_yld):
+                        _nv = []
+                        if _ok(nd_conc):
+                            _badge = _pass_badge(nd_conc, _conc_thr) if _use_nd else ""
+                            _nv.append(f"{_fv(nd_conc)} ng/µL{_badge}")
+                        if _ok(nd_yld):
+                            _badge = _pass_badge(nd_yld, _yld_thr) if _use_nd else ""
+                            _nv.append(f"{_fv(nd_yld)} µg{_badge}")
+                        rows2.append(("Nanodrop", " · ".join(_nv)))
+                    # 260/280 and 260/230
+                    if _ok(r_260_280) or _ok(r_260_230):
+                        _rv = []
+                        if _ok(r_260_280): _rv.append(f"260/280: {_fv(r_260_280)}")
+                        if _ok(r_260_230): _rv.append(f"260/230: {_fv(r_260_230)}")
+                        rows2.append(("Ratios", " · ".join(_rv)))
+                    # Nanodrop/Qubit fold difference
+                    if _ok(nd_conc) and _ok(q_conc):
+                        try:
+                            _fold = float(nd_conc) / float(q_conc)
+                            rows2.append(("ND/QB", f"{_fold:.2f}×"))
+                        except: pass
+                    if _ok(loc): rows2.append(("Location", str(loc)))
+                    if rows2:
                         grid_cells = "".join(
-                            f'<span style="color:#6b7280;font-size:9px;font-weight:700;text-transform:uppercase;">{lbl}</span>'
-                            f'<span style="font-size:10px;color:#1e293b;">{val}</span>'
-                            for lbl, val in metrics_list
+                            f'<span style="{_lbl}">{lbl}</span><span style="{_val}">{val}</span>'
+                            for lbl, val in rows2
                         )
                         lsp_parts.append(
-                            f'<div style="display:grid;grid-template-columns:52px 1fr;gap:2px 6px;margin-bottom:4px;">{grid_cells}</div>'
+                            f'<div style="display:grid;grid-template-columns:58px 1fr;gap:2px 6px;margin-bottom:4px;">{grid_cells}</div>'
                         )
                     details_info += "".join(lsp_parts)
 
@@ -2681,7 +2738,7 @@ def render_all_projects_dashboard(
             exp_created_raw = project_df['experiment_created_at'].iloc[0]
             exp_created_dt = to_est(exp_created_raw)
             if exp_created_dt:
-                exp_created_str = exp_created_dt.strftime('%Y-%m-%d')
+                exp_created_str = exp_created_dt.strftime('%Y-%m-%d · %-I:%M %p EST')
 
         # ── Due date (from Google Sheet / CSV override) ───────────────────────
         _NO_TIMELINE_MARKERS = {"LSP Refill Requests", "A469-Build DNASC CHO Destination Vectors"}
@@ -2740,21 +2797,28 @@ def render_all_projects_dashboard(
                     if exp_created_dt:
                         _ngs_dt    = _due_dt - pd.Timedelta(days=1)
                         _gantt_dt  = datetime.strptime(_gantt_str, "%Y-%m-%d").replace(tzinfo=pytz.UTC) if _gantt_str else None
+                        # Compute ASM pos for bracket start (last Mon/Thu before due, minus 13 days)
+                        _due_ngs_adj = _ngs_dt
+                        for _bi in range(7):
+                            _bc = _due_dt - pd.Timedelta(days=_bi+1)
+                            if _bc.weekday() in (0, 3): _due_ngs_adj = _bc; break
+                        _due_asm_dt  = _due_ngs_adj - pd.Timedelta(days=13)
+                        _due_asm_pos = max(0, _pos(_due_asm_dt))
                         _ngs_pos   = _pos(_ngs_dt)
                         _due_pos   = _pos(_due_dt)
                         _gantt_pos = _pos(_gantt_dt) if _gantt_dt else _due_pos
                         if 0 < _due_pos <= 100:
                             _dr            = (_due_dt.date() - _now_utc.date()).days
                             _urgency_color = "#f87171" if _dr < 0 else "#fcd34d" if _dr <= 7 else "#6ee7b7"
-                            _range_width   = max(0.5, _gantt_pos - _ngs_pos)
+                            _range_width   = max(0.5, _gantt_pos - _due_asm_pos)
                             _ngs_label     = _ngs_dt.strftime("%a %b %-d")
                             _due_label     = _due_dt.strftime("%a %b %-d")
                             _gantt_label   = _gantt_dt.strftime("%a %-m/%-d") if _gantt_dt else ""
                             _pop_id        = f"duepop_{safe_exp_id}"
                             _pill_text     = f"DUE {_due_dt.strftime('%a %-m/%-d')}"
                             _due_marker_html = (
-                                # Range bar
-                                f'<div style="position:absolute;left:{_ngs_pos:.2f}%;top:0;'
+                                # Range bar: ASM → due/gantt
+                                f'<div style="position:absolute;left:{_due_asm_pos:.2f}%;top:0;'
                                 f'width:{_range_width:.2f}%;height:100%;'
                                 f'background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.4);'
                                 f'border-radius:3px;z-index:1;pointer-events:none;"></div>'
@@ -2763,8 +2827,8 @@ def render_all_projects_dashboard(
                                 f'width:4px;height:28px;background:white;border-radius:1px;'
                                 f'box-shadow:0 0 8px rgba(0,0,0,0.5);z-index:4;transform:translateX(-50%);pointer-events:none;"></div>'
                                 # Hover wrapper + pill
-                                f'<div style="position:absolute;left:{_due_pos:.2f}%;top:-74px;'
-                                f'width:90px;height:72px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
+                                f'<div style="position:absolute;left:{_due_pos:.2f}%;top:25px;'
+                                f'width:90px;height:20px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
                                 f' onmouseenter="document.getElementById(\'{_pop_id}\').style.display=\'block\'"'
                                 f' onmouseleave="document.getElementById(\'{_pop_id}\').style.display=\'none\'">'
                                 f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
@@ -2810,17 +2874,19 @@ def render_all_projects_dashboard(
                 def _pos2(dt):
                     d = dt.date() if hasattr(dt, 'date') else dt
                     return min(100, max(0, (d - _ec_date2).days / _8w * 100))
+                _def_asm_dt  = _last_ngs_b(_red_thresh_dt - _td2(days=1)) - _td2(days=13)
                 _def_ngs_pos = _pos2(_def_ngs_dt)
                 _def_red_pos = _pos2(_red_thresh_dt)
                 _def_due_pos = _pos2(_def_due_dt)
-                _def_width   = max(0.5, _def_red_pos - _def_ngs_pos)
+                _def_asm_pos = max(0, _pos2(_def_asm_dt))
+                _def_width   = max(0.5, _def_red_pos - _def_asm_pos)
                 _def_pop_id  = f"defduepop_{safe_exp_id}"
                 _def_ngs_str = _def_ngs_dt.strftime("%a %b %-d")
                 _def_due_str = _def_due_dt.strftime("%a %-m/%-d")
                 _def_red_str = _red_thresh_dt.strftime("%a %b %-d")
                 _default_bracket_html = (
-                    # White semi-transparent bracket: NGS → red threshold
-                    f'<div style="position:absolute;left:{_def_ngs_pos:.2f}%;top:0;'
+                    # White semi-transparent bracket: ASM → red threshold
+                    f'<div style="position:absolute;left:{_def_asm_pos:.2f}%;top:0;'
                     f'width:{_def_width:.2f}%;height:100%;'
                     f'background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.45);'
                     f'border-radius:3px;z-index:1;pointer-events:none;"></div>'
@@ -2830,8 +2896,8 @@ def render_all_projects_dashboard(
                     f'width:4px;height:28px;background:#c4b5fd;border-radius:1px;'
                     f'box-shadow:0 0 8px rgba(167,139,250,0.7);z-index:4;transform:translateX(-50%);pointer-events:none;"></div>'
                     # Hover wrapper: pill + popover
-                    f'<div style="position:absolute;left:{_def_due_pos:.2f}%;top:-74px;'
-                    f'width:80px;height:72px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
+                    f'<div style="position:absolute;left:{_def_due_pos:.2f}%;top:25px;'
+                    f'width:80px;height:20px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
                     f' onmouseenter="document.getElementById(\'{_def_pop_id}\').style.display=\'block\'"'
                     f' onmouseleave="document.getElementById(\'{_def_pop_id}\').style.display=\'none\'">'
                     # Light-purple DUE pill
@@ -2868,54 +2934,161 @@ def render_all_projects_dashboard(
                     return cand
             return dt
         _is_refill = _is_infra_exp
-        def _threshold_html(week, color, glow, pop_id, show_popover=True, label_top=-52):
+        def _threshold_bar(week, color, glow):
+            """Colored vertical bar only — no pill."""
             if not exp_created_dt or _is_refill:
                 return ""
-            _thresh_dt = exp_created_dt + _td(weeks=week)
-            _left      = f"{(week/8)*100}%"
-            _thresh_str = _thresh_dt.strftime("%a %-m/%-d")
-            _bar = (f'<div style="position:absolute;left:{_left};width:2px;height:28px;background:{color};'
+            _left = f"{(week/8)*100}%"
+            return (f'<div style="position:absolute;left:{_left};width:2px;height:28px;background:{color};'
                     f'top:-3px;border-radius:1px;box-shadow:0 0 6px {glow};z-index:2;"></div>')
-            if show_popover:
-                _ngs_dt    = _last_ngs_before(_thresh_dt - _td(days=1))
-                _ngs_str   = _ngs_dt.strftime("%a %b %-d")
-                _thresh_full = _thresh_dt.strftime("%a %b %-d")
-                _label = (
-                    f'<div style="position:absolute;left:{_left};top:{label_top}px;transform:translateX(-50%);'
-                    f'background:{color};color:white;font-size:9px;font-weight:700;'
-                    f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
-                    f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.6);'
-                    f'z-index:20;cursor:pointer;"'
-                    f' onmouseenter="document.getElementById(\'{pop_id}\').style.display=\'block\'"'
-                    f' onmouseleave="document.getElementById(\'{pop_id}\').style.display=\'none\'">'
-                    f'{_thresh_str}'
-                    f'<div id="{pop_id}" style="display:none;position:absolute;left:50%;top:22px;transform:translateX(-50%);'
-                    f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
-                    f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid {color};font-weight:400;">'
-                    f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">{int(week)}w Threshold</div>'
-                    f'<div style="display:grid;grid-template-columns:80px 1fr;gap:2px 8px;">'
-                    f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Last NGS</span>'
-                    f'<span style="font-weight:600;">{_ngs_str}</span>'
-                    f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Threshold</span>'
-                    f'<span style="font-weight:600;color:{color};">{_thresh_full}</span>'
-                    f'</div></div></div>'
-                )
+        _orange_html = _threshold_bar(orange_week, "#f97316", "rgba(249,115,22,0.6)")
+        _red_html    = _threshold_bar(red_week,    "#be185d", "rgba(190,24,93,0.6)")
+
+        # Dynamic week header: two-line labels absolutely positioned at exact grid-line %
+        # Row 1: week number (bold)  Row 2: date (smaller)
+        # Pills use height:20px so their hover area stays in row-1 zone, clear of row-2 dates
+        _bs = 'position:absolute;font-family:monospace;white-space:nowrap;text-align:center;line-height:1.4;'
+        _start_date_str = exp_created_dt.strftime("%a %-m/%-d") if exp_created_dt else ""
+        _weeks_header_html = (
+            f'<span style="{_bs}left:0;transform:translateX(0);text-align:left;">'
+            f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;'
+            f'text-shadow:0 1px 3px rgba(0,0,0,0.4);">START</span>'
+            + (f'<br><span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.9);">{_start_date_str}</span>' if _start_date_str else '')
+            + f'</span>'
+        )
+        for _wh in range(1, 8):
+            _wh_pct = _wh / 8 * 100
+            if exp_created_dt and not _is_refill:
+                _wh_date = (exp_created_dt + _td(weeks=_wh)).strftime("%a %-m/%-d")
+                if _wh == orange_week:
+                    _wh_num = f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">{_wh}w</span>'
+                    _wh_dt  = f'<span style="font-size:11px;font-weight:800;color:#f97316;">{_wh_date}</span>'
+                elif _wh == red_week:
+                    _wh_num = f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">{_wh}w</span>'
+                    _wh_dt  = f'<span style="font-size:11px;font-weight:800;color:#fb7185;">{_wh_date}</span>'
+                else:
+                    _wh_num = f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">{_wh}w</span>'
+                    _wh_dt  = f'<span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.9);">{_wh_date}</span>'
+                _wh_txt = f'{_wh_num}<br>{_wh_dt}'
             else:
-                # No popover — plain pill only
-                _label = (
-                    f'<div style="position:absolute;left:{_left};top:{label_top}px;transform:translateX(-50%);'
-                    f'background:{color};color:white;font-size:9px;font-weight:700;'
-                    f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
-                    f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.6);z-index:20;">'
-                    f'{_thresh_str}</div>'
-                )
-            return _label + _bar
-        _orange_html = _threshold_html(orange_week, "#f97316", "rgba(249,115,22,0.6)", f"tpop_o_{safe_exp_id}", show_popover=False)
-        _red_html    = _threshold_html(red_week,    "#be185d", "rgba(190,24,93,0.6)",  f"tpop_r_{safe_exp_id}", show_popover=True)
+                _wh_txt = f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;">{_wh}w</span>'
+            _weeks_header_html += f'<span style="{_bs}left:{_wh_pct:.2f}%;transform:translateX(-50%);">{_wh_txt}</span>'
+        if exp_created_dt and not _is_refill:
+            _wh_8_date = (exp_created_dt + _td(weeks=8)).strftime("%a %-m/%-d")
+            _wh_8_txt = (f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">8w+</span>'
+                         f'<br><span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.9);">{_wh_8_date}</span>')
+        else:
+            _wh_8_txt = '<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;">8w+</span>'
+        _weeks_header_html += f'<span style="{_bs}right:0;transform:translateX(0);text-align:right;">{_wh_8_txt}</span>'
         if _is_refill:
             _default_bracket_html = ""
             _due_marker_html = ""
-        timeline_bar = f"""<div style="margin: 10px 12px 8px 12px; padding: 10px; background: rgba(0,0,0,0.15); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);"><div style="display:flex; justify-content:space-between; font-size:11px; color:rgba(255,255,255,1); margin-bottom:8px; font-family:monospace; font-weight:900; letter-spacing:1px; text-shadow: 0 1px 3px rgba(0,0,0,0.4);"><span>START</span><span>1w</span><span>2w</span><span>3w</span><span>4w</span><span>5w</span><span>6w</span><span>7w</span><span>8w+</span></div><div style="position:relative; width:100%; height:22px; background:rgba(255,255,255,0.15); border-radius:11px; box-shadow: inset 0 1px 4px rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2);">{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; width:1px; height:100%; background:rgba(255,255,255,0.1); z-index:1;"></div>' for w in range(1,8)])}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}</div>
+
+        # ── ASM / LSP scale-up markers (predetermined from TAT / due-date schedule) ──
+        _asm_markers_html = ""
+        if exp_created_dt and not _is_refill:
+            try:
+                # Determine reference NGS date from due date override or TAT threshold
+                _tat_weeks2 = 5 if has_ptr else 6
+                _thresh2 = exp_created_dt + _td(weeks=_tat_weeks2)
+                _due_ref_str = (_due_entry_data or {}).get("due_date", "") if _due_entry_data else ""
+                if _due_ref_str:
+                    _due_ref_dt = datetime.strptime(_due_ref_str, "%Y-%m-%d").replace(tzinfo=pytz.UTC)
+                    _ref_ngs_dt = _last_ngs_before(_due_ref_dt - _td(days=1))
+                else:
+                    _ref_ngs_dt = _last_ngs_before(_thresh2 - _td(days=1))
+
+                _asm_dt   = _ref_ngs_dt - _td(days=13)
+                _dnasc_dt = _ref_ngs_dt - _td(days=6)
+                _ngs_wd   = _ref_ngs_dt.weekday()
+                _lsp_start_dt = (_ref_ngs_dt - _td(days=5) if _ngs_wd == 0
+                                 else _ref_ngs_dt - _td(days=3) if _ngs_wd == 3
+                                 else None)
+                _received_dt = (_ref_ngs_dt - _td(days=3) if _ngs_wd == 0
+                                else _ref_ngs_dt - _td(days=1))
+                _rel_dt = _ref_ngs_dt + _td(days=1)
+
+                _ec2 = exp_created_dt.date()
+                def _posm(dt):
+                    d = dt.date() if hasattr(dt, 'date') else dt
+                    return min(100, max(0, (d - _ec2).days / 56.0 * 100))
+
+                _chain_pop_id = f"chainpop_{safe_exp_id}"
+                _pop_rows = [("Assembly", _asm_dt.strftime("%a %b %-d")),
+                             ("ASM NGS", _dnasc_dt.strftime("%a %b %-d"))]
+                if _lsp_start_dt:
+                    _pop_rows.append(("LSP scale-up", _lsp_start_dt.strftime("%a %b %-d")))
+                _pop_rows += [("LSP received", _received_dt.strftime("%a %b %-d")),
+                              ("LSP NGS", _ref_ngs_dt.strftime("%a %b %-d")),
+                              ("Release", _rel_dt.strftime("%a %b %-d"))]
+                _pop_grid = "".join(
+                    f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">{_k}</span>'
+                    f'<span style="font-weight:600;">{_v}</span>'
+                    for _k, _v in _pop_rows
+                )
+
+                _chain_pop_html = (
+                    f'<div id="{_chain_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
+                    f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
+                    f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #34d399;">'
+                    f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Target Cycle</div>'
+                    f'<div style="display:grid;grid-template-columns:90px 1fr;gap:2px 8px;">{_pop_grid}</div>'
+                    f'</div>'
+                )
+
+                # ASM marker (green) + chain popover
+                _asm_pos = _posm(_asm_dt)
+                _asm_str = _asm_dt.strftime("%a %-m/%-d")
+                if 0 <= _asm_pos <= 100:
+                    _asm_markers_html += (
+                        f'<div style="position:absolute;left:{_asm_pos:.2f}%;top:-3px;'
+                        f'width:3px;height:28px;background:#34d399;border-radius:1px;'
+                        f'box-shadow:0 0 6px rgba(52,211,153,0.7);z-index:5;transform:translateX(-50%);pointer-events:none;"></div>'
+                        f'<div style="position:absolute;left:{_asm_pos:.2f}%;top:25px;'
+                        f'width:90px;height:20px;transform:translateX(-50%);z-index:26;cursor:pointer;"'
+                        f' onmouseenter="document.getElementById(\'{_chain_pop_id}\').style.display=\'block\'"'
+                        f' onmouseleave="document.getElementById(\'{_chain_pop_id}\').style.display=\'none\'">'
+                        f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
+                        f'background:#059669;color:white;font-size:9px;font-weight:700;'
+                        f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
+                        f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid #34d399;">ASM {_asm_str}</div>'
+                        f'{_chain_pop_html}'
+                        f'</div>'
+                    )
+
+                # LSP scale-up marker (sky blue) + same popover
+                if _lsp_start_dt:
+                    _lsp_pos = _posm(_lsp_start_dt)
+                    _lsp_str = _lsp_start_dt.strftime("%a %-m/%-d")
+                    _lsp_pop_id = f"lsppop_{safe_exp_id}"
+                    _lsp_pop_html = (
+                        f'<div id="{_lsp_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
+                        f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
+                        f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #38bdf8;">'
+                        f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Target Cycle</div>'
+                        f'<div style="display:grid;grid-template-columns:90px 1fr;gap:2px 8px;">{_pop_grid}</div>'
+                        f'</div>'
+                    )
+                    if 0 <= _lsp_pos <= 100:
+                        _asm_markers_html += (
+                            f'<div style="position:absolute;left:{_lsp_pos:.2f}%;top:-3px;'
+                            f'width:3px;height:28px;background:#38bdf8;border-radius:1px;'
+                            f'box-shadow:0 0 6px rgba(56,189,248,0.7);z-index:5;transform:translateX(-50%);pointer-events:none;"></div>'
+                            f'<div style="position:absolute;left:{_lsp_pos:.2f}%;top:25px;'
+                            f'width:90px;height:20px;transform:translateX(-50%);z-index:26;cursor:pointer;"'
+                            f' onmouseenter="document.getElementById(\'{_lsp_pop_id}\').style.display=\'block\'"'
+                            f' onmouseleave="document.getElementById(\'{_lsp_pop_id}\').style.display=\'none\'">'
+                            f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
+                            f'background:#0284c7;color:white;font-size:9px;font-weight:700;'
+                            f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
+                            f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid #38bdf8;">LSP {_lsp_str}</div>'
+                            f'{_lsp_pop_html}'
+                            f'</div>'
+                        )
+            except Exception:
+                pass
+
+        timeline_bar = f"""<div style="margin: 10px 12px 8px 12px; padding: 10px; background: rgba(0,0,0,0.15); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);"><div style="position:relative; width:100%; height:42px; margin-bottom:8px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:30px; background:rgba(255,255,255,0.15); border-radius:11px; box-shadow: inset 0 1px 4px rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2);">{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; width:1px; height:100%; background:rgba(255,255,255,0.1); z-index:1;"></div>' for w in range(1,8)])}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}</div>
             <div style="display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:10px; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
               <div style="display:flex; align-items:center; gap:8px; color:white; font-size:9px; font-weight:600;">
                   <span style="color:rgba(255,255,255,0.7);">IN PROGRESS:</span>
