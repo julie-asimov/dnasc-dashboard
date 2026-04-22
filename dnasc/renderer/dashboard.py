@@ -212,7 +212,8 @@ def render_all_projects_dashboard(
 
             # Grouping Engine
             def _job_null(j):
-                return j is None or (isinstance(j, float) and pd.isna(j))
+                try: return j is None or bool(pd.isna(j))
+                except TypeError: return False
             if not current_group:
                 current_group.append(clean_op)
             else:
@@ -378,9 +379,26 @@ def render_all_projects_dashboard(
             if original in ('RUNNING', 'IN_PROGRESS') and seq > 0:
                 return 'SUCCEEDED', False
 
-            # Zero Colony: BIOS=SUCCEEDED but no colonies in LIMS → always a failure
+            # Zero Colony: BIOS=SUCCEEDED but no colonies in LIMS → failure only if
+            # transformation has already run. If transformation is still pending
+            # (RD/RU), colonies haven't been plated yet — use actual op state.
             if original == 'SUCCEEDED':
                 if tot == 0:
+                    protocols = row.get('protocol_name')
+                    if isinstance(protocols, np.ndarray): protocols = list(protocols)
+                    _states_now = row.get('operation_state')
+                    if isinstance(_states_now, np.ndarray): _states_now = list(_states_now)
+                    if isinstance(protocols, list) and isinstance(_states_now, list):
+                        _transf_done = any(
+                            p in ('STAR Transformation', 'Transformation',
+                                  'Create Minipreps and Glycerol Stocks')
+                            and s in ('SC', 'FA')
+                            for p, s in zip(protocols, _states_now)
+                        )
+                        if not _transf_done:
+                            if any(s == 'RU' for s in _states_now): return 'RUNNING', False
+                            if any(s == 'RD' for s in _states_now): return 'READY', False
+                            return 'IN_PROGRESS', False
                     return 'FAILED', False
 
                 protocols = row.get('protocol_name')
