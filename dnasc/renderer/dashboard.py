@@ -399,6 +399,13 @@ def render_all_projects_dashboard(
                             if any(s == 'RU' for s in _states_now): return 'RUNNING', False
                             if any(s == 'RD' for s in _states_now): return 'READY', False
                             return 'IN_PROGRESS', False
+                        # Transformation done but minipreps still pending — colonies exist, not yet processed
+                        miniprep_state = next(
+                            (s for p, s in zip(protocols, _states_now)
+                             if p == 'Create Minipreps and Glycerol Stocks'), None
+                        )
+                        if miniprep_state == 'RD': return 'READY', False
+                        if miniprep_state == 'RU': return 'RUNNING', False
                     return 'FAILED', False
 
                 protocols = row.get('protocol_name')
@@ -1241,37 +1248,55 @@ def render_all_projects_dashboard(
             _rparts = str(_rrow.get('parts', '') or '')
             if _rparts in ('nan', 'None'): _rparts = ''
             _req_asm_roots_info.append((_r, _rplan, _rts, _rstock, _rbb, _rparts))
-        # Pass 1: same-plan RETRY — must be same design (backbone + parts), not just same plan
-        _req_asm_by_plan: dict = {}
-        for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
-            _req_asm_by_plan.setdefault((_rplan, _rbb, _rparts), []).append((_r, _rts))
-        for (_plan, _bb, _pts), _ars in _req_asm_by_plan.items():
-            if len(_ars) > 1:
-                _ars.sort(key=lambda x: x[1])
-                for _ai, (_r, _) in enumerate(_ars, 1):
-                    _kind = '' if _ai == 1 else 'RETRY'
-                    _req_asm_attempt_map[_r] = (_ai, len(_ars), _kind)
-        # Pass 2: cross-plan MANUAL — group by (STOCK_ID, backbone, parts)
-        _req_asm_by_design_xplan: dict = {}
-        for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
-            if not _rstock or _r in _req_asm_attempt_map:
-                continue
-            _design_key = (_rstock, _rbb, _rparts)
-            _req_asm_by_design_xplan.setdefault(_design_key, []).append((_r, _rplan, _rts))
-        # Cross-plan sub-roots: fold into primary section (same as same-plan retries).
-        # _sec_asm_by_stock within the merged section handles attempt numbering.
+        # Build anchor → sub-roots map from attempt_anchor_id (pre-computed in BQ).
+        # Falls back to renderer-side design-key grouping for old parquets.
         _cross_plan_sub_roots: set = set()
-        _cross_plan_sub_roots_for: dict = {}  # primary_root → [sub_roots]
-        for _design_key, _ars in _req_asm_by_design_xplan.items():
-            if len(_ars) > 1:
-                _ars.sort(key=lambda x: x[2])
-                _primary = _ars[0][0]
-                for _r, _, _ in _ars[1:]:
-                    _cross_plan_sub_roots.add(_r)
-                    _cross_plan_sub_roots_for.setdefault(_primary, []).append(_r)
-                # Remove from attempt map — within-section numbering takes over
-                for _r, _, _ in _ars:
-                    _req_asm_attempt_map.pop(_r, None)
+        _cross_plan_sub_roots_for: dict = {}  # anchor_root → [sub_roots sorted by attempt_number]
+
+        _has_anchor_col = "attempt_anchor_id" in req_df.columns
+
+        if _has_anchor_col:
+            # New path: read BQ-pre-computed grouping — single pass, no design-key logic
+            _anchor_rows: dict = {}
+            for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
+                _rrows = req_df[req_df["workorder_id"] == _r]
+                if _rrows.empty: continue
+                _anchor = str(_rrows.iloc[0].get("attempt_anchor_id") or _r)
+                if _anchor in ("nan", "None", ""): _anchor = _r
+                _anum = _rrows.iloc[0].get("attempt_number")
+                _anum = int(_anum) if pd.notna(_anum) else 1
+                _anchor_rows.setdefault(_anchor, []).append((_anum, _r))
+            for _anchor, _pairs in _anchor_rows.items():
+                if len(_pairs) > 1:
+                    _pairs.sort(key=lambda x: x[0])
+                    for _, _r in _pairs[1:]:
+                        _cross_plan_sub_roots.add(_r)
+                        _cross_plan_sub_roots_for.setdefault(_anchor, []).append(_r)
+        else:
+            # Fallback: renderer-side design-key grouping (same-plan then cross-plan)
+            _req_asm_by_plan: dict = {}
+            for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
+                _req_asm_by_plan.setdefault((_rplan, _rbb, _rparts), []).append((_r, _rts))
+            for (_plan, _bb, _pts), _ars in _req_asm_by_plan.items():
+                if len(_ars) > 1:
+                    _ars.sort(key=lambda x: x[1])
+                    _primary = _ars[0][0]
+                    for _r, _ in _ars[1:]:
+                        _cross_plan_sub_roots.add(_r)
+                        _cross_plan_sub_roots_for.setdefault(_primary, []).append(_r)
+            _req_asm_by_design_xplan: dict = {}
+            for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
+                if not _rstock or _r in _cross_plan_sub_roots: continue
+                _req_asm_by_design_xplan.setdefault((_rstock, _rbb, _rparts), []).append((_r, _rplan, _rts))
+            for _design_key, _ars in _req_asm_by_design_xplan.items():
+                if len(_ars) > 1:
+                    _ars.sort(key=lambda x: x[2])
+                    _primary = _ars[0][0]
+                    for _r, _, _ in _ars[1:]:
+                        _cross_plan_sub_roots.add(_r)
+                        _cross_plan_sub_roots_for.setdefault(_primary, []).append(_r)
+                    for _r, _, _ in _ars:
+                        _req_asm_attempt_map.pop(_r, None)
 
         for root_id in sorted_roots:
             if root_id in _cross_plan_sub_roots:
@@ -1423,30 +1448,44 @@ def render_all_projects_dashboard(
                         best = child_best
                 return best
 
-            # Section-level attempt numbering: only group roots with the same STOCK_ID + design.
-            # Fanned-in Gibsons from other requests may appear in visible_asm_roots but
-            # have different STOCK_IDs — they must NOT be numbered as attempts of each other.
-            # Different backbone/parts = different design, not a retry — don't assign attempt numbers.
+            # Assign attempt numbers from BQ-pre-computed columns when available,
+            # otherwise fall back to design-key grouping within the section.
             if len(visible_asm_roots) > 1:
-                _sec_asm_by_stock: dict = {}
-                for _ar in visible_asm_roots:
-                    _arstock = str(row_map[_ar].get('STOCK_ID', '') or '')
-                    _arbb = str(row_map[_ar].get('backbone', '') or '').strip()
-                    if _arbb in ('nan', 'None'): _arbb = ''
-                    _arpts = str(row_map[_ar].get('parts', '') or '').strip()
-                    if _arpts in ('nan', 'None'): _arpts = ''
-                    _sec_asm_by_stock.setdefault((_arstock, _arbb, _arpts), []).append(_ar)
-                for (_arstock, _, _), _ars in _sec_asm_by_stock.items():
-                    if len(_ars) > 1:
-                        for _ai, _ar in enumerate(_ars, 1):
-                            row_map[_ar]['_attempt_number'] = _ai
-                            row_map[_ar]['_attempt_total'] = len(_ars)
-                            if _ai > 1:
+                if _has_anchor_col:
+                    # New path: attempt_number/attempt_total already in parquet
+                    for _ar in visible_asm_roots:
+                        _anum = row_map[_ar].get('attempt_number')
+                        _atot = row_map[_ar].get('attempt_total')
+                        if pd.notna(_anum) and pd.notna(_atot) and int(_atot or 1) > 1:
+                            row_map[_ar]['_attempt_number'] = int(_anum)
+                            row_map[_ar]['_attempt_total']  = int(_atot)
+                            if int(_anum) > 1:
                                 _ar_resubmit = row_map[_ar].get('resubmit_count')
                                 _ar_is_retry = (isinstance(_ar_resubmit, (int, float))
                                                 and not pd.isna(_ar_resubmit)
                                                 and int(_ar_resubmit) > 0)
                                 row_map[_ar]['_attempt_kind'] = 'RETRY' if _ar_is_retry else 'MANUAL'
+                else:
+                    # Fallback: derive from design-key grouping within section
+                    _sec_asm_by_stock: dict = {}
+                    for _ar in visible_asm_roots:
+                        _arstock = str(row_map[_ar].get('STOCK_ID', '') or '')
+                        _arbb = str(row_map[_ar].get('backbone', '') or '').strip()
+                        if _arbb in ('nan', 'None'): _arbb = ''
+                        _arpts = str(row_map[_ar].get('parts', '') or '').strip()
+                        if _arpts in ('nan', 'None'): _arpts = ''
+                        _sec_asm_by_stock.setdefault((_arstock, _arbb, _arpts), []).append(_ar)
+                    for (_arstock, _, _), _ars in _sec_asm_by_stock.items():
+                        if len(_ars) > 1:
+                            for _ai, _ar in enumerate(_ars, 1):
+                                row_map[_ar]['_attempt_number'] = _ai
+                                row_map[_ar]['_attempt_total'] = len(_ars)
+                                if _ai > 1:
+                                    _ar_resubmit = row_map[_ar].get('resubmit_count')
+                                    _ar_is_retry = (isinstance(_ar_resubmit, (int, float))
+                                                    and not pd.isna(_ar_resubmit)
+                                                    and int(_ar_resubmit) > 0)
+                                    row_map[_ar]['_attempt_kind'] = 'RETRY' if _ar_is_retry else 'MANUAL'
             # Always assign chain status for assembly roots (even single-attempt, used in banner)
             for _ar in visible_asm_roots:
                 row_map[_ar]['_attempt_chain_status'] = _subtree_best_status(_ar)
@@ -2591,16 +2630,18 @@ def render_all_projects_dashboard(
                         ps = _to_list(row.get('operation_state'))
                         return {p for p, s in zip(pn, ps) if s in ('RD', 'RU')}
                     def _stage_from_parts(prt_df):
-                        # Prefer real parts types over stray assembly-sibling rows in _prt_s
-                        for _pt in ('pcr_workorder', 'plasmid_synthesis_workorder',
-                                    'syn_part_synthesis_workorder', 'oligo_synthesis_workorder'):
-                            _subset = prt_df[prt_df['type'] == _pt]
-                            if _subset.empty: continue
-                            _tr2 = _subset.iloc[0]
-                            if _pt == 'pcr_workorder': return 'PCR'
-                            if _pt == 'plasmid_synthesis_workorder':
-                                return 'DV/PL1 Build' if not (_tr2.get('vendor') and str(_tr2.get('vendor')) not in ('nan','None','')) else 'Vendor Parts'
-                            return 'Vendor Parts'
+                        _type_stage = {
+                            'pcr_workorder':              'PCR',
+                            'syn_part_synthesis_workorder': 'Vendor Parts',
+                            'oligo_synthesis_workorder':  'Vendor Parts',
+                        }
+                        for _pt, _label in _type_stage.items():
+                            if not prt_df[prt_df['type'] == _pt].empty:
+                                return _label
+                        _psw = prt_df[prt_df['type'] == 'plasmid_synthesis_workorder']
+                        if not _psw.empty:
+                            _v = str(_psw.iloc[0].get('vendor') or '')
+                            return 'Vendor Parts' if _v not in ('', 'nan', 'None') else 'DV/PL1 Build'
                         return 'Vendor Parts'
                     if is_stalled:
                         _stage = 'Stalled'
