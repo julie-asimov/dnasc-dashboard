@@ -1232,7 +1232,7 @@ def render_all_projects_dashboard(
             _rrow = _rrows.iloc[0]
             if _rrow.get('type', '') not in _asm_types_req:
                 continue
-            if str(_rrow.get('wo_status', '') or '') in ('DRAFT', 'CANCELED'):
+            if str(_rrow.get('wo_status', '') or '') in ('DRAFT',):
                 continue
             # Only count sections where the root GG/Gibson is self-rooted
             if str(_rrow.get('root_work_order_id', '')) != str(_r):
