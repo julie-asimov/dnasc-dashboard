@@ -74,7 +74,10 @@ class RepairTransformer:
 # ─────────────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def create_synthetic_streakouts(df: pd.DataFrame) -> pd.DataFrame:
+    def create_synthetic_streakouts(
+        df: pd.DataFrame,
+        well_mapping: dict[str, str] | None = None,
+    ) -> pd.DataFrame:
         """
         Create synthetic workorder rows for OpTracker processes that have no
         corresponding BIOS workorder (e.g. offline streakouts, cell-name UUIDs).
@@ -82,16 +85,20 @@ class RepairTransformer:
         """
         log.info("Creating synthetic streakout workorders...")
         proj   = PipelineConfig.PROJECT_ID
-        client = bigquery.Client(project=proj)
         df     = df.copy()
 
         # ── Build recursive well → workorder map ──────────────────────────────
-        try:
-            well_id_to_workorder = _fetch_well_mapping(client, proj)
-            log.info("Mapped %d wells to workorders", len(well_id_to_workorder))
-        except Exception as exc:
-            log.error("Could not build recursive well mapping: %s", exc)
-            return df
+        if well_mapping is not None:
+            well_id_to_workorder = well_mapping
+            log.info("Using cached well mapping (%d wells)", len(well_id_to_workorder))
+        else:
+            try:
+                client = bigquery.Client(project=proj)
+                well_id_to_workorder = _fetch_well_mapping(client, proj)
+                log.info("Mapped %d wells to workorders", len(well_id_to_workorder))
+            except Exception as exc:
+                log.error("Could not build recursive well mapping: %s", exc)
+                return df
 
         # ── Collect source IDs that are missing from the dataset ─────────────
         all_source_ids: set[str] = set()
@@ -223,11 +230,13 @@ class RepairTransformer:
 
     # ─────────────────────────────────────────────────────────────────────────
     @staticmethod
-    def repair_data(df: pd.DataFrame) -> pd.DataFrame:
+    def repair_data(
+        df: pd.DataFrame,
+        well_mapping: dict[str, str] | None = None,
+    ) -> pd.DataFrame:
         """Fix broken root links and backfill metadata."""
         log.info("Repairing root links and backfilling metadata...")
         proj   = PipelineConfig.PROJECT_ID
-        client = bigquery.Client(project=proj)
         df     = df.copy()
         if df.columns.duplicated().any():
             df = df.loc[:, ~df.columns.duplicated()]
@@ -254,11 +263,15 @@ class RepairTransformer:
                 ))
 
         # ── Recursive well → workorder from LIMS ──────────────────────────────
-        try:
-            well_id_to_workorder = _fetch_well_mapping(client, proj)
-        except Exception as exc:
-            log.warning("Well mapping fetch failed: %s", exc)
-            well_id_to_workorder = {}
+        if well_mapping is not None:
+            well_id_to_workorder = well_mapping
+        else:
+            try:
+                client = bigquery.Client(project=proj)
+                well_id_to_workorder = _fetch_well_mapping(client, proj)
+            except Exception as exc:
+                log.warning("Well mapping fetch failed: %s", exc)
+                well_id_to_workorder = {}
 
         # ── Fix transformation workorder roots ────────────────────────────────
         # Root is resolved from the LIMS input-well's process_id (physical

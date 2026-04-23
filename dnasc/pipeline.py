@@ -11,6 +11,7 @@ import time
 import concurrent.futures
 
 import pandas as pd
+from google.cloud import bigquery
 
 from dnasc.config import PipelineConfig
 from dnasc.logger import get_logger
@@ -31,6 +32,7 @@ from dnasc.transformers.repair import (
     resolve_downstream_plates,
     resolve_lims_streakouts,
     resolve_optracker_streakouts,
+    _fetch_well_mapping,
 )
 
 log = get_logger(__name__)
@@ -85,12 +87,23 @@ def run_pipeline() -> pd.DataFrame:
     lsp_full = _merge_lsp(lsp_df, aliq_df)
     log.info("LSP merge complete in %.2fs", time.time() - t)
 
+    # ── Well mapping: fetch once, reuse in Steps 4 and 11 ────────────────────
+    log.info("Fetching recursive well → workorder mapping (shared by Steps 4 + 11)...")
+    t = time.time()
+    try:
+        _wm_client = bigquery.Client(project=PipelineConfig.PROJECT_ID)
+        _well_mapping = _fetch_well_mapping(_wm_client, PipelineConfig.PROJECT_ID)
+        log.info("Well mapping ready: %d wells in %.2fs", len(_well_mapping), time.time() - t)
+    except Exception as _exc:
+        log.warning("Well mapping prefetch failed (%s) — Steps 4/11 will fetch independently", _exc)
+        _well_mapping = None
+
     # ── STEP 3–5: Lineage, synthetics, processing ─────────────────────────────
     log.info("STEP 3 — Lineage bridging")
     workorder_data = LineageTransformer.bridge_lsp_lineage(bios_df, lsp_full)
 
     log.info("STEP 4 — Synthetic streakout creation")
-    workorder_data = RepairTransformer.create_synthetic_streakouts(workorder_data)
+    workorder_data = RepairTransformer.create_synthetic_streakouts(workorder_data, well_mapping=_well_mapping)
 
     log.info("STEP 5 — Core processing")
     processed = ProcessingTransformer.process_workorder_data(workorder_data)
@@ -243,7 +256,7 @@ def run_pipeline() -> pd.DataFrame:
     # ── STEP 11: Root repair & metadata backfill ──────────────────────────────
     log.info("STEP 11 — Root repair & metadata backfill")
     t = time.time()
-    final_df = RepairTransformer.repair_data(final_df)
+    final_df = RepairTransformer.repair_data(final_df, well_mapping=_well_mapping)
     # Re-run LSP root assignment after repair — Step 6 ran before Step 11
     # resolved STREAK synthetic row roots, so legacy LSPs sourced via
     # lsp_process_id=STREAK_well* were left self-rooted. Now that repair has
