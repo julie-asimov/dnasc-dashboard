@@ -210,6 +210,64 @@ class ProcessingTransformer:
         return df
 
     @staticmethod
+    def _compute_attempt_anchors(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Compute attempt_anchor_id/number/total using normalized backbone+parts.
+        BQ comparison of raw JSON strings fails when the same logical design has
+        different JSON representations across retry attempts.
+        """
+        for col in ("attempt_anchor_id", "attempt_number", "attempt_total"):
+            df[col] = None
+
+        asm_mask = (
+            df["type"].isin({"golden_gate_workorder", "gibson_workorder"})
+            & df["fulfills_request"].fillna(False).astype(bool)
+            & df["wo_status"].notna()
+            & ~df["wo_status"].isin(["DRAFT"])
+            & df["req_id"].notna()
+            & df["workorder_id"].notna()
+        )
+        asm_idx = df.index[asm_mask]
+        if asm_idx.empty:
+            return df
+
+        asm = df.loc[asm_idx, ["workorder_id", "req_id", "STOCK_ID", "backbone", "parts", "wo_created_at"]].copy()
+
+        def _key(row):
+            stock = str(row.get("STOCK_ID") or "")
+            if not stock or stock.startswith("#") or stock in ("nan", "None"):
+                return ("__self__", row["workorder_id"], "", "")
+            return (
+                str(row.get("req_id") or ""),
+                stock,
+                str(row.get("backbone") or ""),
+                str(row.get("parts") or ""),
+            )
+
+        asm["_key"] = asm.apply(_key, axis=1)
+        asm = asm.sort_values("wo_created_at", na_position="last")
+
+        anchor_map: dict = {}
+        number_map: dict = {}
+        total_map: dict  = {}
+
+        for _key_val, grp in asm.groupby("_key", sort=False):
+            grp_sorted = grp.sort_values("wo_created_at", na_position="last")
+            ids = grp_sorted["workorder_id"].tolist()
+            anchor = ids[0]
+            total  = len(ids)
+            for i, wid in enumerate(ids, start=1):
+                anchor_map[wid] = anchor
+                number_map[wid] = i
+                total_map[wid]  = total
+
+        wids = df.loc[asm_idx, "workorder_id"]
+        df.loc[asm_idx, "attempt_anchor_id"] = wids.map(anchor_map)
+        df.loc[asm_idx, "attempt_number"]    = wids.map(number_map)
+        df.loc[asm_idx, "attempt_total"]     = wids.map(total_map)
+        return df
+
+    @staticmethod
     def _generate_source_links(df: pd.DataFrame) -> pd.DataFrame:
         """Build human-readable source material link strings for LSP rows."""
         log.debug("Generating source material links...")

@@ -282,6 +282,13 @@ def run_pipeline() -> pd.DataFrame:
                 if isinstance(x, (_pd.Series, _pd.DataFrame)) else x
             )
 
+    # ── Attempt anchor recompute (must run last, after all row filtering) ────
+    # Uses normalized backbone/parts columns. Runs here rather than in Step 2
+    # so anchors are never computed against workorders that are later filtered
+    # out by repair or _filter_and_enrich — which would leave referencing rows
+    # with a stale anchor pointing to a missing workorder.
+    final_df = ProcessingTransformer._compute_attempt_anchors(final_df)
+
     elapsed = time.time() - pipeline_start
     log.info("=" * 70)
     log.info("PIPELINE COMPLETE  %.1fs  |  %d rows  |  %d experiments  |  %d requests",

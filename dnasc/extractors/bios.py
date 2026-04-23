@@ -74,35 +74,6 @@ class BIOSExtractor:
             GROUP BY adwoa.workorder_id
         ),
 
-        plan_attempt_roots AS (
-            -- For each fulfills_request=TRUE GG/Gibson that is an explicit BIOS retry
-            -- (resubmit_count > 0), find the earliest active sibling in the same plan.
-            -- Only retries collapse under an anchor — co-designs (resubmit_count = 0)
-            -- are independent submissions and must self-root so each gets its own section.
-            -- Matching on request_id prevents cross-construct grouping when a single plan
-            -- covers multiple constructs (each construct has its own request).
-            SELECT
-                wo.id AS workorder_id,
-                ARRAY_AGG(
-                    first_wo.id
-                    ORDER BY first_wo.created_at ASC
-                    LIMIT 1
-                )[OFFSET(0)] AS first_attempt_id
-            FROM `{proj}.bios__src.workorder` wo
-            JOIN `{proj}.bios__src.workorder` first_wo
-                ON first_wo.assembly_plan_id = wo.assembly_plan_id
-               AND first_wo.request_id = wo.request_id
-               AND first_wo.type = wo.type
-               AND first_wo.fulfills_request = TRUE
-               AND first_wo.status NOT IN ('DRAFT', 'CANCELED')
-            WHERE wo.fulfills_request = TRUE
-              AND wo.type IN ('gibson_workorder', 'golden_gate_workorder')
-              AND wo.status NOT IN ('DRAFT', 'CANCELED')
-              AND wo.request_id IS NOT NULL
-              AND wo.resubmit_count > 0
-            GROUP BY wo.id
-        ),
-
         consuming_roots AS (
             -- For each workorder, find the fulfills_request=TRUE GG/Gibson workorder IDs
             -- that share an assembly design with it (via ADWOA). These are the assemblies
@@ -134,14 +105,13 @@ class BIOSExtractor:
             wo.deleted_at,
             wo.assembly_plan_id,
             wo.created_at AS wo_created_at, wo.updated_at AS wo_updated_at,
-            -- fulfills_request=TRUE GG/Gibson roots to the earliest active sibling in
-            -- the same assembly plan (plan_attempt_roots). This collapses retries of the
-            -- same design into one section. If it IS the earliest (or no plan), self-roots.
-            -- All other workorders use the ADWOA root; fall back to self-root.
+            -- GG/Gibson roots always self-root; attempt grouping is expressed via
+            -- attempt_anchor_id (computed by the attempt_anchors CTE above) rather than
+            -- collapsing root_work_order_id. All other workorders use the ADWOA root.
             CASE
                 WHEN wo.fulfills_request = TRUE
                      AND wo.type IN ('gibson_workorder', 'golden_gate_workorder')
-                THEN COALESCE(par.first_attempt_id, wo.id)
+                THEN wo.id
                 ELSE COALESCE(ad_root.root_wo_id, wo.id)
             END AS root_work_order_id,
             req.id AS req_id, req.priority, req.submitter_email,
@@ -175,10 +145,12 @@ class BIOSExtractor:
             COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
             COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
             cr.consuming_root_ids,
+            NULL AS attempt_anchor_id,
+            NULL AS attempt_number,
+            NULL AS attempt_total,
             'BIOS' AS data_source
         FROM `{proj}.bios__src.workorder` wo
         LEFT JOIN ad_roots ad_root ON ad_root.workorder_id = wo.id
-        LEFT JOIN plan_attempt_roots par ON par.workorder_id = wo.id
         LEFT JOIN consuming_roots cr ON cr.part_workorder_id = wo.id
         LEFT JOIN `{proj}.bios__src.assemblyplan` ap ON ap.id = wo.assembly_plan_id
         LEFT JOIN `{proj}.bios__src.experiment` exp ON exp.id = ap.experiment_id
@@ -248,6 +220,7 @@ class BIOSExtractor:
             COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
             COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
             NULL AS consuming_root_ids,
+            NULL AS attempt_anchor_id, NULL AS attempt_number, NULL AS attempt_total,
             'BIOS_DRAFT' AS data_source
         FROM `{proj}.bios__src.workorder` wo
         LEFT JOIN `{proj}.bios__src.assemblyplan` ap ON ap.id = wo.assembly_plan_id
@@ -267,12 +240,21 @@ class BIOSExtractor:
         WHERE wo.status = 'DRAFT'
           AND wo.type IN ('golden_gate_workorder', 'gibson_workorder')
           AND wo.created_at >= '{date_filter}'
+          AND EXISTS (
+            -- Only surface a DRAFT when its assembly plan has non-DRAFT parts workorders
+            -- (syn, oligo, PCR, plasmid synthesis) already created — i.e. someone ordered
+            -- inputs from this draft plan before submitting the GG to production.
+            SELECT 1 FROM `{proj}.bios__src.workorder` wo3
+            WHERE wo3.assembly_plan_id = wo.assembly_plan_id
+              AND wo3.status NOT IN ('DRAFT')
+              AND wo3.type NOT IN ('golden_gate_workorder', 'gibson_workorder',
+                                   'transformation_workorder', 'lsp_workorder')
+              AND wo3.deleted_at IS NULL
+          )
           AND (wo.request_id IS NULL
             OR NOT EXISTS (
               -- Hide DRAFT when a non-DRAFT/CANCELED/FAILED GG/Gibson already exists
-              -- for the same request — i.e. production work has started or is running.
-              -- Show DRAFT when: no counterpart yet (parts ordered pre-submission),
-              -- or only FAILED/CANCELED attempts remain (DRAFT = next planned attempt).
+              -- for the same request — production work has started.
               SELECT 1 FROM `{proj}.bios__src.workorder` wo2
               WHERE wo2.request_id = wo.request_id
                 AND wo2.status NOT IN ('DRAFT', 'CANCELED', 'FAILED')
@@ -310,6 +292,7 @@ class BIOSExtractor:
             NULL AS cloning_strain, NULL AS antibiotic,
             NULL AS expected_color, NULL AS background_color,
             NULL AS consuming_root_ids,
+            NULL AS attempt_anchor_id, NULL AS attempt_number, NULL AS attempt_total,
             'BIOS_REQUEST' AS data_source
         FROM `{proj}.bios__src.request` req
         LEFT JOIN `{proj}.bios__src.plasmidrequest` pr ON req.id = pr.id
