@@ -1004,32 +1004,34 @@ def resolve_downstream_plates(
     SEQ_PROTOCOLS = {'DNA Quantification', 'NGS Sequence Confirmation'}
     MINIPREP_KEYS = {'Miniprep', 'miniprep', 'Minipreps', 'minipreps'}
 
-    # ── STEP 1: Find workorders missing downstream ops ────────────────────────
-    def _needs_downstream(row):
-        import json as _json
-        x = row.get('protocol_name')
+    # ── STEP 1: Find workorders missing downstream ops (vectorized) ───────────
+    def _protocol_set(x):
         if hasattr(x, 'tolist'):
             x = x.tolist()
-        if not isinstance(x, list) or len(x) == 0:
-            return False
-        # Gibson/GG: has Miniprep step but no Quant/NGS yet
-        if 'Create Minipreps and Glycerol Stocks' in x:
-            return not any(p in x for p in SEQ_PROTOCOLS)
-        # Transformation: has STAR Transformation + Rearray but no Quant/NGS,
-        # AND all_protocol_plates declares an NGS plate (meaning NGS was planned)
-        if 'STAR Transformation' in x and 'Rearray 96 to 384' in x:
-            if any(p in x for p in SEQ_PROTOCOLS):
-                return False
-            plates_json = row.get('all_protocol_plates')
-            if plates_json:
-                try:
-                    plates = _json.loads(plates_json) if isinstance(plates_json, str) else {}
-                    return 'NGS Sequence Confirmation' in plates
-                except Exception:
-                    pass
-        return False
+        return set(x) if isinstance(x, list) else set()
 
-    missing_mask = final_df.apply(_needs_downstream, axis=1)
+    proto_sets = final_df['protocol_name'].map(_protocol_set)
+    has_miniprep  = proto_sets.map(lambda s: 'Create Minipreps and Glycerol Stocks' in s)
+    has_seq       = proto_sets.map(lambda s: bool(s & SEQ_PROTOCOLS))
+    has_star      = proto_sets.map(lambda s: 'STAR Transformation' in s)
+    has_rearray   = proto_sets.map(lambda s: 'Rearray 96 to 384' in s)
+
+    gg_needs = has_miniprep & ~has_seq
+
+    def _tfm_has_ngs_plate(plates_json):
+        if not plates_json:
+            return False
+        try:
+            plates = json.loads(plates_json) if isinstance(plates_json, str) else {}
+            return 'NGS Sequence Confirmation' in plates
+        except Exception:
+            return False
+
+    tfm_needs = (
+        has_star & has_rearray & ~has_seq &
+        final_df['all_protocol_plates'].map(_tfm_has_ngs_plate)
+    )
+    missing_mask = gg_needs | tfm_needs
     missing_df = final_df[missing_mask].copy()
 
     if missing_df.empty:
@@ -1065,27 +1067,68 @@ def resolve_downstream_plates(
     log.info("resolve_downstream_plates: tracing %d miniprep plates", len(plate_ids))
 
     client = bigquery.Client(project=project_id)
-    plate_ids_str = ','.join(plate_ids)
 
-    # ── STEP 3: Get all wells on those miniprep plates ────────────────────────
-    well_to_plate = client.query(f"""
+    # ── STEP 3: Pre-collect all downstream plate IDs so both LIMS well
+    # queries can be merged into one BQ call ──────────────────────────────────
+    REARRAY_KEYS = {'Rearray 96 to 384'}
+    QUANT_KEYS   = {'DNA Quant', 'DNA Quantification', 'Quant'}
+
+    downstream_plate_rows: list[dict] = []
+    for _, mrow in missing_df.iterrows():
+        plates_json = mrow.get('all_protocol_plates')
+        if not plates_json:
+            continue
+        try:
+            plates = json.loads(plates_json) if isinstance(plates_json, str) else {}
+            for key, val in plates.items():
+                if key in REARRAY_KEYS or key in QUANT_KEYS:
+                    pid = str(val).split(',')[0].strip()
+                    if pid and pid not in ('nan', 'None', ''):
+                        downstream_plate_rows.append({'plate_id_str': pid, 'workorder_id': mrow['workorder_id']})
+        except Exception:
+            pass
+
+    downstream_plate_wid_df = (
+        pd.DataFrame(downstream_plate_rows).drop_duplicates()
+        if downstream_plate_rows else pd.DataFrame(columns=['plate_id_str', 'workorder_id'])
+    )
+
+    # Single LIMS query for all plates (miniprep + downstream)
+    all_plate_ids = list(set(plate_ids) | set(downstream_plate_wid_df['plate_id_str'].tolist()))
+    all_plate_ids_str = ','.join(all_plate_ids)
+    all_wells_df = client.query(f"""
         SELECT id AS well_id, plate_id
         FROM `{project_id}.lims__src.well`
-        WHERE plate_id IN ({plate_ids_str})
+        WHERE plate_id IN ({all_plate_ids_str})
     """).to_dataframe()
 
-    if well_to_plate.empty:
+    if all_wells_df.empty:
         log.info("resolve_downstream_plates: no wells found for miniprep plates")
         return final_df
 
-    # Build well_id → workorder_id pairs via merge (many-to-many safe)
-    well_to_plate['plate_id_str'] = well_to_plate['plate_id'].astype(str)
+    all_wells_df['plate_id_str'] = all_wells_df['plate_id'].astype(str)
+
+    # Split into miniprep wells and downstream wells
+    miniprep_plate_set = set(plate_ids)
+    downstream_plate_set = set(downstream_plate_wid_df['plate_id_str'].tolist())
+
+    well_to_plate = all_wells_df[all_wells_df['plate_id_str'].isin(miniprep_plate_set)]
     well_wid_df = well_to_plate.merge(
         plate_wid_df.rename(columns={'_miniprep_plate_id': 'plate_id_str'}),
         on='plate_id_str', how='inner'
     )[['well_id', 'workorder_id']].drop_duplicates()
 
+    downstream_well_wid_df = pd.DataFrame(columns=['well_id', 'workorder_id'])
+    if not downstream_plate_wid_df.empty:
+        ds_wells = all_wells_df[all_wells_df['plate_id_str'].isin(downstream_plate_set)]
+        if not ds_wells.empty:
+            downstream_well_wid_df = ds_wells.merge(
+                downstream_plate_wid_df, on='plate_id_str', how='inner'
+            )[['well_id', 'workorder_id']].drop_duplicates()
+
     # ── STEP 4: Reverse-lookup OpTracker jobs touching those wells ────────────
+    # Date filter avoids scanning all historical ops — only fetch from pipeline cutoff.
+    date_filter = PipelineConfig.DATE_FILTER
     raw_ops = client.query(f"""
     WITH all_ops AS (
         SELECT
@@ -1105,6 +1148,7 @@ def resolve_downstream_plates(
             ON op_param.parameter_type_id = pt.id
         WHERE o.state IN ('SC', 'FA', 'RD', 'RU', 'CA')
           AND p.name IN ('Rearray 96 to 384', 'DNA Quantification', 'NGS Sequence Confirmation')
+          AND o.date_created >= '{date_filter}'
         GROUP BY 1,2,3,4,5,6,7
     )
     SELECT a.*,
@@ -1143,75 +1187,42 @@ def resolve_downstream_plates(
         .drop_duplicates(subset=['id', 'workorder_id'])
     ) if any(len(p) > 0 for p in resolved_parts) else pd.DataFrame(columns=['id', 'workorder_id'])
 
-    # ── STEP 5b: Second-hop via all_protocol_plates (merge-based) ─────────────
-    # Build plate→workorder pairs from all_protocol_plates for rearray/quant plates.
-    # Dict-based approach silently drops all-but-last workorder per shared plate;
-    # use a DataFrame instead so all (plate, workorder) pairs are preserved.
-    REARRAY_KEYS = {'Rearray 96 to 384'}
-    QUANT_KEYS   = {'DNA Quant', 'DNA Quantification', 'Quant'}
-
-    downstream_plate_rows: list[dict] = []
-    for _, mrow in missing_df.iterrows():
-        plates_json = mrow.get('all_protocol_plates')
-        if not plates_json:
-            continue
-        try:
-            plates = json.loads(plates_json) if isinstance(plates_json, str) else {}
-            for key, val in plates.items():
-                if key in REARRAY_KEYS or key in QUANT_KEYS:
-                    pid = str(val).split(',')[0].strip()
-                    if pid and pid not in ('nan', 'None', ''):
-                        downstream_plate_rows.append({'plate_id_str': pid, 'workorder_id': mrow['workorder_id']})
-        except Exception:
-            pass
-
+    # ── STEP 5b: Second-hop via all_protocol_plates ───────────────────────────
+    # downstream_plate_wid_df and downstream_well_wid_df were pre-built in Step 3
+    # (alongside the miniprep LIMS query) to avoid a second BQ round-trip.
     all_resolved_pass2 = pd.DataFrame(columns=['id', 'workorder_id'])
-    if downstream_plate_rows:
-        downstream_plate_wid_df = pd.DataFrame(downstream_plate_rows).drop_duplicates()
-        ds_plate_ids_str = ','.join(downstream_plate_wid_df['plate_id_str'].unique().tolist())
-        ds_wells_df = client.query(f"""
-            SELECT id AS well_id, plate_id
-            FROM `{project_id}.lims__src.well`
-            WHERE plate_id IN ({ds_plate_ids_str})
-        """).to_dataframe()
-
-        if not ds_wells_df.empty:
-            ds_wells_df['plate_id_str'] = ds_wells_df['plate_id'].astype(str)
-            downstream_well_wid_df = ds_wells_df.merge(
-                downstream_plate_wid_df, on='plate_id_str', how='inner'
-            )[['well_id', 'workorder_id']].drop_duplicates()
-
-            # Only look at Quant/NGS ops for second-hop
-            quant_ngs_ops = raw_ops[raw_ops['protocol_name'].isin(
-                ['DNA Quantification', 'NGS Sequence Confirmation']
-            )]
-            ds_parts = []
-            for well_col in ['sw_id', 'qw_id', 'dw_id']:
-                matched = (
-                    quant_ngs_ops[['id', well_col]].dropna(subset=[well_col])
-                    .merge(downstream_well_wid_df.rename(columns={'well_id': well_col}),
-                           on=well_col, how='inner')
-                    [['id', 'workorder_id']]
-                )
-                ds_parts.append(matched)
-            nps_ds = (
-                quant_ngs_ops[['id', 'nps']].dropna(subset=['nps'])
-                .assign(plate_id_str=lambda d: d['nps'].astype(str))
-                .merge(downstream_plate_wid_df, on='plate_id_str', how='inner')
+    if not downstream_well_wid_df.empty:
+        # Only look at Quant/NGS ops for second-hop
+        quant_ngs_ops = raw_ops[raw_ops['protocol_name'].isin(
+            ['DNA Quantification', 'NGS Sequence Confirmation']
+        )]
+        ds_parts = []
+        for well_col in ['sw_id', 'qw_id', 'dw_id']:
+            matched = (
+                quant_ngs_ops[['id', well_col]].dropna(subset=[well_col])
+                .merge(downstream_well_wid_df.rename(columns={'well_id': well_col}),
+                       on=well_col, how='inner')
                 [['id', 'workorder_id']]
             )
-            ds_parts.append(nps_ds)
+            ds_parts.append(matched)
+        nps_ds = (
+            quant_ngs_ops[['id', 'nps']].dropna(subset=['nps'])
+            .assign(plate_id_str=lambda d: d['nps'].astype(str))
+            .merge(downstream_plate_wid_df, on='plate_id_str', how='inner')
+            [['id', 'workorder_id']]
+        )
+        ds_parts.append(nps_ds)
 
-            if any(len(p) > 0 for p in ds_parts):
-                all_resolved_pass2 = (
-                    pd.concat(ds_parts, ignore_index=True)
-                    .drop_duplicates(subset=['id', 'workorder_id'])
-                )
-                log.info(
-                    "resolve_downstream_plates: second-hop resolved %d (op, workorder) pairs "
-                    "(%d downstream plates)",
-                    len(all_resolved_pass2), len(downstream_plate_wid_df['plate_id_str'].unique()),
-                )
+        if any(len(p) > 0 for p in ds_parts):
+            all_resolved_pass2 = (
+                pd.concat(ds_parts, ignore_index=True)
+                .drop_duplicates(subset=['id', 'workorder_id'])
+            )
+            log.info(
+                "resolve_downstream_plates: second-hop resolved %d (op, workorder) pairs "
+                "(%d downstream plates)",
+                len(all_resolved_pass2), len(downstream_plate_wid_df['plate_id_str'].unique()),
+            )
 
     # Combine both passes and expand raw_ops (one row per op-workorder pair)
     all_resolved = (
