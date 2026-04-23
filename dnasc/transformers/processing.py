@@ -61,14 +61,18 @@ class ProcessingTransformer:
         )
 
         # ── Waiting parts ─────────────────────────────────────────────────────
-        df["Waiting"] = df.apply(
-            lambda row: ", ".join([
-                item.split(":")[0]
-                for col in ["backbone", "parts", "pcr_info"]
-                for item in str(row.get(col, "")).split(", ")
-                if "False" in item
-            ]),
-            axis=1,
+        def _waiting_from(series: pd.Series) -> pd.Series:
+            return series.astype(str).apply(
+                lambda s: ", ".join(
+                    item.split(":")[0]
+                    for item in s.split(", ")
+                    if "False" in item
+                )
+            )
+
+        _waiting_parts = [_waiting_from(df[c]) for c in ["backbone", "parts", "pcr_info"] if c in df.columns]
+        df["Waiting"] = pd.concat(_waiting_parts, axis=1).apply(
+            lambda row: ", ".join(v for v in row if v), axis=1
         )
 
         # ── STOCK_ID from synthesis columns ───────────────────────────────────
@@ -124,18 +128,22 @@ class ProcessingTransformer:
     def _filter_canceled_experiments(df: pd.DataFrame) -> pd.DataFrame:
         log.debug("Filtering experiments with only canceled/empty workorders...")
 
-        def _has_work(row):
-            if row.get("data_source") in ["SYNTHETIC_LSP", "LSP"]:
-                return True
-            status = str(row.get("wo_status", "")).upper()
-            if status in {"SUCCEEDED", "FAILED", "RUNNING", "READY", "IN_PROGRESS"}:
-                return True
-            pnames = row.get("protocol_name")
-            if isinstance(pnames, list) and len(pnames) > 0 and pd.notna(pnames[0]):
-                return True
-            return False
-
-        df["has_work_done"] = df.apply(_has_work, axis=1)
+        import numpy as np
+        _active = {"SUCCEEDED", "FAILED", "RUNNING", "READY", "IN_PROGRESS"}
+        _has_protocol = pd.Series(False, index=df.index)
+        if "protocol_name" in df.columns:
+            _has_protocol = df["protocol_name"].map(
+                lambda p: (
+                    isinstance(p, (list, np.ndarray))
+                    and len(p) > 0
+                    and pd.notna(p[0] if isinstance(p, list) else p.flat[0])
+                )
+            )
+        df["has_work_done"] = (
+            df["data_source"].isin(["SYNTHETIC_LSP", "LSP"])
+            | df["wo_status"].astype(str).str.upper().isin(_active)
+            | _has_protocol
+        )
 
         roots_with_live_children = set(
             df.loc[
@@ -146,16 +154,12 @@ class ProcessingTransformer:
             .unique()
         )
 
-        def _displayable(row):
-            if row.get("root_work_order_id") in roots_with_live_children:
-                return True
-            if row.get("request_status") == "NEW":
-                return True
-            if row.get("wo_status") != "CANCELED":
-                return True
-            return row.get("has_work_done", False)
-
-        df["is_displayable"] = df.apply(_displayable, axis=1)
+        df["is_displayable"] = (
+            df["root_work_order_id"].isin(roots_with_live_children)
+            | (df["request_status"] == "NEW")
+            | (df["wo_status"] != "CANCELED")
+            | df["has_work_done"]
+        )
 
         is_lsp = df["data_source"].isin(["SYNTHETIC_LSP", "LSP"])
         root_to_exp = (

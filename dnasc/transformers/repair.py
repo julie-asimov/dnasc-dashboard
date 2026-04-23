@@ -18,6 +18,7 @@ Two responsibilities:
 
 from __future__ import annotations
 import re
+import concurrent.futures
 from collections import Counter
 
 import pandas as pd
@@ -438,13 +439,14 @@ def populate_synthetic_optracker_batch(
     client    = bigquery.Client(project=project_id)
     lsp_ids   = [s for s in syn_ids if s.upper().startswith("LSP-")]
     uuid_ids  = [s for s in syn_ids if not s.upper().startswith("LSP-")]
+    date_filter = PipelineConfig.DATE_FILTER
 
-    # ── QUERY 1: plates ───────────────────────────────────────────────────────
-    plates_dfs: list[pd.DataFrame] = []
-
-    if uuid_ids:
+    # ── QUERY 1: plates (uuid + lsp in parallel) ──────────────────────────────
+    def _fetch_uuid_plates():
+        if not uuid_ids:
+            return pd.DataFrame()
         ids_str = ",".join(f"'{s}'" for s in uuid_ids)
-        plates_dfs.append(client.query(f"""
+        return client.query(f"""
             SELECT DISTINCT
                 COALESCE(d.process_id, g.process_id, a.process_id) AS synthetic_id,
                 b.id AS plate_id, b.protocol AS plate_protocol,
@@ -455,12 +457,14 @@ def populate_synthetic_optracker_batch(
             LEFT JOIN `{project_id}.lims__src.plasmid_stock` d ON d.id = c.plasmid_stock_id
             LEFT JOIN `{project_id}.lims__src.strain` g ON g.id = c.strain_id
             WHERE COALESCE(d.process_id, g.process_id, a.process_id) IN ({ids_str})
-        """).to_dataframe())
+        """).to_dataframe()
 
-    if lsp_ids:
+    def _fetch_lsp_plates():
+        if not lsp_ids:
+            return pd.DataFrame()
         upper_map = {s.upper(): s for s in lsp_ids}
         ids_str   = ",".join(f"'{s}'" for s in upper_map)
-        lsp_pl    = client.query(f"""
+        df = client.query(f"""
             SELECT DISTINCT
                 UPPER(COALESCE(d.process_id, g.process_id, a.process_id)) AS synthetic_id,
                 b.id AS plate_id, b.protocol AS plate_protocol,
@@ -472,8 +476,16 @@ def populate_synthetic_optracker_batch(
             LEFT JOIN `{project_id}.lims__src.strain` g ON g.id = c.strain_id
             WHERE UPPER(COALESCE(d.process_id, g.process_id, a.process_id)) IN ({ids_str})
         """).to_dataframe()
-        lsp_pl["synthetic_id"] = lsp_pl["synthetic_id"].map(upper_map)
-        plates_dfs.append(lsp_pl.dropna(subset=["synthetic_id"]))
+        df["synthetic_id"] = df["synthetic_id"].map(upper_map)
+        return df.dropna(subset=["synthetic_id"])
+
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        f_uuid = pool.submit(_fetch_uuid_plates)
+        f_lsp  = pool.submit(_fetch_lsp_plates)
+        uuid_pl = f_uuid.result()
+        lsp_pl  = f_lsp.result()
+
+    plates_dfs = [df for df in [uuid_pl, lsp_pl] if not df.empty]
 
     if not plates_dfs:
         log.info("No plates found for synthetic workorders")
@@ -511,53 +523,63 @@ def populate_synthetic_optracker_batch(
     plate_syn_pairs = plates_df[["plate_id", "synthetic_id"]].drop_duplicates()
     plate_ids_str   = ",".join(str(p) for p in plates_df["plate_id"].unique())
 
-    # Pass 1a: plate-level
-    ops_1a = client.query(f"""
-        SELECT DISTINCT
-            o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
-            p.name AS protocol_name,
-            SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) AS ref_id
-        FROM `{project_id}.op_tracker__src.op_tracker_api_operation` o
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
-        WHERE pt.name = 'Plate ID'
-          AND o.state IN ('SC', 'FA', 'RD', 'RU')
-          AND SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) IN ({plate_ids_str})
-    """).to_dataframe()
-    ops_1a = ops_1a.merge(
-        plate_syn_pairs.rename(columns={"plate_id": "ref_id"}),
-        on="ref_id", how="inner",
-    )
-
-    # Pass 1b: well-level — join entirely in BigQuery to avoid huge IN clauses.
-    # Finds ops (e.g. Quant) whose "Plate ID" is not in our LIMS set but whose
-    # per-well parameter (Source Well / Well to Quant / Destination Well) IS on
-    # one of our known plates.
-    plate_ids_array = ",".join(str(p) for p in plates_df["plate_id"].unique())
-    ops_1b = client.query(f"""
-        WITH our_wells AS (
-            SELECT w.id AS well_id, w.plate_id
-            FROM `{project_id}.lims__src.well` w
-            WHERE w.plate_id IN ({plate_ids_array})
+    # Pass 1a and 1b run in parallel — both depend only on plate_ids_str / plate_syn_pairs
+    def _fetch_ops_1a():
+        df = client.query(f"""
+            SELECT DISTINCT
+                o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
+                p.name AS protocol_name,
+                SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) AS ref_id
+            FROM `{project_id}.op_tracker__src.op_tracker_api_operation` o
+            JOIN `{project_id}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
+            JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
+            JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
+            WHERE pt.name = 'Plate ID'
+              AND o.state IN ('SC', 'FA', 'RD', 'RU')
+              AND o.date_created >= '{date_filter}'
+              AND SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) IN ({plate_ids_str})
+        """).to_dataframe()
+        return df.merge(
+            plate_syn_pairs.rename(columns={"plate_id": "ref_id"}),
+            on="ref_id", how="inner",
         )
-        SELECT DISTINCT
-            o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
-            p.name AS protocol_name,
-            ow.plate_id AS ref_id
-        FROM `{project_id}.op_tracker__src.op_tracker_api_operation` o
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
-        JOIN our_wells ow
-            ON SAFE_CAST(JSON_EXTRACT_SCALAR(op_param.value, '$.id') AS INT64) = ow.well_id
-        WHERE pt.name IN ('Source Well', 'Well to Quant', 'Destination Well')
-          AND o.state IN ('SC', 'FA', 'RD', 'RU')
-    """).to_dataframe()
-    ops_1b = ops_1b.merge(
-        plate_syn_pairs.rename(columns={"plate_id": "ref_id"}),
-        on="ref_id", how="inner",
-    )
+
+    def _fetch_ops_1b():
+        # Well-level — join entirely in BigQuery to avoid huge IN clauses.
+        # Finds ops (e.g. Quant) whose "Plate ID" is not in our LIMS set but whose
+        # per-well parameter (Source Well / Well to Quant / Destination Well) IS on
+        # one of our known plates.
+        plate_ids_array = plate_ids_str  # same list, reuse
+        df = client.query(f"""
+            WITH our_wells AS (
+                SELECT w.id AS well_id, w.plate_id
+                FROM `{project_id}.lims__src.well` w
+                WHERE w.plate_id IN ({plate_ids_array})
+            )
+            SELECT DISTINCT
+                o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
+                p.name AS protocol_name,
+                ow.plate_id AS ref_id
+            FROM `{project_id}.op_tracker__src.op_tracker_api_operation` o
+            JOIN `{project_id}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
+            JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
+            JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
+            JOIN our_wells ow
+                ON SAFE_CAST(JSON_EXTRACT_SCALAR(op_param.value, '$.id') AS INT64) = ow.well_id
+            WHERE pt.name IN ('Source Well', 'Well to Quant', 'Destination Well')
+              AND o.state IN ('SC', 'FA', 'RD', 'RU')
+              AND o.date_created >= '{date_filter}'
+        """).to_dataframe()
+        return df.merge(
+            plate_syn_pairs.rename(columns={"plate_id": "ref_id"}),
+            on="ref_id", how="inner",
+        )
+
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        f_1a = pool.submit(_fetch_ops_1a)
+        f_1b = pool.submit(_fetch_ops_1b)
+        ops_1a = f_1a.result()
+        ops_1b = f_1b.result()
 
     # Combine pass 1a + 1b; dedup on (op_id, synthetic_id) so each pair appears once
     ops_pass1 = (
@@ -583,6 +605,7 @@ def populate_synthetic_optracker_batch(
             JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
             WHERE o.job_id IN ({job_ids_str})
               AND o.state IN ('SC', 'FA', 'RD', 'RU')
+              AND o.date_created >= '{date_filter}'
               AND pt.name = 'Plate ID'
         """).to_dataframe()
         ops_pass2 = ops_pass2.merge(job_syn_pairs, on="job_id", how="inner")

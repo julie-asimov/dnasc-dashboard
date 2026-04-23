@@ -161,14 +161,18 @@ def run_pipeline() -> pd.DataFrame:
     processed = resolve_lims_streakouts(processed)
     log.info("LIMS streakout resolution complete in %.2fs", time.time() - t)
 
-    # ── STEP 8: LIMS colony extraction ────────────────────────────────────────
+    # ── STEP 8: LIMS colony extraction (parallel) ─────────────────────────────
     log.info("STEP 8 — LIMS colony extraction")
     t = time.time()
-    wo_ids = processed["workorder_id"].unique().tolist()
-    colony_data = LIMSExtractor.get_colony_data(wo_ids)
-    picking_counts = LIMSExtractor.get_colony_picking_counts(wo_ids)
+    wo_ids  = processed["workorder_id"].unique().tolist()
     pcr_ids = processed.loc[processed["type"] == "pcr_workorder", "workorder_id"].dropna().unique().tolist()
-    well_comments = LIMSExtractor.get_well_comments(pcr_ids)
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        f_colony   = pool.submit(LIMSExtractor.get_colony_data, wo_ids)
+        f_picking  = pool.submit(LIMSExtractor.get_colony_picking_counts, wo_ids)
+        f_comments = pool.submit(LIMSExtractor.get_well_comments, pcr_ids)
+        colony_data    = f_colony.result()
+        picking_counts = f_picking.result()
+        well_comments  = f_comments.result()
     log.info("Colony data extracted in %.2fs", time.time() - t)
 
     # ── STEP 9: Final merges ──────────────────────────────────────────────────
@@ -180,10 +184,11 @@ def run_pipeline() -> pd.DataFrame:
     if not well_comments.empty:
         final_df = final_df.merge(well_comments, on="workorder_id", how="left")
 
-    def _optracker_key(row):
-        return str(row.get("workorder_id", "")).replace("STBL3_", "").replace("stbl3_", "").lower()
-
-    final_df["join_key"] = final_df.apply(_optracker_key, axis=1)
+    final_df["join_key"] = (
+        final_df["workorder_id"].astype(str)
+        .str.replace("STBL3_", "", case=False, regex=False)
+        .str.lower()
+    )
     final_df = final_df.merge(
         op_agg,
         left_on="join_key", right_on="process_id",
@@ -636,24 +641,23 @@ def _filter_and_enrich(df: pd.DataFrame) -> pd.DataFrame:
         "ORPHAN_LEGACY", "SUCCEEDED", "FULFILLED",
     }
 
-    def _keep(row):
-        if str(row.get("lsp_batch_id", "")) in blacklist:
-            return False
-        req_id = str(row.get("req_id", ""))
-        status = str(row.get("request_status", ""))
-        if pd.notna(row.get("req_id")) and (
-            status in active_statuses or "ORPHAN" in req_id or "ACTIVE" in req_id
-        ):
-            return True
-        if str(row.get("lsp_batch_id", "")).startswith("LSP-10"):
-            return True
-        if float(row.get("total_volume_ul", 0) or 0) > 1.0:
-            return True
-        if isinstance(row.get("protocol_name"), list) and len(row["protocol_name"]) > 0:
-            return True
-        return False
-
-    df = df[df.apply(_keep, axis=1)].copy()
+    import numpy as np
+    lsp_batch = df["lsp_batch_id"].astype(str)
+    req_id_s  = df["req_id"].astype(str)
+    status_s  = df["request_status"].astype(str)
+    keep_mask = (
+        ~lsp_batch.isin(blacklist)
+        & (
+            (df["req_id"].notna() & (
+                status_s.isin(active_statuses)
+                | req_id_s.str.contains("ORPHAN|ACTIVE", na=False)
+            ))
+            | lsp_batch.str.startswith("LSP-10")
+            | (pd.to_numeric(df.get("total_volume_ul", pd.Series(0, index=df.index)), errors="coerce").fillna(0) > 1.0)
+            | df["protocol_name"].map(lambda x: isinstance(x, (list, np.ndarray)) and len(x) > 0)
+        )
+    )
+    df = df[keep_mask].copy()
 
     # Remove LSP rows whose location is a test/fake placeholder
     if "location" in df.columns:
@@ -694,43 +698,60 @@ def _filter_and_enrich(df: pd.DataFrame) -> pd.DataFrame:
         df["STOCK_ID"] = df["STOCK_ID"].fillna(df["root_STOCK_ID"])
 
     # Status bridge
-    def _bridge_status(row):
-        # CANCELED wo_status always wins — ops may have FA states but the
-        # workorder was explicitly canceled, so don't let ops override it.
-        wo = str(row.get("wo_status", "")).strip().upper()
-        if wo == "CANCELED":
-            return "CANCELED"
-        if wo == "DRAFT":
-            return "DRAFT"
-        states = row.get("operation_state")
-        if isinstance(states, list) and states:
-            # Active states take priority regardless of list order.
-            # An LSP Order in READY beats a prior Glycerol Stocking SC.
-            if "RU" in states: return "RUNNING"
-            if "RD" in states: return "READY"
-            # For LSP workorders do NOT infer SUCCEEDED/FAILED from ops alone.
-            # Glycerol Stocking SC means the physical glycerol was done, but the
-            # LSP isn't complete until Order → Receiving → Reviewing → Releasing
-            # all run. Those steps are WA (excluded by state filter), so ops only
-            # ever show Glycerol SC. Trust wo_status for LSP terminal state.
-            if row.get("type") != "lsp_workorder":
-                for s in reversed(states):
-                    if s == "SC": return "SUCCEEDED"
-                    if s == "FA": return "FAILED"
-        wo = str(row.get("wo_status", "")).strip().upper()
-        if wo and wo not in ("NAN", "NONE", "", "UNKNOWN"):
-            return wo
-        # Fall back to request_status before assuming IN_PROGRESS.
-        # BIOS workorders linked to a canceled LSP request often have
-        # wo_status=NULL (never updated in BIOS) but request_status=CANCELED.
-        req = str(row.get("request_status", "")).strip().upper()
-        if req and req not in ("NAN", "NONE", "", "UNKNOWN"):
-            return req
-        if row.get("data_source") == "SYNTHETIC_LSP":
-            return "UNKNOWN"
-        return "IN_PROGRESS"
+    import numpy as np
 
-    df["visual_status"] = df.apply(_bridge_status, axis=1)
+    wo  = df["wo_status"].astype(str).str.strip().str.upper()
+    req = df["request_status"].astype(str).str.strip().str.upper()
+    _bad = {"NAN", "NONE", "", "UNKNOWN"}
+
+    states     = df["operation_state"]
+    is_not_lsp = df["type"] != "lsp_workorder"
+
+    def _to_list(s):
+        if isinstance(s, np.ndarray): return s.tolist()
+        return s if isinstance(s, list) else []
+
+    states_l   = states.map(_to_list)
+    has_states = states_l.map(bool)
+    has_ru     = has_states & states_l.map(lambda s: "RU" in s)
+    has_rd     = has_states & states_l.map(lambda s: "RD" in s)
+
+    # Last SC or FA in the states list (ops are not always in chronological order,
+    # so scan reversed to find the most-recently-appended terminal state).
+    def _last_terminal(s):
+        for v in reversed(s):
+            if v in ("SC", "FA"):
+                return v
+        return None
+
+    last_term  = states_l.map(_last_terminal)
+    has_sc     = has_states & is_not_lsp & (last_term == "SC")
+    has_fa     = has_states & is_not_lsp & (last_term == "FA")
+    wo_valid   = ~wo.isin(_bad)
+    req_valid  = ~req.isin(_bad)
+
+    # CANCELED wo_status always wins — ops may have FA states but the
+    # workorder was explicitly canceled, so don't let ops override it.
+    # np.select applies conditions in order; first match wins per row.
+    df["visual_status"] = np.select(
+        [
+            wo == "CANCELED",
+            wo == "DRAFT",
+            has_ru,
+            has_rd,
+            has_sc,
+            has_fa,
+            wo_valid,
+            req_valid,
+            df["data_source"] == "SYNTHETIC_LSP",
+        ],
+        [
+            "CANCELED", "DRAFT", "RUNNING", "READY",
+            "SUCCEEDED", "FAILED",
+            wo, req, "UNKNOWN",
+        ],
+        default="IN_PROGRESS",
+    )
 
     nan_mask = df["wo_status"].isna() | df["wo_status"].astype(str).str.upper().isin(["NAN", "NONE", ""])
     df.loc[nan_mask, "wo_status"] = df.loc[nan_mask, "visual_status"]
