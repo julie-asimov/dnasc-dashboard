@@ -22,6 +22,7 @@ from dnasc.extractors import (
     OpTrackerExtractor,
 )
 from dnasc.transformers import (
+    EnrichmentTransformer,
     LineageTransformer,
     ProcessingTransformer,
     RepairTransformer,
@@ -300,12 +301,25 @@ def run_pipeline() -> pd.DataFrame:
                 if isinstance(x, (_pd.Series, _pd.DataFrame)) else x
             )
 
+    # ── Colony status overrides ───────────────────────────────────────────────
+    # _bridge_status (Step 12) sets visual_status from wo_status + op states.
+    # For colony types (GG, Gibson, Transformation, Streakout), LIMS colony
+    # counts can override that — e.g. BIOS=SUCCEEDED but 0 LIMS colonies → FAILED.
+    # Running this here keeps the stored visual_status in sync with what the
+    # renderer would show, so parquet queries and the dashboard agree.
+    final_df = _apply_colony_status_overrides(final_df)
+
     # ── Attempt anchor recompute (must run last, after all row filtering) ────
     # Uses normalized backbone/parts columns. Runs here rather than in Step 2
     # so anchors are never computed against workorders that are later filtered
     # out by repair or _filter_and_enrich — which would leave referencing rows
     # with a stale anchor pointing to a missing workorder.
     final_df = ProcessingTransformer._compute_attempt_anchors(final_df)
+
+    # ── Request enrichment (stage / stall / status rank) ──────────────────────
+    # Must run last — depends on visual_status (colony overrides already applied)
+    # and attempt anchors computed above.
+    final_df = EnrichmentTransformer.compute_request_enrichment(final_df)
 
     elapsed = time.time() - pipeline_start
     log.info("=" * 70)
@@ -320,6 +334,109 @@ def run_pipeline() -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # Private helpers  (logic extracted from the old monolith run_pipeline())
 # ─────────────────────────────────────────────────────────────────────────────
+
+_COLONY_TYPES = frozenset({
+    "gibson_workorder", "golden_gate_workorder", "transformation_workorder",
+    "transformation_offline_operation", "streakout_operation",
+})
+
+
+def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply LIMS colony-count overrides to visual_status for colony-type workorders.
+    Also sets is_software_fail (BIOS=FAILED but seq confirmed → display SUCCEEDED).
+
+    Mirrors the get_visual_status() logic from the renderer exactly so the stored
+    visual_status matches what the dashboard shows — keeping parquet and dashboard
+    in sync. Must run after _bridge_status.
+    """
+    import numpy as _np
+
+    col_mask = df["type"].isin(_COLONY_TYPES)
+    if not col_mask.any():
+        df["is_software_fail"] = False
+        return df
+
+    def _override(row):
+        wo = str(row.get("wo_status") or "").strip().upper()
+        if wo in ("", "NAN", "NONE", "UNKNOWN"):
+            return row["visual_status"], False, False
+
+        tot = int(row.get("total_colonies")) if pd.notna(row.get("total_colonies")) else 0
+        seq = int(row.get("seq_confirmed"))  if pd.notna(row.get("seq_confirmed"))  else 0
+
+        if wo == "FAILED" and seq > 0:
+            return "SUCCEEDED", True, False
+
+        if wo in ("RUNNING", "IN_PROGRESS") and seq > 0:
+            return "SUCCEEDED", False, False
+
+        if wo == "SUCCEEDED":
+            pn = row.get("protocol_name")
+            ps = row.get("operation_state")
+            if isinstance(pn, _np.ndarray): pn = list(pn)
+            if isinstance(ps, _np.ndarray): ps = list(ps)
+
+            if tot == 0:
+                if isinstance(pn, list) and isinstance(ps, list):
+                    transf_done = any(
+                        p in ("STAR Transformation", "Transformation",
+                              "Create Minipreps and Glycerol Stocks")
+                        and s in ("SC", "FA")
+                        for p, s in zip(pn, ps)
+                    )
+                    if not transf_done:
+                        if any(s == "RU" for s in ps): return "RUNNING", False, False
+                        if any(s == "RD" for s in ps): return "READY", False, False
+                        return "IN_PROGRESS", False, False
+                    miniprep = next(
+                        (s for p, s in zip(pn, ps) if p == "Create Minipreps and Glycerol Stocks"), None
+                    )
+                    if miniprep == "RD": return "READY", False, False
+                    if miniprep == "RU": return "RUNNING", False, False
+                return "FAILED", False, False
+
+            if isinstance(pn, list) and len(pn) > 0:
+                if isinstance(ps, list):
+                    _progress_protocols = {
+                        "Rearray 96 to 384", "DNA Quantification",
+                        "NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing",
+                    }
+                    has_progress = any(p in _progress_protocols and s == "SC" for p, s in zip(pn, ps))
+                    if not has_progress:
+                        miniprep_s = next(
+                            (s for p, s in zip(pn, ps) if p == "Create Minipreps and Glycerol Stocks"), None
+                        )
+                        if miniprep_s == "SC": return "FAILED", False, False
+                        if miniprep_s == "RU": return "RUNNING", False, False
+                        if miniprep_s == "RD": return "READY", False, False
+                    else:
+                        if seq == 0:
+                            _seq_protocols = {"NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing"}
+                            if any(p in _seq_protocols and s in ("SC", "FA") for p, s in zip(pn, ps)):
+                                return "FAILED", False, True
+                            if any(s == "RU" for s in ps): return "RUNNING", False, False
+                            if any(s == "RD" for s in ps): return "READY", False, False
+                            return "IN_PROGRESS", False, False
+            else:
+                if tot > 0 and seq == 0:
+                    return "RUNNING", False, False
+
+        return wo, False, False
+
+    overrides = df.loc[col_mask].apply(_override, axis=1, result_type="expand")
+    overrides.columns = ["visual_status", "is_software_fail", "is_seq_rollback"]
+    df = df.copy()
+    df.loc[col_mask, "visual_status"]    = overrides["visual_status"]
+    df.loc[col_mask, "is_software_fail"] = overrides["is_software_fail"]
+    df.loc[col_mask, "is_seq_rollback"]  = overrides["is_seq_rollback"]
+    df["is_software_fail"] = df["is_software_fail"].fillna(False)
+    df["is_seq_rollback"]  = df["is_seq_rollback"].fillna(False)
+    df["is_status_override"] = (
+        df["visual_status"].astype(str).str.upper()
+        != df["wo_status"].astype(str).str.upper()
+    ) & df["wo_status"].notna()
+    return df
 
 def _merge_lsp(lsp_df: pd.DataFrame, aliq_df: pd.DataFrame) -> pd.DataFrame:
     """Primary + secondary LSP merge with orphan recovery."""

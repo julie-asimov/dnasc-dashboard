@@ -36,63 +36,21 @@ class BIOSExtractor:
         -- Used for parts/transformations to locate their parent GG/Gibson.
         -- fulfills_request=TRUE GG/Gibson workorders use plan_attempt_roots (CASE in SELECT).
         WITH ad_roots AS (
-            -- For each workorder, find the canonical root GG/Gibson in its assembly
-            -- design. Priority order:
-            --   1. assemblydesign.root_work_order_id match — BIOS's own declared root
-            --      for the AD (most authoritative; prevents cross-request fan-in where
-            --      a newer GG added to the same AD steals parts from the original owner)
-            --   2. RUNNING/READY > WAITING/BLOCKED > FAILED/CANCELED (status activity)
-            --   3. Oldest created_at (original context wins among same-status ties)
-            SELECT
+            -- Each AD declares exactly one root via root_work_order_id. Return one row
+            -- per (workorder, declared root) so workorders shared across multiple ADs
+            -- fan into every assembly that claims them.
+            SELECT DISTINCT
                 adwoa.workorder_id,
-                ARRAY_AGG(
-                    root_wo.id
-                    ORDER BY IF(root_wo.id = ad.root_work_order_id, 0, 1),
-                             IF(root_wo.status IN ('RUNNING','READY'), 0,
-                                IF(root_wo.status IN ('FAILED','CANCELED'), 2, 1)),
-                             root_wo.created_at ASC
-                    LIMIT 1
-                )[OFFSET(0)] AS root_wo_id,
-                ARRAY_AGG(
-                    root_wo.request_id
-                    ORDER BY IF(root_wo.id = ad.root_work_order_id, 0, 1),
-                             IF(root_wo.status IN ('RUNNING','READY'), 0,
-                                IF(root_wo.status IN ('FAILED','CANCELED'), 2, 1)),
-                             root_wo.created_at ASC
-                    LIMIT 1
-                )[OFFSET(0)] AS root_request_id
+                ad.root_work_order_id  AS root_wo_id,
+                root_wo.request_id     AS root_request_id
             FROM `{proj}.bios__src.assemblydesignworkorderassociation` adwoa
             JOIN `{proj}.bios__src.assemblydesign` ad
                 ON ad.id = adwoa.assemblydesign_id
-            JOIN `{proj}.bios__src.assemblydesignworkorderassociation` adwoa2
-                ON adwoa2.assemblydesign_id = adwoa.assemblydesign_id
             JOIN `{proj}.bios__src.workorder` root_wo
-                ON root_wo.id = adwoa2.workorder_id
+                ON root_wo.id = ad.root_work_order_id
                AND root_wo.fulfills_request = TRUE
                AND root_wo.type IN ('gibson_workorder', 'golden_gate_workorder')
                AND root_wo.status NOT IN ('DRAFT')
-            GROUP BY adwoa.workorder_id
-        ),
-
-        consuming_roots AS (
-            -- For each workorder, find the fulfills_request=TRUE GG/Gibson workorder IDs
-            -- that share an assembly design with it (via ADWOA). These are the assemblies
-            -- that consume this workorder as an input (parts, PCR, oligos, etc.).
-            -- Stored as a comma-separated string for pandas compatibility.
-            SELECT
-                adwoa1.workorder_id AS part_workorder_id,
-                STRING_AGG(DISTINCT gg_wo.id ORDER BY gg_wo.id) AS consuming_root_ids
-            FROM `{proj}.bios__src.assemblydesignworkorderassociation` adwoa1
-            JOIN `{proj}.bios__src.assemblydesignworkorderassociation` adwoa2
-                ON adwoa1.assemblydesign_id = adwoa2.assemblydesign_id
-               AND adwoa1.workorder_id != adwoa2.workorder_id
-            JOIN `{proj}.bios__src.workorder` gg_wo
-                ON adwoa2.workorder_id = gg_wo.id
-               AND gg_wo.fulfills_request = TRUE
-               AND gg_wo.type IN ('gibson_workorder', 'golden_gate_workorder')
-               AND gg_wo.deleted_at IS NULL
-               AND gg_wo.status NOT IN ('DRAFT')
-            GROUP BY adwoa1.workorder_id
         )
 
         -- 1. Standard Workorders
@@ -144,14 +102,12 @@ class BIOSExtractor:
             COALESCE(tw.antibiotic, gw.antibiotic, ggw.antibiotic) AS antibiotic,
             COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
             COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
-            cr.consuming_root_ids,
             NULL AS attempt_anchor_id,
             NULL AS attempt_number,
             NULL AS attempt_total,
             'BIOS' AS data_source
         FROM `{proj}.bios__src.workorder` wo
         LEFT JOIN ad_roots ad_root ON ad_root.workorder_id = wo.id
-        LEFT JOIN consuming_roots cr ON cr.part_workorder_id = wo.id
         LEFT JOIN `{proj}.bios__src.assemblyplan` ap ON ap.id = wo.assembly_plan_id
         LEFT JOIN `{proj}.bios__src.experiment` exp ON exp.id = ap.experiment_id
         LEFT JOIN `{proj}.bios__src.gibsonworkorder` gw ON wo.id = gw.id
@@ -219,7 +175,6 @@ class BIOSExtractor:
             COALESCE(tw.antibiotic, gw.antibiotic, ggw.antibiotic) AS antibiotic,
             COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
             COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
-            NULL AS consuming_root_ids,
             NULL AS attempt_anchor_id, NULL AS attempt_number, NULL AS attempt_total,
             'BIOS_DRAFT' AS data_source
         FROM `{proj}.bios__src.workorder` wo
@@ -291,7 +246,6 @@ class BIOSExtractor:
             NULL AS product_json, NULL AS backbone_json, NULL AS parts_json,
             NULL AS cloning_strain, NULL AS antibiotic,
             NULL AS expected_color, NULL AS background_color,
-            NULL AS consuming_root_ids,
             NULL AS attempt_anchor_id, NULL AS attempt_number, NULL AS attempt_total,
             'BIOS_REQUEST' AS data_source
         FROM `{proj}.bios__src.request` req

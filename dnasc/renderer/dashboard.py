@@ -272,26 +272,14 @@ def render_all_projects_dashboard(
                            'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder'}
     _global_asm_types = {'gibson_workorder', 'golden_gate_workorder'}
 
-    # ADWOA-based fan-in lookup: gg_workorder_id → [part row dicts].
-    # consuming_root_ids populated by bios.py CTE from assemblydesignworkorderassociation.
-    _parts_by_consuming_root: dict = {}
-    # Stock-keyed lookup retained for stage-summary type/vendor checks (not fan-in).
+    # Stock-keyed lookup for stage-summary type/vendor checks.
     _global_parts_rows_by_stock: dict = {}
     for _, _gpr in df[df['type'].isin(_global_parts_types | _global_asm_types)].iterrows():
         if _gpr.get('type') in _global_asm_types and _gpr.get('fulfills_request') != False:
             continue
-        _prow = _gpr.to_dict()
-        # ADWOA fan-in index
-        _cr = _gpr.get('consuming_root_ids')
-        if _cr and not pd.isna(_cr):
-            for _gg_wid in str(_cr).split(','):
-                _gg_wid = _gg_wid.strip()
-                if _gg_wid:
-                    _parts_by_consuming_root.setdefault(_gg_wid, []).append(_prow)
-        # Stock-ID index for stage summary lookups
         _gsid = str(_gpr.get('STOCK_ID', '') or '').strip()
         if _gsid and _gsid not in ('nan', 'None', ''):
-            _global_parts_rows_by_stock.setdefault(_gsid, []).append(_prow)
+            _global_parts_rows_by_stock.setdefault(_gsid, []).append(_gpr.to_dict())
 
     for _, row in df.iterrows():
         wid = str(row['workorder_id'])
@@ -340,138 +328,25 @@ def render_all_projects_dashboard(
     id_to_root = df.set_index('workorder_id')['root_work_order_id'].astype(str).to_dict()
     valid_ids = set(df['workorder_id'].astype(str).values)
 
-    def get_visual_status(row):
-        raw = row.get('wo_status')
-        original = str(raw).strip().upper() if pd.notna(raw) else ''
+    # visual_status and is_software_fail are pre-computed by the pipeline
+    # (_bridge_status + _apply_colony_status_overrides) — read directly from parquet.
+    if 'is_software_fail' not in df.columns:
+        df['is_software_fail'] = False
 
-        # NaN/UNKNOWN guard
-        if original in ('', 'NAN', 'NONE'):
-            pre = row.get('visual_status')
-            if pd.notna(pre) and str(pre).upper() not in ('NAN', 'NONE', ''):
-                return str(pre).upper(), False
-            return 'IN_PROGRESS', False
+    # status_rank / req_rank / group_rank pre-computed by pipeline enrichment step;
+    # recompute here only as a fallback for parquets written before v1.8.47.
+    if 'status_rank' not in df.columns:
+        status_priority = {'RUNNING': 0, 'IN_PROGRESS': 0, 'BLOCKED': 1, 'WAITING': 2, 'READY': 2, 'DRAFT': 2, 'SUCCEEDED': 3, 'FAILED': 4, 'CANCELED': 5}
+        df['status_rank'] = df['visual_status'].map(status_priority).fillna(99)
+        df['req_rank']    = df.groupby('req_id')['status_rank'].transform('min')
+        df['group_rank']  = df.groupby('root_work_order_id')['status_rank'].transform('min')
 
-        if original == 'UNKNOWN':
-            return 'UNKNOWN', False
-
-        # Colony-based overrides (only for assembly/transformation types)
-        colony_types = ['gibson_workorder', 'golden_gate_workorder', 'transformation_workorder',
-                        'transformation_offline_operation', 'streakout_operation']
-
-        if row['type'] not in colony_types:
-            # For non-colony types, trust _bridge_status (visual_status) over raw wo_status.
-            # wo_status can be stale (e.g. RUNNING) while _bridge_status correctly shows SUCCEEDED.
-            pre = row.get('visual_status')
-            if pd.notna(pre) and str(pre).upper() not in ('NAN', 'NONE', ''):
-                return str(pre).upper(), False
-            return original, False
-
-        if row['type'] in colony_types:
-            tot = int(row.get('total_colonies')) if pd.notna(row.get('total_colonies')) else 0
-            seq = int(row.get('seq_confirmed')) if pd.notna(row.get('seq_confirmed')) else 0
-
-            # Software Fail: BIOS=FAILED but colonies passed seq → override to SUCCEEDED
-            if original == 'FAILED' and seq > 0:
-                return 'SUCCEEDED', True
-
-            # Status lag: BIOS still RUNNING/IN_PROGRESS but sequencing confirmed → SUCCEEDED
-            # (e.g. engineer canceled OpTracker ops after completion, BIOS never auto-closed)
-            if original in ('RUNNING', 'IN_PROGRESS') and seq > 0:
-                return 'SUCCEEDED', False
-
-            # Zero Colony: BIOS=SUCCEEDED but no colonies in LIMS → failure only if
-            # transformation has already run. If transformation is still pending
-            # (RD/RU), colonies haven't been plated yet — use actual op state.
-            if original == 'SUCCEEDED':
-                if tot == 0:
-                    protocols = row.get('protocol_name')
-                    if isinstance(protocols, np.ndarray): protocols = list(protocols)
-                    _states_now = row.get('operation_state')
-                    if isinstance(_states_now, np.ndarray): _states_now = list(_states_now)
-                    if isinstance(protocols, list) and isinstance(_states_now, list):
-                        _transf_done = any(
-                            p in ('STAR Transformation', 'Transformation',
-                                  'Create Minipreps and Glycerol Stocks')
-                            and s in ('SC', 'FA')
-                            for p, s in zip(protocols, _states_now)
-                        )
-                        if not _transf_done:
-                            if any(s == 'RU' for s in _states_now): return 'RUNNING', False
-                            if any(s == 'RD' for s in _states_now): return 'READY', False
-                            return 'IN_PROGRESS', False
-                        # Transformation done but minipreps still pending — colonies exist, not yet processed
-                        miniprep_state = next(
-                            (s for p, s in zip(protocols, _states_now)
-                             if p == 'Create Minipreps and Glycerol Stocks'), None
-                        )
-                        if miniprep_state == 'RD': return 'READY', False
-                        if miniprep_state == 'RU': return 'RUNNING', False
-                    return 'FAILED', False
-
-                protocols = row.get('protocol_name')
-                if isinstance(protocols, np.ndarray):
-                    protocols = list(protocols)
-                if isinstance(protocols, list) and len(protocols) > 0:
-                    # Protocols that indicate colonies were actually processed
-                    colony_progress_protocols = {
-                        'Rearray 96 to 384', 'DNA Quantification',
-                        'NGS Sequence Confirmation', 'Fragment Analyzer',
-                        'Sanger Sequencing'
-                    }
-                    states = row.get('operation_state')
-                    if isinstance(states, np.ndarray):
-                        states = list(states)
-                    if isinstance(states, list):
-                        # Check if ANY colony-progress protocol completed successfully
-                        has_colony_progress = False
-                        for proto, state in zip(protocols, states):
-                            if proto in colony_progress_protocols and state == 'SC':
-                                has_colony_progress = True
-                                break
-
-                        if not has_colony_progress:
-                            # Confirm miniprep completed (pipeline did run past transformation)
-                            has_miniprep = any(
-                                p == 'Create Minipreps and Glycerol Stocks' and s == 'SC'
-                                for p, s in zip(protocols, states)
-                            )
-                            if has_miniprep:
-                                return 'FAILED', False
-                        else:
-                            # seq=0 after colony progress — only FAILED if a sequencing
-                            # protocol actually ran (NGS/Sanger/Fragment Analyzer SC).
-                            # Rearray or Quant done but NGS not yet scheduled = still running.
-                            if tot > 0 and seq == 0:
-                                _seq_protocols = {'NGS Sequence Confirmation', 'Fragment Analyzer', 'Sanger Sequencing'}
-                                if any(p in _seq_protocols and s == 'SC' for p, s in zip(protocols, states)):
-                                    return 'FAILED', False
-                                # Use real OpTracker state if an op is active
-                                if any(s == 'RU' for s in states):
-                                    return 'RUNNING', False
-                                if any(s == 'RD' for s in states):
-                                    return 'READY', False
-                                return 'IN_PROGRESS', False
-                else:
-                    # No OpTracker protocol data (e.g. synthetic LIMS-only streakout).
-                    # Colonies were picked but sequencing not yet done → in progress.
-                    if tot > 0 and seq == 0:
-                        return 'RUNNING', False
-
-        return original, False
-
-    df[['visual_status', 'is_software_fail']] = df.apply(lambda row: pd.Series(get_visual_status(row)), axis=1)
-
-    status_priority = {'RUNNING': 0, 'IN_PROGRESS': 0, 'BLOCKED': 1, 'WAITING': 2, 'READY': 2, 'DRAFT': 2, 'SUCCEEDED': 3, 'FAILED': 4, 'CANCELED': 5}
-    df['status_rank'] = df['visual_status'].map(status_priority).fillna(99)
-    df['req_rank'] = df.groupby('req_id')['status_rank'].transform('min')
-    df['group_rank'] = df.groupby('root_work_order_id')['status_rank'].transform('min')
-
-    def is_visible(row):
-        if row['wo_status'] != 'CANCELED': return True
-        pnames = row.get('protocol_name')
-        if isinstance(pnames, list) and len(pnames) > 0 and pd.notna(pnames[0]): return True
-        return False
-    df['is_visible'] = df.apply(is_visible, axis=1)
+    # is_visible: CANCELED rows with no protocol data are hidden
+    canceled = df['wo_status'] == 'CANCELED'
+    has_protocol = df['protocol_name'].map(
+        lambda v: isinstance(v, (list, np.ndarray)) and len(v) > 0 and pd.notna(v[0] if isinstance(v, list) else v.flat[0])
+    )
+    df['is_visible'] = ~canceled | has_protocol
 
     if 'experiment_name' not in df.columns: df['experiment_name'] = "Unknown Project"
     if 'experiment_created_at' in df.columns:
@@ -566,6 +441,7 @@ def render_all_projects_dashboard(
 
     /* BADGES */
     .badge { padding: 1px 4px; border-radius: 2px; font-size: 8px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
+    .bios-override-label { font-size: 7px; color: #86868b; margin-top: 3px; }
     .status-SUCCEEDED, .status-FULFILLED { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; padding: 1px 7px; }
     .status-FAILED    { background: #fff1f5; color: #be185d; border: 1px solid #fecdd3; }
     .status-CANCELED  { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
@@ -924,7 +800,7 @@ def render_all_projects_dashboard(
         # (e.g. streakout with colonies but no seq → RUNNING) are reflected in phase
         # detection, not just in the per-row display.
         req_df = req_df.copy()
-        req_df['_eff_status'] = req_df.apply(lambda r: get_visual_status(r)[0], axis=1)
+        req_df['_eff_status'] = req_df['visual_status']
         active_rows = req_df[req_df['_eff_status'].isin(['RUNNING', 'READY', 'WAITING', 'BLOCKED', 'IN_PROGRESS'])]
         target_row = None
         status_badge_html = ""
@@ -986,7 +862,7 @@ def render_all_projects_dashboard(
                                         _xreq_candidates.append(_gpr)
                         if _xreq_candidates:
                             _xdf = pd.DataFrame(_xreq_candidates)
-                            _xdf['_eff_status'] = _xdf.apply(lambda r: get_visual_status(r)[0], axis=1)
+                            _xdf['_eff_status'] = _xdf['visual_status']
                             _xdf_active = _xdf[_xdf['_eff_status'].isin(_parts_priority)]
                             if not _xdf_active.empty:
                                 _xdf_active = _xdf_active.copy()
@@ -1353,21 +1229,6 @@ def render_all_projects_dashboard(
                                 row_map[_fan_pwid] = dict(_fan_prow)
                                 _fanned_wids.add(_fan_pwid)
 
-            # ADWOA-based fan-in: for each GG/Gibson in this section, pull in part
-            # workorders whose consuming_root_ids (set at BQ extraction time) lists
-            # this GG's workorder_id. This is authoritative — BIOS explicitly records
-            # which assembly designs each part belongs to.
-            for _gg_wid, _gg_row in list(row_map.items()):
-                if _gg_row.get('type') not in _asm_types_dfs:
-                    continue
-                if str(_gg_row.get('wo_status', '') or '') in ('SUCCEEDED', 'FAILED', 'CANCELED'):
-                    continue
-                for _prow in _parts_by_consuming_root.get(_gg_wid, []):
-                    _gpwid = str(_prow.get('workorder_id', ''))
-                    if _gpwid and _gpwid not in row_map:
-                        row_map[_gpwid] = dict(_prow)
-                        _fanned_wids.add(_gpwid)
-
             for _, row in root_df.iterrows():
                 wid = row['workorder_id']
                 parent = None; label_suffix = ""
@@ -1452,14 +1313,23 @@ def render_all_projects_dashboard(
             # otherwise fall back to design-key grouping within the section.
             if len(visible_asm_roots) > 1:
                 if _has_anchor_col:
-                    # New path: attempt_number/attempt_total already in parquet
+                    # Group visible roots by attempt_anchor_id and re-number sequentially.
+                    # BQ attempt_total counts all anchored roots including CANCELED+no-work
+                    # ones excluded from visible_asm_roots, so we recompute from visible count.
+                    _anchor_groups: dict = {}
                     for _ar in visible_asm_roots:
-                        _anum = row_map[_ar].get('attempt_number')
-                        _atot = row_map[_ar].get('attempt_total')
-                        if pd.notna(_anum) and pd.notna(_atot) and int(_atot or 1) > 1:
-                            row_map[_ar]['_attempt_number'] = int(_anum)
-                            row_map[_ar]['_attempt_total']  = int(_atot)
-                            if int(_anum) > 1:
+                        _anum_bq = row_map[_ar].get('attempt_number')
+                        _atot_bq = row_map[_ar].get('attempt_total')
+                        if pd.notna(_anum_bq) and pd.notna(_atot_bq) and int(_atot_bq or 1) > 1:
+                            _anchor = row_map[_ar].get('attempt_anchor_id') or _ar
+                            _anchor_groups.setdefault(_anchor, []).append((_anum_bq, _ar))
+                    for _anchor_roots in _anchor_groups.values():
+                        _anchor_roots.sort()  # sort by BQ attempt_number → temporal order
+                        _vis_total = len(_anchor_roots)
+                        for _ai, (_, _ar) in enumerate(_anchor_roots, 1):
+                            row_map[_ar]['_attempt_number'] = _ai
+                            row_map[_ar]['_attempt_total']  = _vis_total
+                            if _ai > 1:
                                 _ar_resubmit = row_map[_ar].get('resubmit_count')
                                 _ar_is_retry = (isinstance(_ar_resubmit, (int, float))
                                                 and not pd.isna(_ar_resubmit)
@@ -2164,6 +2034,9 @@ def render_all_projects_dashboard(
                             _fold = float(nd_conc) / float(q_conc)
                             rows2.append(("ND/QB", f"{_fold:.2f}×"))
                         except: pass
+                    _etoh = row.get('etoh_precipitation')
+                    if _etoh is True or _etoh == True:
+                        rows2.append(("EtOH Precip", "Yes"))
                     if _ok(loc): rows2.append(("Location", str(loc)))
                     if rows2:
                         grid_cells = "".join(
@@ -2264,6 +2137,8 @@ def render_all_projects_dashboard(
                                     popover_content += f'<div class="popover-group"><div class="popover-title">{protocol_name}</div>{links}</div>'
                             if popover_content: details_info += f'<br><div class="plate-hover-container"><span class="colony-badge" style="background: {bg}; color: {color}; cursor:pointer;">{seq}/{tot} colonies seq confirmed</span><div class="plate-popover">{popover_content}</div></div>'
                             else: details_info += f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>'
+                            if row.get('is_seq_rollback') is True or row.get('is_seq_rollback') == True:
+                                details_info += f'<br><span style="font-size:9px;color:#dc2626;background:#fff1f2;border:1px solid #fca5a5;padding:2px 6px;border-radius:3px;display:inline-block;margin-top:3px;font-weight:600;">Seq confirmation rolled back — potential recombination in LSP</span>'
                 _sid = row.get("STOCK_ID", "N/A")
                 _sid_str = str(_sid)
                 if _sid_str.startswith('#'):  # placeholder, not a real stock ID
@@ -2274,7 +2149,12 @@ def render_all_projects_dashboard(
                     _sid_class = "stock-id-badge secondary-root"
                 else:
                     _sid_class = "stock-id-badge"
-                html += f"""<tr class="{row_class}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td><span class="badge {badge_class}">{effective_status}</span></td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{details_info}</td><td>{pipeline_html}</td></tr>"""
+                _bios_override = row.get('is_status_override') is True or row.get('is_status_override') == True
+                _bios_raw = str(row.get('wo_status') or '').upper()
+                _status_cell = f'<span class="badge {badge_class}">{effective_status}</span>'
+                if _bios_override and _bios_raw and _bios_raw not in ('NAN', 'NONE', ''):
+                    _status_cell += f'<div class="bios-override-label">BIOS: {_bios_raw}</div>'
+                html += f"""<tr class="{row_class}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{details_info}</td><td>{pipeline_html}</td></tr>"""
             html += "</tbody></table></div></div>"
         html += "</div></div>"
         return html
@@ -2541,174 +2421,28 @@ def render_all_projects_dashboard(
                 dot_color = _age_color(age_weeks, yellow_limit, red_limit, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)
             pos = max(0, min(100, (age_weeks / 8) * 100))
 
-            active_rows = r_df[r_df['wo_status'] != 'CANCELED']
-            is_blocked = 'BLOCKED' in active_rows['visual_status'].values
-            _draft_mask = r_df['data_source'].eq('BIOS_DRAFT') if 'data_source' in r_df.columns else pd.Series(False, index=r_df.index)
-            real_wos = r_df[r_df['workorder_id'].notna() & ~r_df['workorder_id'].astype(str).str.startswith('REQ-') & ~_draft_mask]
-            has_real_workorders = not real_wos.empty
-            has_life = not active_rows[active_rows['visual_status'].isin(['RUNNING', 'READY', 'IN_PROGRESS', 'LSP_RUNNING', 'WAITING'])].empty
-            # After calculating has_life, add root chain check:
-            root_chain_types = ['gibson_workorder', 'golden_gate_workorder', 'transformation_workorder',
-                                'transformation_offline_operation', 'streakout_operation', 'lsp_workorder']
-
-            root_chain_rows = active_rows[active_rows['type'].isin(root_chain_types)]
-            root_chain_finished = root_chain_rows['visual_status'].isin(['SUCCEEDED', 'FAILED', 'CANCELED']).all()
-            root_chain_exists = not root_chain_rows.empty
-
-            asm_blocked_and_stuck = (
-                root_chain_exists
-                and root_chain_rows['visual_status'].isin(['BLOCKED']).any()
-                and not active_rows[active_rows['type'] == 'lsp_workorder']['visual_status']
-                    .isin(['RUNNING', 'READY', 'IN_PROGRESS']).any()
-            )
-
-            # A SUCCEEDED LSP means physical delivery is done — not stalled, just pending BIOS closure.
-            # The stall check (root_chain_finished) fires for Gibson→done-but-no-LSP AND for
-            # LSP-done-but-no-BIOS-fulfillment; the latter is a false positive.
-            lsp_succeeded = (
-                not root_chain_rows[root_chain_rows['type'] == 'lsp_workorder'].empty
-                and (root_chain_rows[root_chain_rows['type'] == 'lsp_workorder']['visual_status'] == 'SUCCEEDED').any()
-            )
-
-            is_stalled = (
-                has_real_workorders
-                and not is_finished
-                and status != 'CANCELED'
-                and not lsp_succeeded  # LSP delivered — BIOS just needs to mark FULFILLED
-                and (
-                    not has_life  # Original condition: no activity anywhere
-                    or (root_chain_exists and root_chain_finished)  # root chain dead even if parts running
-                    or asm_blocked_and_stuck  # BLOCKED ASM with no active LSP downstream
-                )
-            )
-
-            # ASM REVIEW: a winner assembly already succeeded for this root, but another
-            # GG or Gibson is still READY or WAITING — likely should be canceled.
-            _asm_types_flag = {'golden_gate_workorder', 'gibson_workorder'}
-            _asm_rows = active_rows[active_rows['type'].isin(_asm_types_flag)]
-            _has_succeeded_asm = _asm_rows['visual_status'].eq('SUCCEEDED').any()
-            _has_ready_asm     = _asm_rows['visual_status'].isin(['READY', 'WAITING']).any()
-            is_asm_review = (
-                has_real_workorders
-                and not is_finished
-                and status != 'CANCELED'
-                and _has_succeeded_asm
-                and _has_ready_asm
-            )
+            # is_stalled / is_asm_review / is_blocked / has_real_workorders all
+            # pre-computed by the pipeline enrichment step — read from parquet.
+            is_stalled         = bool(r_df['is_stalled'].iloc[0])   if 'is_stalled'    in r_df.columns else False
+            is_asm_review      = bool(r_df['is_asm_review'].iloc[0]) if 'is_asm_review' in r_df.columns else False
+            is_blocked         = bool(r_df['is_blocked'].iloc[0])    if 'is_blocked'    in r_df.columns else False
+            _draft_mask        = r_df['data_source'].eq('BIOS_DRAFT') if 'data_source' in r_df.columns else pd.Series(False, index=r_df.index)
+            has_real_workorders = not r_df[
+                r_df['workorder_id'].notna()
+                & ~r_df['workorder_id'].astype(str).str.startswith('REQ-')
+                & ~_draft_mask
+            ].empty
 
             if not is_finished and status != 'CANCELED':
                 _week_bucket = min(int(age_weeks), 8)
-                # Build tooltip label: "STOCK_ID: construct_name" for this request
-                _tip_cn = str(r_df['construct_name'].iloc[0] if 'construct_name' in r_df.columns and not r_df['construct_name'].dropna().empty else '') or ''
+                _tip_cn  = str(r_df['construct_name'].iloc[0] if 'construct_name' in r_df.columns and not r_df['construct_name'].dropna().empty else '') or ''
                 _tip_sids = r_df[r_df['STOCK_ID'].notna()]['STOCK_ID'].dropna().unique().tolist()
-                _tip_sid = str(_tip_sids[0]) if _tip_sids else ''
+                _tip_sid  = str(_tip_sids[0]) if _tip_sids else ''
                 _tip_label = f"{_tip_sid}: {_tip_cn}".strip(': ') if (_tip_sid or _tip_cn) else str(rid)[:8]
-                if not has_real_workorders:
-                    _s = 'In Design'
-                    stage_counts.setdefault(_s, {})
-                    stage_counts[_s][_week_bucket] = stage_counts[_s].get(_week_bucket, 0) + 1
-                    stage_items.setdefault(_s, {}).setdefault(_week_bucket, []).append(_tip_label)
-                else:
-                    # Use same phase detection as the request badge (all_root_stocks-based)
-                    _rsm = {}
-                    for _rid2, _rdf2 in r_df.groupby('root_work_order_id'):
-                        _rw2 = _rdf2[_rdf2['workorder_id'] == _rid2]['STOCK_ID']
-                        _rs2 = str(_rw2.iloc[0]) if not _rw2.empty and pd.notna(_rw2.iloc[0]) else str(_rdf2['STOCK_ID'].iloc[0])
-                        if _rs2 not in ('nan', 'None', 'N/A'): _rsm[_rid2] = _rs2
-                    _ars = set(_rsm.values())
-                    _eff_a = active_rows[active_rows['visual_status'].isin({'RUNNING','READY','WAITING','BLOCKED','IN_PROGRESS','LSP_RUNNING'})]
-                    _lsp_s = _eff_a[_eff_a['type'] == 'lsp_workorder']
-                    _asm_s = _eff_a[(_eff_a['type'] != 'lsp_workorder') & _eff_a['STOCK_ID'].astype(str).isin(_ars)]
-                    _prt_s = _eff_a[(_eff_a['type'] != 'lsp_workorder') & ~_eff_a['STOCK_ID'].astype(str).isin(_ars)]
-                    def _ap(row):
-                        def _to_list(v):
-                            if isinstance(v, (list, np.ndarray)): return list(v)
-                            if isinstance(v, pd.Series): return list(v.dropna())
-                            if v is None or (isinstance(v, float) and pd.isna(v)): return []
-                            return list(v) if v else []
-                        pn = _to_list(row.get('protocol_name'))
-                        ps = _to_list(row.get('operation_state'))
-                        return {p for p, s in zip(pn, ps) if s in ('RD', 'RU')}
-                    def _stage_from_parts(prt_df):
-                        _type_stage = {
-                            'pcr_workorder':              'PCR',
-                            'syn_part_synthesis_workorder': 'Vendor Parts',
-                            'oligo_synthesis_workorder':  'Vendor Parts',
-                        }
-                        for _pt, _label in _type_stage.items():
-                            if not prt_df[prt_df['type'] == _pt].empty:
-                                return _label
-                        _psw = prt_df[prt_df['type'] == 'plasmid_synthesis_workorder']
-                        if not _psw.empty:
-                            _v = str(_psw.iloc[0].get('vendor') or '')
-                            return 'Vendor Parts' if _v not in ('', 'nan', 'None') else 'DV/PL1 Build'
-                        return 'Vendor Parts'
-                    if is_stalled:
-                        _stage = 'Stalled'
-                    elif not _lsp_s.empty:
-                        _tr = _lsp_s.iloc[0]; _p = _ap(_tr)
-                        if 'LSP Releasing' in _p: _stage = 'Releasing'
-                        elif 'LSP Reviewing' in _p: _stage = 'Reviewing'
-                        elif _p & {'DNA Quantification','NGS Sequence Confirmation','Fragment Analyzer'}: _stage = 'LSP QC'
-                        else: _stage = 'LSP'
-                    elif not _asm_s.empty:
-                        _asm_prog = _asm_s[_asm_s['visual_status'].isin({'RUNNING','READY','IN_PROGRESS','BLOCKED'})]
-                        if not _asm_prog.empty:
-                            _asm_prog = _asm_prog.copy()
-                            _asm_prog['_r'] = _asm_prog['visual_status'].map({'RUNNING':0,'READY':1,'IN_PROGRESS':2,'BLOCKED':3}).fillna(99)
-                            _tr = _asm_prog.sort_values('_r').iloc[0]; _p = _ap(_tr)
-                            if _p & {'DNA Quantification','NGS Sequence Confirmation'}: _stage = 'Assembly QC'
-                            else: _stage = 'Assembly'
-                        else:
-                            if not _prt_s.empty:
-                                _stage = _stage_from_parts(_prt_s)
-                            else:
-                                # WAITING GG, no parts in tree — check global parts lookup
-                                # then fall back to backbone lookup in full df.
-                                _bb_stage = 'Vendor Parts'
-                                _determined = False
-                                for _, _aw in _asm_s[_asm_s['visual_status'] == 'WAITING'].iterrows():
-                                    # Check parts list first against global lookup
-                                    for _fld in ('parts', 'backbone'):
-                                        _raw = str(_aw.get(_fld) or '')
-                                        for _tok in _raw.split(','):
-                                            _psid = _tok.split(':')[0].strip()
-                                            if not _psid or _psid in ('nan', 'None', ''): continue
-                                            for _gpr in _global_parts_rows_by_stock.get(_psid, []):
-                                                _gwt = str(_gpr.get('type', '') or '')
-                                                if 'syn_part' in _gwt or 'oligo' in _gwt:
-                                                    _bb_stage = 'Vendor Parts'; _determined = True; break
-                                                elif 'pcr' in _gwt:
-                                                    _bb_stage = 'PCR'; _determined = True; break
-                                                elif 'plasmid_synthesis' in _gwt:
-                                                    _v = str(_gpr.get('vendor') or '')
-                                                    _bb_stage = 'Vendor Parts' if _v not in ('', 'nan', 'None') else 'DV/PL1 Build'
-                                                    _determined = True; break
-                                            if _determined: break
-                                        if _determined: break
-                                    if _determined: break
-                                    # Backbone lookup via _stock_to_req as secondary check
-                                    _bb = str(_aw.get('backbone') or '')
-                                    _bb_sid = _bb.split(':')[0].strip()
-                                    if _bb_sid and _bb_sid not in ('nan', 'None', ''):
-                                        _bb_info = _stock_to_req.get(_bb_sid)
-                                        if _bb_info:
-                                            _wt = _bb_info.get('wo_type', '')
-                                            if 'syn_part' in _wt or 'oligo' in _wt: _bb_stage = 'Vendor Parts'
-                                            elif 'plasmid_synthesis' in _wt:
-                                                _bb_rows = _global_parts_rows_by_stock.get(_bb_sid, [])
-                                                _has_vendor = any(str(_r.get('vendor') or '') not in ('', 'nan', 'None') for _r in _bb_rows)
-                                                _bb_stage = 'Vendor Parts' if _has_vendor else 'DV/PL1 Build'
-                                            else: _bb_stage = 'DV/PL1 Build'
-                                        # else: backbone not being built → default Vendor Parts
-                                        break
-                                _stage = _bb_stage
-                    elif not _prt_s.empty:
-                        _stage = _stage_from_parts(_prt_s)
-                    else: _stage = 'Stalled'
-                    stage_counts.setdefault(_stage, {})
-                    stage_counts[_stage][_week_bucket] = stage_counts[_stage].get(_week_bucket, 0) + 1
-                    stage_items.setdefault(_stage, {}).setdefault(_week_bucket, []).append(_tip_label)
+                _stage = str(r_df['stage'].iloc[0]) if 'stage' in r_df.columns else ('In Design' if not has_real_workorders else 'Stalled')
+                stage_counts.setdefault(_stage, {})
+                stage_counts[_stage][_week_bucket] = stage_counts[_stage].get(_week_bucket, 0) + 1
+                stage_items.setdefault(_stage, {}).setdefault(_week_bucket, []).append(_tip_label)
 
             if is_finished:
                 count_fulfilled += 1; fulfilled_req_list.append((rid, r_df))
@@ -2724,7 +2458,8 @@ def render_all_projects_dashboard(
                 elif is_blocked: count_blocked += 1
                 else:
                     is_ship_ready = False
-                    lsp_active = active_rows[(active_rows['type'] == 'lsp_workorder') & (active_rows['visual_status'].isin(['RUNNING', 'READY', 'IN_PROGRESS']))]
+                    _active_wo = r_df[r_df['wo_status'] != 'CANCELED']
+                    lsp_active = _active_wo[(_active_wo['type'] == 'lsp_workorder') & (_active_wo['visual_status'].isin(['RUNNING', 'READY', 'IN_PROGRESS']))]
                     for _, lsp_row in lsp_active.iterrows():
                         pnames = lsp_row.get('protocol_name', []); pstates = lsp_row.get('operation_state', [])
                         if isinstance(pnames, list) and isinstance(pstates, list):
@@ -2733,7 +2468,7 @@ def render_all_projects_dashboard(
                         if is_ship_ready: break
                     if is_ship_ready: count_ship_ready += 1
                     elif not lsp_active.empty: count_in_lsp += 1
-                    elif not active_rows[(active_rows['type'].isin(['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation', 'pcr_workorder'])) & (active_rows['visual_status'].isin(['RUNNING', 'READY', 'IN_PROGRESS']))].empty: count_in_assembly += 1
+                    elif not _active_wo[(_active_wo['type'].isin(['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation', 'pcr_workorder'])) & (_active_wo['visual_status'].isin(['RUNNING', 'READY', 'IN_PROGRESS']))].empty: count_in_assembly += 1
                     else: count_active_waiting += 1
             else: count_new += 1; new_req_list.append((rid, r_df))
 

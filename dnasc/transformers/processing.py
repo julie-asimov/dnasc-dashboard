@@ -37,9 +37,10 @@ class ProcessingTransformer:
         # ── Cleanup: remove experiments with only canceled/empty work ─────────
         df = ProcessingTransformer._filter_canceled_experiments(df)
 
-        # ── Dedup on workorder_id (safety net) ───────────────────────────────
-        # BQ now returns 1 row per workorder via assembly_plan_id join.
-        df = df.drop_duplicates(subset=["workorder_id"])
+        # ── Dedup on (workorder_id, root_work_order_id) ──────────────────────
+        # A workorder shared across multiple ADs gets one row per declared root
+        # so it fans into every assembly section that claims it.
+        df = df.drop_duplicates(subset=["workorder_id", "root_work_order_id"])
 
         # ── JSON parsing ──────────────────────────────────────────────────────
         df["backbone_json"] = df["backbone_json"].fillna("{}")
@@ -126,40 +127,7 @@ class ProcessingTransformer:
 
     @staticmethod
     def _filter_canceled_experiments(df: pd.DataFrame) -> pd.DataFrame:
-        log.debug("Filtering experiments with only canceled/empty workorders...")
-
-        import numpy as np
-        _active = {"SUCCEEDED", "FAILED", "RUNNING", "READY", "IN_PROGRESS"}
-        _has_protocol = pd.Series(False, index=df.index)
-        if "protocol_name" in df.columns:
-            _has_protocol = df["protocol_name"].map(
-                lambda p: (
-                    isinstance(p, (list, np.ndarray))
-                    and len(p) > 0
-                    and pd.notna(p[0] if isinstance(p, list) else p.flat[0])
-                )
-            )
-        df["has_work_done"] = (
-            df["data_source"].isin(["SYNTHETIC_LSP", "LSP"])
-            | df["wo_status"].astype(str).str.upper().isin(_active)
-            | _has_protocol
-        )
-
-        roots_with_live_children = set(
-            df.loc[
-                (df["wo_status"] != "CANCELED") & df["has_work_done"],
-                "root_work_order_id",
-            ]
-            .dropna()
-            .unique()
-        )
-
-        df["is_displayable"] = (
-            df["root_work_order_id"].isin(roots_with_live_children)
-            | (df["request_status"] == "NEW")
-            | (df["wo_status"] != "CANCELED")
-            | df["has_work_done"]
-        )
+        log.debug("Filtering experiments with only canceled workorders...")
 
         is_lsp = df["data_source"].isin(["SYNTHETIC_LSP", "LSP"])
         root_to_exp = (
@@ -168,28 +136,24 @@ class ProcessingTransformer:
             .first()
             .to_dict()
         )
-        df["experiment_name_for_grouping"] = (
+        df["_exp_group"] = (
             df["experiment_name"]
             .fillna(df["root_work_order_id"].map(root_to_exp))
             .fillna(df["workorder_id"].where(is_lsp))
             .fillna(df["workorder_id"])
         )
 
-        keep_experiments = (
-            df.groupby("experiment_name_for_grouping")["is_displayable"]
-            .any()
+        keep = (
+            df.groupby("_exp_group")["wo_status"]
+            .apply(lambda s: (s.astype(str).str.upper() != "CANCELED").any())
             .pipe(lambda s: s[s].index)
         )
         before = len(df)
-        df = df[df["experiment_name_for_grouping"].isin(keep_experiments)]
-        removed = before - len(df)
-        if removed:
-            log.info("Removed %d rows from all-canceled/empty experiments", removed)
+        df = df[df["_exp_group"].isin(keep)]
+        if len(df) < before:
+            log.info("Removed %d rows from all-canceled experiments", before - len(df))
 
-        df.drop(
-            ["has_work_done", "is_displayable", "experiment_name_for_grouping"],
-            axis=1, inplace=True, errors="ignore",
-        )
+        df.drop("_exp_group", axis=1, inplace=True, errors="ignore")
         return df
 
     @staticmethod
@@ -238,12 +202,9 @@ class ProcessingTransformer:
         asm = df.loc[asm_idx, ["workorder_id", "req_id", "STOCK_ID", "backbone", "parts", "wo_created_at"]].copy()
 
         def _key(row):
-            stock = str(row.get("STOCK_ID") or "")
-            if not stock or stock.startswith("#") or stock in ("nan", "None"):
-                return ("__self__", row["workorder_id"], "", "")
             return (
                 str(row.get("req_id") or ""),
-                stock,
+                str(row.get("STOCK_ID") or ""),
                 str(row.get("backbone") or ""),
                 str(row.get("parts") or ""),
             )
