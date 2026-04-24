@@ -45,7 +45,7 @@ class PipelineConfig:
     LSP_CUTOFF_DATE: str = "2025-11-01"      # Secondary-pass identity recovery cutoff
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.8.50"
+    PIPELINE_VERSION: str = "1.8.53"
 
     @classmethod
     def get_date_filter(cls) -> str:

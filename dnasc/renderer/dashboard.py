@@ -570,29 +570,24 @@ def render_all_projects_dashboard(
         else { el.style.display = "block"; if(icon) icon.classList.add('open'); if(btn) btn.classList.add('active-header'); }
     }
     var _sortedByDue = false;
-    var _originalOrder = null;
     function sortByDueDate() {
-        var container = document.querySelector('#tab-tracking > div[style*="padding"]');
+        var container = document.getElementById('projects-container');
         if (!container) return;
         var cards = Array.from(container.querySelectorAll(':scope > .project-wrapper'));
         if (!_sortedByDue) {
-            // Save original order
-            _originalOrder = cards.slice();
-            // Sort ascending by data-due-date (no date = end)
             cards.sort(function(a, b) {
                 var da = a.getAttribute('data-due-date') || '9999-99-99';
                 var db = b.getAttribute('data-due-date') || '9999-99-99';
                 return da < db ? -1 : da > db ? 1 : 0;
             });
-            cards.forEach(function(c) { container.appendChild(c); });
+            cards.forEach(function(c, i) { c.style.order = i; });
             _sortedByDue = true;
             document.getElementById('sort_due_btn').textContent = 'Sort: Default';
             document.getElementById('sort_due_btn').style.background = '#e8f4fd';
             document.getElementById('sort_due_btn').style.borderColor = '#0891b2';
             document.getElementById('sort_due_btn').style.color = '#0891b2';
         } else {
-            // Restore original order
-            if (_originalOrder) { _originalOrder.forEach(function(c) { container.appendChild(c); }); }
+            cards.forEach(function(c) { c.style.order = ''; });
             _sortedByDue = false;
             document.getElementById('sort_due_btn').textContent = 'Sort: Due Date';
             document.getElementById('sort_due_btn').style.background = '#fff';
@@ -624,8 +619,10 @@ def render_all_projects_dashboard(
             if (searchTerm) {
                 if (!project.textContent.toLowerCase().includes(searchTerm)) { project.style.display = 'none'; continue; }
                 project.style.display = 'block';
+                var headerBanner = project.querySelector('.header-banner');
+                var headerMatches = headerBanner && headerBanner.textContent.toLowerCase().includes(searchTerm);
                 project.querySelectorAll('.req-card').forEach(function(reqCard) {
-                    if (!reqCard.textContent.toLowerCase().includes(searchTerm)) {
+                    if (!headerMatches && !reqCard.textContent.toLowerCase().includes(searchTerm)) {
                         reqCard.style.display = 'none'; return;
                     }
                     reqCard.style.display = 'block';
@@ -734,7 +731,7 @@ def render_all_projects_dashboard(
                         <button id="sort_due_btn" onclick="sortByDueDate()" style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:4px;border:1px solid #d1d1d6;background:#fff;color:#1d1d1f;cursor:pointer;white-space:nowrap;">Sort: Due Date</button>
                     </div>
                 </div>
-                <div style="padding: 10px;">
+                <div id="projects-container" style="padding: 10px; display: flex; flex-direction: column;">
     """
 
     # =========================================================================
