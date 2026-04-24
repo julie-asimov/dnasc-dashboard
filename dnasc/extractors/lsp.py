@@ -128,13 +128,18 @@ class LSPExtractor:
             STRING_AGG(CAST(aliq.created_at AS STRING), ', ') AS aliq_created_at,
             STRING_AGG(CAST(aliq.date_received AS STRING), ', ') AS date_received,
             STRING_AGG(aliq.location, ', ')                   AS location,
-            STRING_AGG(aliq.comments, ', ')                   AS aliquot_comments
+            STRING_AGG(aliq.comments, ', ')                   AS aliquot_comments,
+            STRING_AGG(DISTINCT qc_ps.location, ', ')         AS qc_tube_location
         FROM `{proj}.lims__src.lsp_batch` AS batch
         LEFT JOIN `{proj}.lims__src.lsp_aliquot` AS aliq ON aliq.lsp_batch_id = batch.id
         LEFT JOIN `{proj}.lims__src.lsp_batch_source` AS source ON source.lsp_batch_id = batch.id
         LEFT JOIN `{proj}.lims__src.strain` AS p ON p.id = source.strain_id
         LEFT JOIN `{proj}.lims__src.well_content` AS wc ON wc.strain_id = p.id
         LEFT JOIN `{proj}.lims__src.well` AS w ON w.id = wc.well_id
+        LEFT JOIN `{proj}.lims__src.plasmid_stock` AS qc_ps
+            ON qc_ps.plasmid_id = batch.plasmid_id
+            AND qc_ps.comments = CONCAT('LSP-', CAST(batch.id AS STRING))
+            AND qc_ps.location IS NOT NULL
         WHERE batch.created_at >= '{date_filter}'
         GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26
         """

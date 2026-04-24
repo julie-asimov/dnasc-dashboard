@@ -1978,6 +1978,7 @@ def render_all_projects_dashboard(
                     r_260_280 = row.get('ratio_260_280')
                     r_260_230 = row.get('ratio_260_230')
                     loc       = row.get('location')
+                    qc_tube   = row.get('qc_tube_location')
                     # Parse format threshold: e.g. MIDIPREP_LSP_60_UG_800_NG_UL → conc=800, yld=60
                     _fmt_str  = str(dl_fmt) if _ok(dl_fmt) else ""
                     _customer = str(row.get('customer') or "").upper()
@@ -2033,8 +2034,9 @@ def render_all_projects_dashboard(
                         except: pass
                     _etoh = row.get('etoh_precipitation')
                     if _etoh is True or _etoh == True:
-                        rows2.append(("EtOH Precip", "Yes"))
-                    if _ok(loc): rows2.append(("Location", str(loc)))
+                        rows2.append(("EtOH", "Yes"))
+                    if _ok(loc): rows2.append(("Aliquot", str(loc)))
+                    if _ok(qc_tube): rows2.append(("QC Tube", str(qc_tube)))
                     if rows2:
                         grid_cells = "".join(
                             f'<span style="{_lbl}">{lbl}</span><span style="{_val}">{val}</span>'
