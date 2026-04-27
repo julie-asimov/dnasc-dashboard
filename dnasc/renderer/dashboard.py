@@ -652,6 +652,206 @@ def render_all_projects_dashboard(
         if (firstTarget && searchTerm) {
             setTimeout(function() { firstTarget.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 50);
         }
+        var countEl = document.getElementById('search_count');
+        if (countEl) {
+            if (searchTerm) {
+                var typeLabels = {
+                    'golden_gate_workorder': 'Golden Gate',
+                    'gibson_workorder': 'Gibson',
+                    'lsp_workorder': 'LSP',
+                    'pcr_workorder': 'PCR',
+                    'oligo_synthesis_workorder': 'Oligo',
+                    'plasmid_synthesis_workorder': 'Synthesis',
+                    'transformation_workorder': 'Transformation',
+                    'streak_workorder': 'Streakout'
+                };
+                var sourceCounts = {}, inputCounts = {}, sourceReqs = 0, inputReqs = 0;
+                var seenWoIds = {};
+                document.querySelectorAll('.req-card').forEach(function(card) {
+                    var rows = card.querySelectorAll('tr.search-match[data-wo-type]');
+                    var hasSource = false, hasInput = false;
+                    rows.forEach(function(row) {
+                        var t = row.getAttribute('data-wo-type');
+                        if (!typeLabels[t]) return;
+                        var woId = row.getAttribute('data-wo-id') || '';
+                        var stock = row.getAttribute('data-wo-stock') || '';
+                        var isSource = stock && stock.includes(searchTerm);
+                        var bucket = isSource ? 'src' : 'inp';
+                        var key = bucket + '|' + woId;
+                        if (woId && seenWoIds[key]) return;
+                        if (woId) seenWoIds[key] = true;
+                        if (isSource) { sourceCounts[t] = (sourceCounts[t] || 0) + 1; hasSource = true; }
+                        else { inputCounts[t] = (inputCounts[t] || 0) + 1; hasInput = true; }
+                    });
+                    if (hasSource) sourceReqs++;
+                    if (hasInput) inputReqs++;
+                });
+                var srcTypeParts = Object.keys(sourceCounts).map(function(t) {
+                    return sourceCounts[t] + ' ' + typeLabels[t];
+                });
+                var inTypeParts = Object.keys(inputCounts).map(function(t) {
+                    return inputCounts[t] + ' ' + typeLabels[t] + ' workorder' + (inputCounts[t] === 1 ? '' : 's');
+                });
+                var lines = [];
+                if (srcTypeParts.length) lines.push('Product: ' + sourceReqs + ' request' + (sourceReqs===1?'':'s') + ' (' + srcTypeParts.join(', ') + ')');
+                if (inTypeParts.length) lines.push('Input to: ' + inTypeParts.join(', ') + ' · ' + inputReqs + ' request' + (inputReqs===1?'':'s'));
+                countEl.textContent = lines.join('  |  ');
+                var dlBtn = document.getElementById('search_download');
+                if (dlBtn) dlBtn.style.display = lines.length ? 'inline' : 'none';
+                var listBtn = document.getElementById('search_list_btn');
+                if (listBtn) listBtn.style.display = lines.length ? 'inline' : 'none';
+                countEl.style.display = 'inline';
+            } else {
+                countEl.style.display = 'none';
+                var dlBtn2 = document.getElementById('search_download');
+                if (dlBtn2) dlBtn2.style.display = 'none';
+                var listBtn2 = document.getElementById('search_list_btn');
+                if (listBtn2) listBtn2.style.display = 'none';
+                var pop = document.getElementById('search_list_popup');
+                if (pop) pop.style.display = 'none';
+            }
+        }
+    }
+    function _searchMatchRows() {
+        var searchTerm = document.getElementById('search_box').value.trim().toLowerCase();
+        var typeLabels = {
+            'golden_gate_workorder': 'Golden Gate', 'gibson_workorder': 'Gibson',
+            'lsp_workorder': 'LSP', 'pcr_workorder': 'PCR',
+            'oligo_synthesis_workorder': 'Oligo', 'plasmid_synthesis_workorder': 'Synthesis',
+            'transformation_workorder': 'Transformation', 'streak_workorder': 'Streakout'
+        };
+        var results = [];
+        var seen = {};
+        document.querySelectorAll('tr.search-match[data-wo-type]').forEach(function(tr) {
+            var woId = tr.getAttribute('data-wo-id') || '';
+            var t = tr.getAttribute('data-wo-type') || '';
+            var stock = (tr.getAttribute('data-wo-stock') || '').toLowerCase();
+            var isSource = stock && searchTerm && stock.includes(searchTerm);
+            var key = (isSource ? 'src' : 'inp') + '|' + woId;
+            if (woId && seen[key]) return;
+            if (woId) seen[key] = true;
+            var cells = tr.querySelectorAll('td');
+            var status = cells[2] ? cells[2].textContent.trim() : '';
+            var created = cells[4] ? cells[4].textContent.trim() : '';
+            var stockDisplay = cells[3] ? cells[3].textContent.trim() : (tr.getAttribute('data-wo-stock') || '');
+            var projEl = tr.closest('.project-wrapper');
+            var expName = projEl ? (projEl.querySelector('.header-title') || {textContent: ''}).textContent.trim() : '';
+            var partner = tr.getAttribute('data-wo-partner') === '1' ? 'Yes' : 'No';
+            var role = isSource ? 'Product' : 'Input to';
+            var typeLbl = typeLabels[t] || t;
+            results.push({role: role, type: typeLbl, woId: woId, stock: stockDisplay, status: status, created: created, experiment: expName, partner: partner});
+        });
+        return results;
+    }
+    function downloadSearchCSV() {
+        var searchTerm = document.getElementById('search_box').value.trim();
+        var results = _searchMatchRows();
+        var rows = ['"Role","Type","Workorder ID","Stock ID","Status","Created","Experiment","For Partner"'];
+        results.forEach(function(r) {
+            rows.push([r.role, r.type, r.woId, r.stock, r.status, r.created, r.experiment, r.partner].map(function(v) {
+                return '"' + String(v).replace(/"/g, '""') + '"';
+            }).join(','));
+        });
+        var csv = rows.join('\\n');
+        var blob = new Blob([csv], {type: 'text/csv'});
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'search_' + searchTerm.replace(/[^a-zA-Z0-9_-]/g, '_') + '.csv';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+    var _slSortState = {};
+    function _slApplyFilter(filterVal) {
+        var term = filterVal.toLowerCase().trim();
+        document.querySelectorAll('#search_list_popup tbody tr').forEach(function(tr) {
+            var text = tr.textContent.toLowerCase();
+            tr.style.display = (!term || text.includes(term)) ? '' : 'none';
+        });
+    }
+    function _slSortTable(table, colIdx) {
+        var key = table.id + ':' + colIdx;
+        var asc = _slSortState[key] !== true;
+        _slSortState[key] = asc;
+        var tbody = table.querySelector('tbody');
+        var rows = Array.from(tbody.querySelectorAll('tr'));
+        rows.sort(function(a, b) {
+            var av = (a.cells[colIdx] ? a.cells[colIdx].textContent.trim() : '').toLowerCase();
+            var bv = (b.cells[colIdx] ? b.cells[colIdx].textContent.trim() : '').toLowerCase();
+            if (av < bv) return asc ? -1 : 1;
+            if (av > bv) return asc ? 1 : -1;
+            return 0;
+        });
+        rows.forEach(function(r) { tbody.appendChild(r); });
+        table.querySelectorAll('thead th').forEach(function(th, i) {
+            var base = th.getAttribute('data-label') || th.textContent.replace(/[ ↑↓]/g,'').trim();
+            th.setAttribute('data-label', base);
+            th.textContent = base + (i === colIdx ? (asc ? ' ↑' : ' ↓') : '');
+        });
+    }
+    function _buildListSection(title, rows) {
+        if (!rows.length) return '';
+        var cols = ['Type','Workorder ID','Stock ID','Status','Created','Partner','Experiment'];
+        var thStyle = 'padding:2px 8px;text-align:left;white-space:nowrap;cursor:pointer;user-select:none;';
+        thStyle += 'border-bottom:2px solid #d1d5db;font-size:10px;color:#374151;';
+        var html = '<div style="font-size:10px;font-weight:700;color:#374151;margin:8px 0 3px;">' + title + '</div>';
+        var tid = 'sl_' + title.toLowerCase().replace(/[^a-z]/g,'_');
+        html += '<table id="' + tid + '" style="width:100%;border-collapse:collapse;font-size:10px;">';
+        html += '<thead><tr style="background:#f3f4f6;">';
+        cols.forEach(function(c) { html += '<th data-label="' + c + '" style="' + thStyle + '">' + c + '</th>'; });
+        html += '</tr></thead><tbody>';
+        rows.forEach(function(r) {
+            var vals = [r.type, r.woId, r.stock, r.status, r.created, r.partner, r.experiment];
+            html += '<tr style="border-bottom:1px solid #f0f0f0;">';
+            vals.forEach(function(v, i) {
+                var s = 'padding:2px 8px;';
+                if (i === 1) s += 'font-family:monospace;font-size:9px;';
+                if (i === 6) s += 'max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                html += '<td style="' + s + '" title="' + String(v).replace(/"/g,'&quot;') + '">' + v + '</td>';
+            });
+            html += '</tr>';
+        });
+        html += '</tbody></table>';
+        return {html: html, tid: tid};
+    }
+    function toggleSearchList() {
+        var pop = document.getElementById('search_list_popup');
+        if (!pop) return;
+        if (pop.style.display !== 'none' && pop.style.display !== '') { pop.style.display = 'none'; return; }
+        var results = _searchMatchRows();
+        var srcRows = results.filter(function(r){ return r.role === 'Product'; });
+        var inpRows = results.filter(function(r){ return r.role === 'Input to'; });
+        var src = _buildListSection('Product', srcRows);
+        var inp = _buildListSection('Input to', inpRows);
+        var closeBtn = document.createElement('div');
+        closeBtn.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;';
+        closeBtn.innerHTML = '<span style="font-size:11px;font-weight:700;color:#1e293b;">Search Results</span>';
+        var xBtn = document.createElement('button');
+        xBtn.textContent = '×';
+        xBtn.style.cssText = 'background:none;border:none;font-size:14px;cursor:pointer;color:#64748b;line-height:1;';
+        xBtn.onclick = function() { pop.style.display = 'none'; };
+        closeBtn.appendChild(xBtn);
+        var filterRow = document.createElement('div');
+        filterRow.style.cssText = 'margin-bottom:6px;';
+        var filterInput = document.createElement('input');
+        filterInput.type = 'text';
+        filterInput.placeholder = 'Filter rows…';
+        filterInput.style.cssText = 'width:100%;box-sizing:border-box;padding:3px 7px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;';
+        filterInput.oninput = function() { _slApplyFilter(this.value); };
+        filterRow.appendChild(filterInput);
+        pop.innerHTML = (src ? src.html : '') + (inp ? inp.html : '');
+        pop.insertBefore(filterRow, pop.firstChild);
+        pop.insertBefore(closeBtn, pop.firstChild);
+        var tids = [];
+        if (src) tids.push(src.tid);
+        if (inp) tids.push(inp.tid);
+        tids.forEach(function(tid) {
+            var table = document.getElementById(tid);
+            if (!table) return;
+            table.querySelectorAll('thead th').forEach(function(th, i) {
+                th.addEventListener('click', function() { _slSortTable(table, i); });
+            });
+        });
+        pop.style.display = 'block';
     }
     document.addEventListener('DOMContentLoaded', function() {
         try {
@@ -717,8 +917,14 @@ def render_all_projects_dashboard(
             <!-- TRACKING TAB -->
             <div id="tab-tracking" class="tab-content active">
                 <div class="controls-container">
-                    <div class="toggle-wrapper" style="margin-right: auto;">
+                    <div class="toggle-wrapper" style="margin-right: auto; flex-direction: column; align-items: flex-start; gap: 2px; position: relative;">
                         <input type="text" id="search_box" placeholder="Search Stock ID, Experiment, or Construct..." oninput="filterDashboardDebounced()">
+                        <span id="search_count" style="font-size:10px;color:#64748b;white-space:nowrap;display:none;padding-left:2px;"></span>
+                        <div style="display:flex;gap:4px;align-items:center;">
+                            <button id="search_download" onclick="downloadSearchCSV()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #d1d1d6;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#8595; CSV</button>
+                            <button id="search_list_btn" onclick="toggleSearchList()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #d1d1d6;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#9776; List</button>
+                        </div>
+                        <div id="search_list_popup" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #d1d1d6;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:10px 12px;z-index:999;min-width:700px;max-width:90vw;max-height:60vh;overflow-y:auto;font-family:inherit;"></div>
                     </div>
                     <div class="toggle-wrapper">
                         <span class="toggle-label">Active Projects Only</span>
@@ -1435,7 +1641,7 @@ def render_all_projects_dashboard(
                     row_data = row_map[node_id]; row_data['tree_depth'] = depth; parts_ordered.append(row_data)
                 for child in adj.get(node_id, []):
                     dfs_p(child, depth + 1)
-            for r in asm_roots_list + other_roots_list: dfs(r, 0)
+            for r in visible_asm_roots + other_roots_list: dfs(r, 0)
             for r in parts_roots_list: dfs_p(r, 0)
             sorted_root_df = pd.DataFrame(ordered_data + parts_ordered)
 
@@ -2153,7 +2359,9 @@ def render_all_projects_dashboard(
                 _status_cell = f'<span class="badge {badge_class}">{effective_status}</span>'
                 if _bios_override and _bios_raw and _bios_raw not in ('NAN', 'NONE', ''):
                     _status_cell += f'<div class="bios-override-label">BIOS: {_bios_raw}</div>'
-                html += f"""<tr class="{row_class}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{details_info}</td><td>{pipeline_html}</td></tr>"""
+                _fulfills_attr = "1" if row.get('fulfills_request') else "0"
+                _partner_attr = "1" if str(row.get('for_partner', '')).lower() == 'true' else "0"
+                html += f"""<tr class="{row_class}" data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{details_info}</td><td>{pipeline_html}</td></tr>"""
             html += "</tbody></table></div></div>"
         html += "</div></div>"
         return html
