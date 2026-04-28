@@ -6,6 +6,7 @@ TAT metrics, and protocol success/failure state.
 """
 
 from __future__ import annotations
+import os
 import time
 
 import pandas as pd
@@ -14,6 +15,21 @@ from dnasc.config import PipelineConfig
 from dnasc.logger import get_logger
 
 log = get_logger(__name__)
+
+_EXCLUDED_JOBS_CSV = os.path.join(os.path.dirname(__file__), "..", "..", "excluded_optracker_jobs.csv")
+
+
+def _load_excluded_job_ids() -> list[int]:
+    """Load manually excluded OpTracker job IDs from the repo CSV."""
+    path = os.path.normpath(_EXCLUDED_JOBS_CSV)
+    if not os.path.exists(path):
+        return []
+    try:
+        df = pd.read_csv(path, comment="#")
+        return [int(x) for x in df["job_id"].dropna().tolist()]
+    except Exception as e:
+        log.warning("Could not load excluded_optracker_jobs.csv: %s", e)
+        return []
 
 
 class OpTrackerExtractor:
@@ -196,5 +212,15 @@ class OpTrackerExtractor:
         """
 
         df = pd.read_gbq(query, project_id=proj, dialect="standard")
+
+        excluded_ids = _load_excluded_job_ids()
+        if excluded_ids and "job_id" in df.columns:
+            before = len(df)
+            df = df[~df["job_id"].isin(excluded_ids)]
+            dropped = before - len(df)
+            if dropped:
+                log.info("Excluded %d rows from %d manually blocked job(s): %s",
+                         dropped, len(excluded_ids), excluded_ids)
+
         log.info("OpTracker operations retrieved: %d rows in %.2fs", len(df), time.time() - t0)
         return df
