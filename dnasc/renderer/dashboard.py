@@ -1260,8 +1260,25 @@ def render_all_projects_dashboard(
             status_priority = {'RUNNING': 0, 'IN_PROGRESS': 0, 'BLOCKED': 1, 'WAITING': 2, 'READY': 2, 'DRAFT': 2, 'SUCCEEDED': 3, 'FAILED': 4, 'CANCELED': 5}
             r_df['local_rank'] = r_df['visual_status'].map(status_priority).fillna(99)
             min_rank = r_df['local_rank'].min()
-            root_status_map[root_id] = {'is_winner': is_winner, 'rank': min_rank}
-        sorted_roots = sorted(root_status_map.keys(), key=lambda r: (not root_status_map[r]['is_winner'], root_status_map[r]['rank']))
+            # For assembly GG/Gibson roots, rank by the root workorder's own status,
+            # not the minimum across all rows (sub-assembly BLOCKED parts would otherwise
+            # pull the whole section's rank up, hiding newer active attempts).
+            _root_own_rows = r_df[r_df['workorder_id'] == root_id]
+            _root_own_type = str(_root_own_rows['type'].iloc[0]) if not _root_own_rows.empty else ''
+            if _root_own_type in ('golden_gate_workorder', 'gibson_workorder') and not _root_own_rows.empty:
+                _root_own_status = str(_root_own_rows['visual_status'].iloc[0])
+                root_rank = status_priority.get(_root_own_status, 99)
+            else:
+                root_rank = min_rank
+            _root_ts = _root_own_rows['wo_created_at'].iloc[0] if not _root_own_rows.empty else None
+            try: _root_ts_val = _root_ts.timestamp() if _root_ts is not None and pd.notna(_root_ts) else 0
+            except Exception: _root_ts_val = 0
+            root_status_map[root_id] = {'is_winner': is_winner, 'rank': root_rank, 'ts': _root_ts_val}
+        sorted_roots = sorted(root_status_map.keys(), key=lambda r: (
+            not root_status_map[r]['is_winner'],
+            root_status_map[r]['rank'],
+            -root_status_map[r].get('ts', 0)   # newest first within same rank
+        ))
 
         # Pre-compute request-level attempt numbering for assembly roots.
         # With self-rooting each Gibson/GG is its own root section, so per-section
@@ -1380,6 +1397,19 @@ def render_all_projects_dashboard(
         for root_id in sorted_roots:
             if root_id in _cross_plan_sub_roots:
                 continue
+            # Hide DRAFT GG/Gibson sections only when every row in the section is also
+            # DRAFT — meaning no real workorder was ever executed for any input.
+            # If even one input has any non-DRAFT status (WAITING, READY, RUNNING,
+            # SUCCEEDED, CANCELED, etc.) a real workorder ran and we keep the section.
+            _root_own = req_df[req_df['workorder_id'] == root_id]
+            if not _root_own.empty:
+                _root_type = str(_root_own['type'].iloc[0])
+                _root_ws   = str(_root_own['wo_status'].iloc[0])
+                if _root_type in ('golden_gate_workorder', 'gibson_workorder') and _root_ws == 'DRAFT':
+                    _section_rows = req_df[req_df['root_work_order_id'] == root_id]
+                    _all_draft = _section_rows['wo_status'].str.upper().eq('DRAFT').all()
+                    if _all_draft:
+                        continue
             root_df = req_df[req_df['root_work_order_id'] == root_id]
             # Fold cross-plan same-design sub-roots into this primary section
             for _sub in _cross_plan_sub_roots_for.get(root_id, []):
@@ -1641,7 +1671,7 @@ def render_all_projects_dashboard(
                     row_data = row_map[node_id]; row_data['tree_depth'] = depth; parts_ordered.append(row_data)
                 for child in adj.get(node_id, []):
                     dfs_p(child, depth + 1)
-            for r in visible_asm_roots + other_roots_list: dfs(r, 0)
+            for r in asm_roots_list + other_roots_list: dfs(r, 0)
             for r in parts_roots_list: dfs_p(r, 0)
             sorted_root_df = pd.DataFrame(ordered_data + parts_ordered)
 
