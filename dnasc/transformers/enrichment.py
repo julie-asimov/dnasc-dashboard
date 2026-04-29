@@ -244,6 +244,7 @@ class EnrichmentTransformer:
             asm_stuck = (
                 rc_exists
                 and rc_rows['visual_status'].isin(['BLOCKED']).any()
+                and not rc_rows['visual_status'].isin(['RUNNING', 'READY', 'IN_PROGRESS']).any()
                 and not active_rows[active_rows['type'] == 'lsp_workorder']['visual_status']
                     .isin(['RUNNING', 'READY', 'IN_PROGRESS']).any()
             )

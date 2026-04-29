@@ -26,6 +26,74 @@ import pandas as pd
 import pytz
 
 from dnasc.logger import get_logger
+
+# Omni plate maps: LIMS position is 0-indexed; add 1 to get the 1-indexed key.
+# All formats are column-major (positions fill down each column before moving right).
+_WELL_MAP_96 = {
+    '1':'A1','2':'B1','3':'C1','4':'D1','5':'E1','6':'F1','7':'G1','8':'H1',
+    '9':'A2','10':'B2','11':'C2','12':'D2','13':'E2','14':'F2','15':'G2','16':'H2',
+    '17':'A3','18':'B3','19':'C3','20':'D3','21':'E3','22':'F3','23':'G3','24':'H3',
+    '25':'A4','26':'B4','27':'C4','28':'D4','29':'E4','30':'F4','31':'G4','32':'H4',
+    '33':'A5','34':'B5','35':'C5','36':'D5','37':'E5','38':'F5','39':'G5','40':'H5',
+    '41':'A6','42':'B6','43':'C6','44':'D6','45':'E6','46':'F6','47':'G6','48':'H6',
+    '49':'A7','50':'B7','51':'C7','52':'D7','53':'E7','54':'F7','55':'G7','56':'H7',
+    '57':'A8','58':'B8','59':'C8','60':'D8','61':'E8','62':'F8','63':'G8','64':'H8',
+    '65':'A9','66':'B9','67':'C9','68':'D9','69':'E9','70':'F9','71':'G9','72':'H9',
+    '73':'A10','74':'B10','75':'C10','76':'D10','77':'E10','78':'F10','79':'G10','80':'H10',
+    '81':'A11','82':'B11','83':'C11','84':'D11','85':'E11','86':'F11','87':'G11','88':'H11',
+    '89':'A12','90':'B12','91':'C12','92':'D12','93':'E12','94':'F12','95':'G12','96':'H12',
+}
+_WELL_MAP_384 = {
+    '1':'A1','2':'B1','3':'C1','4':'D1','5':'E1','6':'F1','7':'G1','8':'H1',
+    '9':'I1','10':'J1','11':'K1','12':'L1','13':'M1','14':'N1','15':'O1','16':'P1',
+    '17':'A2','18':'B2','19':'C2','20':'D2','21':'E2','22':'F2','23':'G2','24':'H2',
+    '25':'I2','26':'J2','27':'K2','28':'L2','29':'M2','30':'N2','31':'O2','32':'P2',
+    '33':'A3','34':'B3','35':'C3','36':'D3','37':'E3','38':'F3','39':'G3','40':'H3',
+    '41':'I3','42':'J3','43':'K3','44':'L3','45':'M3','46':'N3','47':'O3','48':'P3',
+    '49':'A4','50':'B4','51':'C4','52':'D4','53':'E4','54':'F4','55':'G4','56':'H4',
+    '57':'I4','58':'J4','59':'K4','60':'L4','61':'M4','62':'N4','63':'O4','64':'P4',
+    '65':'A5','66':'B5','67':'C5','68':'D5','69':'E5','70':'F5','71':'G5','72':'H5',
+    '73':'I5','74':'J5','75':'K5','76':'L5','77':'M5','78':'N5','79':'O5','80':'P5',
+    '81':'A6','82':'B6','83':'C6','84':'D6','85':'E6','86':'F6','87':'G6','88':'H6',
+    '89':'I6','90':'J6','91':'K6','92':'L6','93':'M6','94':'N6','95':'O6','96':'P6',
+    '97':'A7','98':'B7','99':'C7','100':'D7','101':'E7','102':'F7','103':'G7','104':'H7',
+    '105':'I7','106':'J7','107':'K7','108':'L7','109':'M7','110':'N7','111':'O7','112':'P7',
+    '113':'A8','114':'B8','115':'C8','116':'D8','117':'E8','118':'F8','119':'G8','120':'H8',
+    '121':'I8','122':'J8','123':'K8','124':'L8','125':'M8','126':'N8','127':'O8','128':'P8',
+    '129':'A9','130':'B9','131':'C9','132':'D9','133':'E9','134':'F9','135':'G9','136':'H9',
+    '137':'I9','138':'J9','139':'K9','140':'L9','141':'M9','142':'N9','143':'O9','144':'P9',
+    '145':'A10','146':'B10','147':'C10','148':'D10','149':'E10','150':'F10','151':'G10','152':'H10',
+    '153':'I10','154':'J10','155':'K10','156':'L10','157':'M10','158':'N10','159':'O10','160':'P10',
+    '161':'A11','162':'B11','163':'C11','164':'D11','165':'E11','166':'F11','167':'G11','168':'H11',
+    '169':'I11','170':'J11','171':'K11','172':'L11','173':'M11','174':'N11','175':'O11','176':'P11',
+    '177':'A12','178':'B12','179':'C12','180':'D12','181':'E12','182':'F12','183':'G12','184':'H12',
+    '185':'I12','186':'J12','187':'K12','188':'L12','189':'M12','190':'N12','191':'O12','192':'P12',
+    '193':'A13','194':'B13','195':'C13','196':'D13','197':'E13','198':'F13','199':'G13','200':'H13',
+    '201':'I13','202':'J13','203':'K13','204':'L13','205':'M13','206':'N13','207':'O13','208':'P13',
+    '209':'A14','210':'B14','211':'C14','212':'D14','213':'E14','214':'F14','215':'G14','216':'H14',
+    '217':'I14','218':'J14','219':'K14','220':'L14','221':'M14','222':'N14','223':'O14','224':'P14',
+    '225':'A15','226':'B15','227':'C15','228':'D15','229':'E15','230':'F15','231':'G15','232':'H15',
+    '233':'I15','234':'J15','235':'K15','236':'L15','237':'M15','238':'N15','239':'O15','240':'P15',
+    '241':'A16','242':'B16','243':'C16','244':'D16','245':'E16','246':'F16','247':'G16','248':'H16',
+    '249':'I16','250':'J16','251':'K16','252':'L16','253':'M16','254':'N16','255':'O16','256':'P16',
+    '257':'A17','258':'B17','259':'C17','260':'D17','261':'E17','262':'F17','263':'G17','264':'H17',
+    '265':'I17','266':'J17','267':'K17','268':'L17','269':'M17','270':'N17','271':'O17','272':'P17',
+    '273':'A18','274':'B18','275':'C18','276':'D18','277':'E18','278':'F18','279':'G18','280':'H18',
+    '281':'I18','282':'J18','283':'K18','284':'L18','285':'M18','286':'N18','287':'O18','288':'P18',
+    '289':'A19','290':'B19','291':'C19','292':'D19','293':'E19','294':'F19','295':'G19','296':'H19',
+    '297':'I19','298':'J19','299':'K19','300':'L19','301':'M19','302':'N19','303':'O19','304':'P19',
+    '305':'A20','306':'B20','307':'C20','308':'D20','309':'E20','310':'F20','311':'G20','312':'H20',
+    '313':'I20','314':'J20','315':'K20','316':'L20','317':'M20','318':'N20','319':'O20','320':'P20',
+    '321':'A21','322':'B21','323':'C21','324':'D21','325':'E21','326':'F21','327':'G21','328':'H21',
+    '329':'I21','330':'J21','331':'K21','332':'L21','333':'M21','334':'N21','335':'O21','336':'P21',
+    '337':'A22','338':'B22','339':'C22','340':'D22','341':'E22','342':'F22','343':'G22','344':'H22',
+    '345':'I22','346':'J22','347':'K22','348':'L22','349':'M22','350':'N22','351':'O22','352':'P22',
+    '353':'A23','354':'B23','355':'C23','356':'D23','357':'E23','358':'F23','359':'G23','360':'H23',
+    '361':'I23','362':'J23','363':'K23','364':'L23','365':'M23','366':'N23','367':'O23','368':'P23',
+    '369':'A24','370':'B24','371':'C24','372':'D24','373':'E24','374':'F24','375':'G24','376':'H24',
+    '377':'I24','378':'J24','379':'K24','380':'L24','381':'M24','382':'N24','383':'O24','384':'P24',
+}
+_WELL_MAP_AGAR = {'1':'A1','2':'B1','3':'A2','4':'B2','5':'A3','6':'B3','7':'A4','8':'B4'}
 try:
     from dnasc.renderer.lsp_capacity import render_lsp_capacity_tab
 except ImportError:
@@ -1611,14 +1679,18 @@ def render_all_projects_dashboard(
                 _parts_by_key[_key].append(_pr)
             for _key, _prs in _parts_by_key.items():
                 if len(_prs) > 1 and _key[0] == 'pcr_workorder':
-                    # Use resubmit_count from BIOS as the authoritative retry signal.
-                    # resubmit_count > 0 means BIOS created this workorder as a resubmission.
-                    # Only label the group when at least one workorder was resubmitted.
+                    # Group as attempts when: BIOS auto-retry (resubmit_count > 0) OR
+                    # manual retry (FAILED/CANCELED PCR followed by a new one).
+                    # Multiple all-SUCCEEDED PCRs for the same stock = parallel scale-up, not retries.
                     _has_resubmit = any(
                         (row_map[x].get('resubmit_count') or 0) > 0
                         for x in _prs
                     )
-                    if not _has_resubmit:
+                    _has_failure = any(
+                        row_map[x].get('visual_status', '') in ('FAILED', 'CANCELED')
+                        for x in _prs
+                    )
+                    if not _has_resubmit and not _has_failure:
                         continue
                     _prs.sort(key=lambda x: (row_map[x].get('wo_created_at') or pd.Timestamp.min))
                     for _pi, _pr in enumerate(_prs, 1):
@@ -1652,9 +1724,7 @@ def render_all_projects_dashboard(
                         _pn = _pt.split(':')[0].strip()
                         if _pn: _needed_stocks.add(_pn)
             if _needed_stocks:
-                # Only filter fanned-in parts (cross-request/plan) by stock match.
-                # Native parts already rooted here (not in _fanned_wids) always show —
-                # oligo primers etc. aren't in the GG's parts/backbone columns.
+                # Filter fanned-in parts by stock match.
                 parts_roots_list = [r for r in parts_roots_list
                                     if r not in _fanned_wids
                                     or str(row_map[r].get('STOCK_ID', '') or '') in _needed_stocks]
@@ -2000,16 +2070,37 @@ def render_all_projects_dashboard(
                                 return f'<span class="part-tag missing" title="Being built outside this workflow">{label_prefix}{clean_name}</span>'
                     else:
                         return f'<span class="part-tag">{label_prefix}{clean_name}</span>'
-                inputs_html = '<div class="parts-container">'
-                bb = row.get('backbone', '')
-                if pd.notna(bb) and ':' in bb: inputs_html += render_part_tag(bb, "BB: ")
-                parts_raw = row.get('parts', '')
-                if pd.notna(parts_raw):
-                    for p in [p for p in str(parts_raw).split(', ') if ':' in p]: inputs_html += render_part_tag(p)
-                pcr_info = row.get('pcr_info', '')
-                if pd.notna(pcr_info):
-                    for p in [p for p in str(pcr_info).split(', ') if ':' in p]: inputs_html += render_part_tag(p)
-                inputs_html += '</div>'
+                _confirmed_raw = row.get('confirmed_input_ids', '')
+                _has_confirmed = (
+                    pd.notna(_confirmed_raw)
+                    and str(_confirmed_raw).strip() not in ('', 'nan', 'None')
+                )
+                if _has_confirmed:
+                    # Assembly has run — show physically used stocks.
+                    _bb_name = str(row.get('backbone', '') or '').split(':')[0].strip()
+                    _conf_ids = [x.strip() for x in str(_confirmed_raw).split('|') if x.strip()]
+                    inputs_html = '<div class="parts-container">'
+                    for _cid in _conf_ids:
+                        _cid_up = _cid.upper()
+                        if _cid_up.startswith('LSP-'):
+                            _cstock = _lsp_batch_to_stock.get(_cid_up, _cid)
+                        else:
+                            _cstock = _woid_to_stock.get(_cid, _cid)
+                        _prefix = "BB: " if _cstock == _bb_name else ""
+                        inputs_html += f'<span class="part-tag">{_prefix}{_cstock}</span>'
+                    inputs_html += '</div>'
+                else:
+                    # Not yet assembled — show design inputs with waiting/missing styling.
+                    inputs_html = '<div class="parts-container">'
+                    bb = row.get('backbone', '')
+                    if pd.notna(bb) and ':' in bb: inputs_html += render_part_tag(bb, "BB: ")
+                    parts_raw = row.get('parts', '')
+                    if pd.notna(parts_raw):
+                        for p in [p for p in str(parts_raw).split(', ') if ':' in p]: inputs_html += render_part_tag(p)
+                    pcr_info = row.get('pcr_info', '')
+                    if pd.notna(pcr_info):
+                        for p in [p for p in str(pcr_info).split(', ') if ':' in p]: inputs_html += render_part_tag(p)
+                    inputs_html += '</div>'
                 if 'part-tag' in inputs_html: details_info += inputs_html
 
                 if row['type'] == 'lsp_workorder':
@@ -2317,11 +2408,14 @@ def render_all_projects_dashboard(
                             _well_alpha = ''
                             try:
                                 if pd.notna(_cwpos) and pd.notna(_cwcnt):
-                                    _ncols = 24 if int(_cwcnt) == 384 else 12
-                                    _pos   = int(_cwpos)
-                                    _row_i = (_pos - 1) // _ncols
-                                    _col_i = (_pos - 1) %  _ncols + 1
-                                    _well_alpha = chr(65 + _row_i) + str(_col_i)
+                                    _key = str(int(_cwpos) + 1)  # LIMS is 0-indexed
+                                    _cnt = int(_cwcnt)
+                                    if _cnt == 384:
+                                        _well_alpha = _WELL_MAP_384.get(_key, '')
+                                    elif _cnt == 96:
+                                        _well_alpha = _WELL_MAP_96.get(_key, '')
+                                    else:
+                                        _well_alpha = _WELL_MAP_AGAR.get(_key, '')
                             except Exception:
                                 pass
                             _well_label = f' · {_well_alpha}' if _well_alpha else ''
@@ -2543,6 +2637,19 @@ def render_all_projects_dashboard(
             'status':   str(_wr.get('visual_status') or ''),
             'wo_type':  str(_wr.get('type') or ''),
         }
+
+    # Lookup maps for confirmed assembly inputs (DNA Stocks to Assemble).
+    # process_id from lims__src.well is either an LSP batch ID or workorder UUID.
+    _lsp_batch_to_stock: dict = {}  # "LSP-9710" → STOCK_ID
+    _woid_to_stock: dict = {}       # workorder UUID → STOCK_ID
+    for _, _lr in df.iterrows():
+        _lb = str(_lr.get('lsp_batch_id') or '').strip().upper()
+        if _lb and _lb not in ('NAN', 'NONE'):
+            _lsp_batch_to_stock[_lb] = str(_lr.get('STOCK_ID') or '')
+        _wo = str(_lr.get('workorder_id') or '').strip()
+        _st = str(_lr.get('STOCK_ID') or '').strip()
+        if _wo and _st and _st not in ('nan', 'None'):
+            _woid_to_stock[_wo] = _st
 
     # Load experiment due dates (written by fetch_due_dates() before render)
     _due_date_map: dict[str, str] = {}

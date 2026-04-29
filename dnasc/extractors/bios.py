@@ -35,7 +35,7 @@ class BIOSExtractor:
         -- GG/Gibson root via assemblydesignworkorderassociation (explicit BIOS linkage).
         -- Used for parts/transformations to locate their parent GG/Gibson.
         -- fulfills_request=TRUE GG/Gibson workorders use plan_attempt_roots (CASE in SELECT).
-        WITH ad_roots AS (
+        WITH ad_roots_raw AS (
             -- Each AD declares exactly one root via root_work_order_id. Return one row
             -- per (workorder, declared root) so workorders shared across multiple ADs
             -- fan into every assembly that claims them.
@@ -51,6 +51,44 @@ class BIOSExtractor:
                AND root_wo.fulfills_request = TRUE
                AND root_wo.type IN ('gibson_workorder', 'golden_gate_workorder')
                AND root_wo.status NOT IN ('DRAFT')
+        ),
+        -- sub_asm: pairs (sub_root, parent_root) where sub_root's GG workorder
+        -- appears as a member of an AD whose declared root is parent_root.
+        -- Means sub_root is a direct sub-assembly of parent_root.
+        sub_asm AS (
+            SELECT DISTINCT
+                sub_wo.id          AS sub_root,
+                ad_parent.root_work_order_id AS parent_root
+            FROM `{proj}.bios__src.assemblydesignworkorderassociation` adwoa_sub
+            JOIN `{proj}.bios__src.assemblydesign` ad_parent
+                ON ad_parent.id = adwoa_sub.assemblydesign_id
+            JOIN `{proj}.bios__src.workorder` sub_wo
+                ON sub_wo.id = adwoa_sub.workorder_id
+               AND sub_wo.fulfills_request = TRUE
+               AND sub_wo.type IN ('gibson_workorder', 'golden_gate_workorder')
+               AND sub_wo.status NOT IN ('DRAFT')
+            JOIN `{proj}.bios__src.workorder` parent_wo
+                ON parent_wo.id = ad_parent.root_work_order_id
+               AND parent_wo.fulfills_request = TRUE
+               AND parent_wo.type IN ('gibson_workorder', 'golden_gate_workorder')
+               AND parent_wo.status NOT IN ('DRAFT')
+            WHERE adwoa_sub.workorder_id != ad_parent.root_work_order_id
+        ),
+        -- For each (workorder, root) in ad_roots_raw, find which roots to exclude:
+        -- exclude root R2 when another root R1 exists for the same workorder and
+        -- R1 is a sub-assembly of R2 (making R2 only a transitive ancestor).
+        roots_to_exclude AS (
+            SELECT DISTINCT ar2.workorder_id, sa.parent_root AS exclude_root
+            FROM ad_roots_raw ar2
+            JOIN sub_asm sa ON sa.sub_root = ar2.root_wo_id
+        ),
+        ad_roots AS (
+            SELECT ar.*
+            FROM ad_roots_raw ar
+            LEFT JOIN roots_to_exclude rte
+                ON rte.workorder_id = ar.workorder_id
+               AND rte.exclude_root = ar.root_wo_id
+            WHERE rte.workorder_id IS NULL
         )
 
         -- 1. Standard Workorders

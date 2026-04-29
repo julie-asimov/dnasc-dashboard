@@ -48,7 +48,7 @@ class OpTrackerExtractor:
           -- user_input=1 means "Continue with manual protocol" — PCR still ran, not a kickback.
           SELECT id AS job_id
           FROM `{proj}.op_tracker__src.op_tracker_api_job`
-          WHERE REGEXP_CONTAINS(step_groups, r'"tag":\s*"manual-run"[^}}]*"user_input":\s*0')
+          WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"manual-run"[^}}]*"user_input":\\s*0')
           UNION DISTINCT
           -- Pattern 2: Confirmation step where user actually chose Retry.
           -- user_input=0 means "Continue" was selected (job ran fine, not a kickback).
@@ -60,7 +60,7 @@ class OpTrackerExtractor:
             SELECT 1 FROM UNNEST(JSON_EXTRACT_ARRAY(step_groups)) AS sg
             WHERE JSON_EXTRACT_SCALAR(sg, '$.name') = 'Confirmation'
           )
-          AND REGEXP_CONTAINS(step_groups, r'"tag":\s*"confirmation"[^}}]*"user_input":\s*[1-9]')
+          AND REGEXP_CONTAINS(step_groups, r'"tag":\\s*"confirmation"[^}}]*"user_input":\\s*[1-9]')
           UNION DISTINCT
           -- Pattern 4: PCR jobs that never completed (didn't reach Cleanup PCRs)
           -- Exclude jobs that still have active (RU/RD) operations — those are in progress, not kicked back
@@ -82,8 +82,8 @@ class OpTrackerExtractor:
           FROM `{proj}.op_tracker__src.op_tracker_api_job` j
           JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON j.protocol_id = p.id
           WHERE p.name = 'Synthesis Order'
-            AND REGEXP_CONTAINS(j.step_groups, r'"tag":\s*"completion-toggle"')
-            AND NOT REGEXP_CONTAINS(j.step_groups, r'"tag":\s*"completion-toggle"[^}}]*"user_input":\s*true')
+            AND REGEXP_CONTAINS(j.step_groups, r'"tag":\\s*"completion-toggle"')
+            AND NOT REGEXP_CONTAINS(j.step_groups, r'"tag":\\s*"completion-toggle"[^}}]*"user_input":\\s*true')
         ),
         all_operations AS (
           SELECT
@@ -137,6 +137,21 @@ class OpTrackerExtractor:
           WHERE a.glycerol_plate_json IS NOT NULL
           GROUP BY a.operation_id
         ),
+        confirmed_inputs AS (
+          -- Resolve DNA Stocks to Assemble well IDs → lims__src.well.process_id.
+          -- For backbone wells this returns the LSP batch ID (e.g. "LSP-9710");
+          -- for syn-part wells it returns the producing workorder UUID.
+          SELECT
+            a.operation_id,
+            STRING_AGG(w.process_id, '|') AS confirmed_input_ids
+          FROM all_operations a
+          CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(a.input_stock_wells)) AS well_json
+          JOIN `{proj}.lims__src.well` w
+            ON w.id = SAFE_CAST(JSON_VALUE(well_json, '$.id') AS INT64)
+          WHERE a.input_stock_wells IS NOT NULL
+            AND w.process_id IS NOT NULL
+          GROUP BY a.operation_id
+        ),
         well_info AS (
           SELECT a.operation_id, a.protocol_name,
             CASE
@@ -178,7 +193,7 @@ class OpTrackerExtractor:
              OR gp.glycerol_location IS NOT NULL
         ),
         operations_with_tat AS (
-          SELECT a.*, wi.well_location,
+          SELECT a.*, wi.well_location, ci.confirmed_input_ids,
             sp.process_id IS NOT NULL AS protocol_has_success,
             LAG(a.date_created) OVER (PARTITION BY a.process_id ORDER BY a.date_created) AS prev_operation_end,
             TIMESTAMP_DIFF(a.date_ready, a.date_created, HOUR) AS ready_wait_hours,
@@ -187,6 +202,7 @@ class OpTrackerExtractor:
           LEFT JOIN successful_protocols sp
             ON a.process_id = sp.process_id AND a.protocol_name = sp.protocol_name
           LEFT JOIN well_info wi ON a.operation_id = wi.operation_id
+          LEFT JOIN confirmed_inputs ci ON ci.operation_id = a.operation_id
         )
         SELECT
           process_id, plan_id AS op_batch_id, operation_id, job_id,
@@ -203,7 +219,8 @@ class OpTrackerExtractor:
           output_assembly_well_json, well_location,
           experiment, result_status,
           operation_rank, protocol_has_success,
-          lsp_batch_id_from_optracker, ngs_run_number
+          lsp_batch_id_from_optracker, ngs_run_number,
+          confirmed_input_ids
         FROM operations_with_tat
         WHERE state = 'SC'
            OR (state = 'FA' AND protocol_has_success = FALSE)

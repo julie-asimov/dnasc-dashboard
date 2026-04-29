@@ -122,13 +122,14 @@ def run_pipeline() -> pd.DataFrame:
     op_agg = (
         optracker_raw.groupby("process_id")
         .agg({
-            "protocol_name":    list,
-            "operation_state":  list,
-            "operation_start":  list,
-            "operation_ready":  list,
-            "job_id":           list,
-            "well_location":    list,
-            "ngs_run_number":   list,
+            "protocol_name":       list,
+            "operation_state":     list,
+            "operation_start":     list,
+            "operation_ready":     list,
+            "job_id":              list,
+            "well_location":       list,
+            "ngs_run_number":      list,
+            "confirmed_input_ids": "first",
         })
         .reset_index()
     )

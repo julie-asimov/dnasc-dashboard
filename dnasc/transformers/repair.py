@@ -314,6 +314,10 @@ class RepairTransformer:
             .set_index("workorder_id")["root_work_order_id"].astype(str).to_dict()
         )
 
+        # Multiple AD memberships can produce N rows for the same transformation
+        # all resolving to the same physical root after the repair above.
+        df = df.drop_duplicates(subset=["workorder_id", "root_work_order_id"])
+
         # ── Fix synthetic/streakout roots ─────────────────────────────────────
         syn_mask = df["type"].isin(["streakout_operation", "transformation_offline_operation"])
         df.loc[syn_mask, "root_work_order_id"] = (
