@@ -2120,8 +2120,13 @@ def render_all_projects_dashboard(
                         _wc        = int(_parts[4]) if len(_parts) > 4 and _parts[4].isdigit() else 96
                         _is_bb = (_pid == _bb_name)
                         if _pos is not None:
-                            _cols = 24 if _wc > 96 else 12
-                            _well_alpha = chr(65 + _pos // _cols) + str((_pos % _cols) + 1)
+                            _key = str(_pos + 1)
+                            if _wc == 384:
+                                _well_alpha = _WELL_MAP_384.get(_key, _key)
+                            elif _wc == 8:
+                                _well_alpha = _WELL_MAP_AGAR.get(_key, _key)
+                            else:
+                                _well_alpha = _WELL_MAP_96.get(_key, _key)
                         else:
                             _well_alpha = ''
                         _parsed.append((_is_bb, _pid, _well_id, _plate_lbl, _well_alpha))
