@@ -1,3 +1,2 @@
-job_id,reason,added_by,added_date
-8342,manually unbatched by Andy software couldnt make echo worklist over 96 not true failure,julie,2026-04-27
-8339,manually unbatched by Andy software couldnt make echo worklist over 96 not true failure,julie,2026-04-27
+job_id,exclude_process_ids,reason,added_by,added_date
+8342,true,manually unbatched by Andy software couldnt make echo worklist over 96 not true failure,julie,2026-04-27

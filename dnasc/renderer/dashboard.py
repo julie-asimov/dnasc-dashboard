@@ -353,11 +353,20 @@ def render_all_projects_dashboard(
         wid = str(row['workorder_id'])
         _jid = row.get('job_id')
         if isinstance(_jid, np.ndarray): _jid = _jid.tolist()
-        job_id = _jid[0] if isinstance(_jid, list) and len(_jid) > 0 else None
+        job_id = None
         completion_time = None
         op_states, op_starts = row.get('operation_state'), row.get('operation_start')
         op_protocols = row.get('protocol_name')
         if isinstance(op_protocols, np.ndarray): op_protocols = op_protocols.tolist()
+        # For GG/Gibson rows, job_id[0] may be a downstream op (STAR/Minipreps) not the assembly op.
+        # Find the job_id belonging to the assembly protocol specifically; fall back to first non-null.
+        if isinstance(_jid, list) and isinstance(op_protocols, list):
+            _asm_proto_map = {'golden_gate_workorder': 'Golden Gate Assembly', 'gibson_workorder': 'Gibson Assembly'}
+            _asm_proto = _asm_proto_map.get(str(row.get('type', '')))
+            if _asm_proto:
+                job_id = next((j for proto, j in zip(op_protocols, _jid) if proto == _asm_proto and j is not None and pd.notna(j)), None)
+            if job_id is None:
+                job_id = next((j for j in _jid if j is not None and pd.notna(j)), None)
         if isinstance(op_states, np.ndarray): op_states = op_states.tolist()
         if isinstance(op_starts, np.ndarray): op_starts = op_starts.tolist()
         if isinstance(op_states, list) and isinstance(op_starts, list):
@@ -578,6 +587,18 @@ def render_all_projects_dashboard(
     .part-tag { background: #f0f0f2; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; margin-right: 2px; border: 1px solid #e5e5e7; }
     .part-tag.in-production { background: #fffbeb; color: #d97706; border: 1px dashed #fcd34d; }
     .part-tag.missing { background: #fdf2f8; color: #be185d; border: 1px solid #f9a8d4; font-weight: 700; cursor: default; }
+    .ci-wrap { position: relative; display: inline-block; cursor: pointer; }
+    .ci-tip { display: none; position: absolute; bottom: calc(100% + 4px); left: 0; background: #1e293b;
+        border: 1px solid #334155; border-radius: 4px; padding: 6px 8px; z-index: 9999;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4); white-space: nowrap; }
+    .ci-tip.ci-open { display: block; }
+    .ci-tip-header { font-family: monospace; font-size: 8px; font-weight: 700; color: #64748b;
+        text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; padding-bottom: 3px;
+        border-bottom: 1px solid #334155; }
+    .ci-tip-row { display: flex; gap: 10px; font-family: monospace; font-size: 9px; color: #e2e8f0; line-height: 1.8; }
+    .ci-tip-stock { font-weight: 700; color: #a78bfa; min-width: 80px; }
+    .ci-tip-plate { color: #38bdf8; text-decoration: underline; }
+    .ci-tip-pid { color: #475569; }
     .missing-tip-wrap { position: relative; display: inline-block; }
     .missing-tip { display: none; position: absolute; bottom: calc(100% + 4px); left: 0; background: #1e293b;
         border: 1px solid #334155; border-radius: 4px; padding: 5px 8px; z-index: 9999; min-width: 220px;
@@ -945,6 +966,16 @@ def render_all_projects_dashboard(
             }
             if (e.target.closest('.plate-popover')) { e.stopPropagation(); return; }
             document.querySelectorAll('.plate-popover.sticky').forEach(function(p) { p.classList.remove('sticky'); });
+            if (e.target.closest('.ci-tip')) { e.stopPropagation(); return; }
+            if (e.target.closest('.ci-wrap')) {
+                e.stopPropagation();
+                var tip = e.target.closest('.ci-wrap').querySelector('.ci-tip');
+                var isOpen = tip.classList.contains('ci-open');
+                document.querySelectorAll('.ci-tip.ci-open').forEach(function(t) { t.classList.remove('ci-open'); });
+                if (!isOpen) tip.classList.add('ci-open');
+                return;
+            }
+            document.querySelectorAll('.ci-tip.ci-open').forEach(function(t) { t.classList.remove('ci-open'); });
         });
     });
     </script>
@@ -2076,19 +2107,49 @@ def render_all_projects_dashboard(
                     and str(_confirmed_raw).strip() not in ('', 'nan', 'None')
                 )
                 if _has_confirmed:
-                    # Assembly has run — show physically used stocks.
+                    # Assembly has run — show physically used stocks, BB first.
                     _bb_name = str(row.get('backbone', '') or '').split(':')[0].strip()
                     _conf_ids = [x.strip() for x in str(_confirmed_raw).split('|') if x.strip()]
-                    inputs_html = '<div class="parts-container">'
-                    for _cid in _conf_ids:
-                        _cid_up = _cid.upper()
-                        if _cid_up.startswith('LSP-'):
-                            _cstock = _lsp_batch_to_stock.get(_cid_up, _cid)
+                    _parsed = []
+                    for _entry in _conf_ids:
+                        _parts = _entry.split('~')
+                        _pid = _parts[0]
+                        _well_id   = _parts[1] if len(_parts) > 1 else ''
+                        _plate_lbl = _parts[2] if len(_parts) > 2 else ''
+                        _pos       = int(_parts[3]) if len(_parts) > 3 and _parts[3].lstrip('-').isdigit() else None
+                        _wc        = int(_parts[4]) if len(_parts) > 4 and _parts[4].isdigit() else 96
+                        _is_bb = (_pid == _bb_name)
+                        if _pos is not None:
+                            _cols = 24 if _wc > 96 else 12
+                            _well_alpha = chr(65 + _pos // _cols) + str((_pos % _cols) + 1)
                         else:
-                            _cstock = _woid_to_stock.get(_cid, _cid)
-                        _prefix = "BB: " if _cstock == _bb_name else ""
-                        inputs_html += f'<span class="part-tag">{_prefix}{_cstock}</span>'
-                    inputs_html += '</div>'
+                            _well_alpha = ''
+                        _parsed.append((_is_bb, _pid, _well_id, _plate_lbl, _well_alpha))
+                    _parsed.sort(key=lambda x: (0 if x[0] else 1))
+                    _tip_rows = []
+                    _tags_html = ''
+                    for _is_bb, _stock, _wid, _plate_lbl, _well_alpha in _parsed:
+                        _label = ('BB: ' if _is_bb else '') + _stock
+                        _tags_html += f'<span class="part-tag">{_label}</span>'
+                        _plate_num = ''.join(filter(str.isdigit, _plate_lbl))
+                        _plate_cell = (
+                            f'<a href="https://bios.asimov.io/inventory/plates/{_plate_num}" target="_blank" class="ci-tip-plate">{_plate_lbl} {_well_alpha}</a>'
+                            if _plate_num else ''
+                        )
+                        _tip_rows.append(
+                            f'<div class="ci-tip-row">'
+                            f'<span class="ci-tip-stock">{"BB: " if _is_bb else ""}{_stock}</span>'
+                            f'{_plate_cell}'
+                            f'{"<span class=ci-tip-pid>well " + _wid + "</span>" if _wid else ""}'
+                            f'</div>'
+                        )
+                    _tip_html = (
+                        f'<span class="ci-tip">'
+                        f'<div class="ci-tip-header">Input Wells</div>'
+                        f'{"".join(_tip_rows)}'
+                        f'</span>'
+                    )
+                    inputs_html = f'<div class="parts-container ci-wrap">{_tags_html}{_tip_html}</div>'
                 else:
                     # Not yet assembled — show design inputs with waiting/missing styling.
                     inputs_html = '<div class="parts-container">'

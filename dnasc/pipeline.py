@@ -79,8 +79,15 @@ def run_pipeline() -> pd.DataFrame:
         bios_df      = f_bios.result()
         lsp_df       = f_lsp.result()
         aliq_df      = f_aliq.result()
-        optracker_raw = f_op.result()
+        optracker_raw, _excluded_pids = f_op.result()
     log.info("Extraction complete in %.2fs", time.time() - t)
+
+    if _excluded_pids:
+        before = len(bios_df)
+        bios_df = bios_df[~bios_df["workorder_id"].isin(_excluded_pids)]
+        dropped = before - len(bios_df)
+        if dropped:
+            log.info("Dropped %d BIOS workorder(s) for excluded process_ids", dropped)
 
     # ── STEP 2: LSP merge & orphan recovery ───────────────────────────────────
     log.info("STEP 2 — LSP merge & orphan recovery")
@@ -129,7 +136,9 @@ def run_pipeline() -> pd.DataFrame:
             "job_id":              list,
             "well_location":       list,
             "ngs_run_number":      list,
-            "confirmed_input_ids": "first",
+            "confirmed_input_ids":  "first",
+            "input_dna_plasmids":   lambda x: next((v for v in x if v is not None and str(v) != 'nan'), None),
+            "input_stock_wells":    lambda x: next((v for v in x if v is not None and str(v) != 'nan'), None),
         })
         .reset_index()
     )

@@ -19,24 +19,30 @@ log = get_logger(__name__)
 _EXCLUDED_JOBS_CSV = os.path.join(os.path.dirname(__file__), "..", "..", "excluded_optracker_jobs.csv")
 
 
-def _load_excluded_job_ids() -> list[int]:
-    """Load manually excluded OpTracker job IDs from the repo CSV."""
+def _load_excluded_jobs() -> tuple[list[int], list[int]]:
+    """Return (all_excluded_job_ids, jobs_where_process_ids_should_also_be_excluded)."""
     path = os.path.normpath(_EXCLUDED_JOBS_CSV)
     if not os.path.exists(path):
-        return []
+        return [], []
     try:
         df = pd.read_csv(path, comment="#")
-        return [int(x) for x in df["job_id"].dropna().tolist()]
+        all_ids = [int(x) for x in df["job_id"].dropna().tolist()]
+        pid_jobs = []
+        if "exclude_process_ids" in df.columns:
+            mask = df["exclude_process_ids"].astype(str).str.lower().isin(["true", "1", "yes"])
+            pid_jobs = [int(x) for x in df.loc[mask, "job_id"].dropna().tolist()]
+        return all_ids, pid_jobs
     except Exception as e:
         log.warning("Could not load excluded_optracker_jobs.csv: %s", e)
-        return []
+        return [], []
+
 
 
 class OpTrackerExtractor:
     """Extract OpTracker operations with timing and state."""
 
     @staticmethod
-    def get_optracker_operations() -> pd.DataFrame:
+    def get_optracker_operations() -> tuple[pd.DataFrame, set[str]]:
         t0 = time.time()
         proj = PipelineConfig.PROJECT_ID
         date_filter = PipelineConfig.get_date_filter()
@@ -92,8 +98,8 @@ class OpTrackerExtractor:
             p.name AS protocol_name,
             MAX(CASE WHEN pt.name = 'Product'     THEN op_param.value END) AS product,
             MAX(CASE WHEN pt.name = 'Process'     THEN REPLACE(op_param.value, '"', '') END) AS process_id,
-            MAX(CASE WHEN pt.name = 'DNA to Assemble'       THEN op_param.value END) AS input_dna_plasmids,
-            MAX(CASE WHEN pt.name = 'DNA Stocks to Assemble'THEN op_param.value END) AS input_stock_wells,
+            MAX(CASE WHEN pt.name = 'DNA to Assemble'        THEN op_param.value END) AS input_dna_plasmids,
+            MAX(CASE WHEN pt.name = 'DNA Stocks to Assemble' THEN op_param.value END) AS input_stock_wells,
             MAX(CASE WHEN pt.name = 'Assembly Well'         THEN op_param.value END) AS output_assembly_well_json,
             MAX(CASE WHEN pt.name = 'Source Well'           THEN op_param.value END) AS source_well_json,
             MAX(CASE WHEN pt.name = 'Destination Well'      THEN op_param.value END) AS destination_well_json,
@@ -105,7 +111,11 @@ class OpTrackerExtractor:
             MAX(CASE WHEN pt.name = 'LSP Batch'
                 THEN COALESCE(JSON_EXTRACT_SCALAR(op_param.value, '$.name'), REPLACE(op_param.value, '"', ''))
                 END) AS lsp_batch_id_from_optracker,
-            MAX(CASE WHEN pt.name = 'Run Number' THEN REPLACE(op_param.value, '"', '') END) AS ngs_run_number
+            MAX(CASE WHEN pt.name = 'Run Number'      THEN REPLACE(op_param.value, '"', '') END) AS ngs_run_number,
+            MAX(CASE WHEN pt.name = 'Template'        THEN op_param.value END) AS pcr_template,
+            MAX(CASE WHEN pt.name = 'Template Stock'  THEN op_param.value END) AS pcr_template_stock,
+            MAX(CASE WHEN pt.name = 'Forward Primer'  THEN op_param.value END) AS pcr_fwd_primer,
+            MAX(CASE WHEN pt.name = 'Reverse Primer'  THEN op_param.value END) AS pcr_rev_primer
           FROM `{proj}.op_tracker__src.op_tracker_api_operation` o
           JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
           JOIN `{proj}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
@@ -138,19 +148,79 @@ class OpTrackerExtractor:
           GROUP BY a.operation_id
         ),
         confirmed_inputs AS (
-          -- Resolve DNA Stocks to Assemble well IDs → lims__src.well.process_id.
-          -- For backbone wells this returns the LSP batch ID (e.g. "LSP-9710");
-          -- for syn-part wells it returns the producing workorder UUID.
+          -- Zip input_dna_plasmids (stock names) with input_stock_wells (well objects) by index.
+          -- Format per entry: "stock_name~well_id~plate_label~position~well_count"
           SELECT
             a.operation_id,
-            STRING_AGG(w.process_id, '|') AS confirmed_input_ids
+            STRING_AGG(
+              CONCAT(
+                JSON_EXTRACT_SCALAR(dp_json, '$.name'), '~',
+                CAST(w.id AS STRING), '~',
+                COALESCE(pl.barcode, CONCAT('Plate', CAST(pl.id AS STRING))), '~',
+                CAST(w.position AS STRING), '~',
+                CAST(pl.well_count AS STRING)
+              ), '|' ORDER BY di
+            ) AS confirmed_input_ids
           FROM all_operations a
-          CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(a.input_stock_wells)) AS well_json
+          CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(a.input_dna_plasmids))  AS dp_json WITH OFFSET di
+          CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(a.input_stock_wells))   AS sw_json WITH OFFSET si
           JOIN `{proj}.lims__src.well` w
-            ON w.id = SAFE_CAST(JSON_VALUE(well_json, '$.id') AS INT64)
-          WHERE a.input_stock_wells IS NOT NULL
-            AND w.process_id IS NOT NULL
+            ON w.id = SAFE_CAST(JSON_VALUE(sw_json, '$.id') AS INT64)
+          JOIN `{proj}.lims__src.plate` pl ON pl.id = w.plate_id
+          WHERE a.input_dna_plasmids IS NOT NULL
+            AND a.input_stock_wells IS NOT NULL
+            AND di = si
           GROUP BY a.operation_id
+        ),
+        pcr_confirmed_inputs AS (
+          -- Template (LIMS well via Template Stock) + primers (LIMS well via well_content.oligo_stock_id).
+          SELECT operation_id, STRING_AGG(entry, '|' ORDER BY sort_key) AS confirmed_input_ids
+          FROM (
+            SELECT 0 AS sort_key, a.operation_id,
+              CONCAT(
+                JSON_EXTRACT_SCALAR(JSON_EXTRACT_ARRAY(a.pcr_template)[SAFE_OFFSET(0)], '$.name'), '~',
+                CAST(w.id AS STRING), '~',
+                COALESCE(pl.barcode, CONCAT('Plate', CAST(pl.id AS STRING))), '~',
+                CAST(w.position AS STRING), '~',
+                CAST(pl.well_count AS STRING)
+              ) AS entry
+            FROM all_operations a
+            CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(a.pcr_template_stock)) AS ts_json
+            JOIN `{proj}.lims__src.well` w ON w.id = SAFE_CAST(JSON_VALUE(ts_json, '$.id') AS INT64)
+            JOIN `{proj}.lims__src.plate` pl ON pl.id = w.plate_id
+            WHERE a.pcr_template IS NOT NULL AND a.pcr_template_stock IS NOT NULL
+            UNION ALL
+            SELECT 1, a.operation_id,
+              CONCAT(
+                JSON_EXTRACT_SCALAR(a.pcr_fwd_primer, '$.name'), '~',
+                CAST(w.id AS STRING), '~',
+                COALESCE(pl.barcode, CONCAT('Plate', CAST(pl.id AS STRING))), '~',
+                CAST(w.position AS STRING), '~',
+                CAST(pl.well_count AS STRING)
+              )
+            FROM all_operations a
+            JOIN `{proj}.lims__src.well_content` wc
+              ON wc.oligo_stock_id = SAFE_CAST(JSON_VALUE(a.pcr_fwd_primer, '$.id') AS INT64)
+            JOIN `{proj}.lims__src.well` w ON w.id = wc.well_id
+            JOIN `{proj}.lims__src.plate` pl ON pl.id = w.plate_id
+            WHERE a.pcr_fwd_primer IS NOT NULL
+            UNION ALL
+            SELECT 2, a.operation_id,
+              CONCAT(
+                JSON_EXTRACT_SCALAR(a.pcr_rev_primer, '$.name'), '~',
+                CAST(w.id AS STRING), '~',
+                COALESCE(pl.barcode, CONCAT('Plate', CAST(pl.id AS STRING))), '~',
+                CAST(w.position AS STRING), '~',
+                CAST(pl.well_count AS STRING)
+              )
+            FROM all_operations a
+            JOIN `{proj}.lims__src.well_content` wc
+              ON wc.oligo_stock_id = SAFE_CAST(JSON_VALUE(a.pcr_rev_primer, '$.id') AS INT64)
+            JOIN `{proj}.lims__src.well` w ON w.id = wc.well_id
+            JOIN `{proj}.lims__src.plate` pl ON pl.id = w.plate_id
+            WHERE a.pcr_rev_primer IS NOT NULL
+          )
+          GROUP BY operation_id
         ),
         well_info AS (
           SELECT a.operation_id, a.protocol_name,
@@ -193,7 +263,8 @@ class OpTrackerExtractor:
              OR gp.glycerol_location IS NOT NULL
         ),
         operations_with_tat AS (
-          SELECT a.*, wi.well_location, ci.confirmed_input_ids,
+          SELECT a.*, wi.well_location,
+            COALESCE(ci.confirmed_input_ids, pci.confirmed_input_ids) AS confirmed_input_ids,
             sp.process_id IS NOT NULL AS protocol_has_success,
             LAG(a.date_created) OVER (PARTITION BY a.process_id ORDER BY a.date_created) AS prev_operation_end,
             TIMESTAMP_DIFF(a.date_ready, a.date_created, HOUR) AS ready_wait_hours,
@@ -203,6 +274,7 @@ class OpTrackerExtractor:
             ON a.process_id = sp.process_id AND a.protocol_name = sp.protocol_name
           LEFT JOIN well_info wi ON a.operation_id = wi.operation_id
           LEFT JOIN confirmed_inputs ci ON ci.operation_id = a.operation_id
+          LEFT JOIN pcr_confirmed_inputs pci ON pci.operation_id = a.operation_id
         )
         SELECT
           process_id, plan_id AS op_batch_id, operation_id, job_id,
@@ -230,14 +302,24 @@ class OpTrackerExtractor:
 
         df = pd.read_gbq(query, project_id=proj, dialect="standard")
 
-        excluded_ids = _load_excluded_job_ids()
-        if excluded_ids and "job_id" in df.columns:
+        excluded_job_ids, pid_job_ids = _load_excluded_jobs()
+
+        if pid_job_ids:
+            excluded_pids = set(df.loc[df["job_id"].isin(pid_job_ids), "process_id"].dropna())
+        else:
+            excluded_pids = set()
+
+        if excluded_job_ids:
             before = len(df)
-            df = df[~df["job_id"].isin(excluded_ids)]
-            dropped = before - len(df)
-            if dropped:
-                log.info("Excluded %d rows from %d manually blocked job(s): %s",
-                         dropped, len(excluded_ids), excluded_ids)
+            df = df[~df["job_id"].isin(excluded_job_ids)]
+            if before - len(df):
+                log.info("Excluded %d rows from job(s): %s", before - len(df), excluded_job_ids)
+
+        if excluded_pids:
+            before = len(df)
+            df = df[~df["process_id"].isin(excluded_pids)]
+            if before - len(df):
+                log.info("Excluded %d unbatched rows for job(s) %s", before - len(df), pid_job_ids)
 
         log.info("OpTracker operations retrieved: %d rows in %.2fs", len(df), time.time() - t0)
-        return df
+        return df, excluded_pids
