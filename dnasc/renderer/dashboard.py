@@ -2447,7 +2447,7 @@ def render_all_projects_dashboard(
                     if row['type'] == 'pcr_workorder':
                         _wc = row.get('well_comments')
                         _wc_clean = str(_wc).strip().strip(';').strip() if _wc is not None and not (isinstance(_wc, float) and pd.isna(_wc)) else ''
-                        if _wc_clean and _wc_clean not in ('nan', 'None'):
+                        if _wc_clean and _wc_clean not in ('nan', 'None', '{;}'):
                             details_info += f"<div style='font-size:10px;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;margin-top:3px;'>&#9888; {_wc_clean}</div>"
 
                 elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation']:
@@ -2752,7 +2752,9 @@ def render_all_projects_dashboard(
         count_in_assembly = 0; count_active_waiting = 0; count_ship_ready = 0
         new_req_list = []; active_req_list = []; fulfilled_req_list = []; canceled_req_list = []
         stalled_reqs = set(); asm_review_reqs = set(); production_tats = []; total_tats = []
-        has_ptr = project_df['for_partner'].astype(str).str.lower().str.contains('true').any()
+        _root_only = project_df[project_df['workorder_id'] == project_df['root_work_order_id']]
+        _ptr_source = _root_only if not _root_only.empty else project_df
+        has_ptr = _ptr_source['for_partner'].astype(str).str.lower().str.contains('true').any()
         _exp_customer_styles = {
             'R_D':              ('R&D',           '#cffafe', '#0e7490', '#a5f3fc'),
             'INTERNAL_CLD':     ('CLD',           '#dbeafe', '#1d4ed8', '#93c5fd'),
@@ -2761,7 +2763,12 @@ def render_all_projects_dashboard(
         }
         _exp_customers = []
         if 'customer' in project_df.columns:
-            for _cv in project_df['customer'].dropna().unique():
+            # Only look at request-fulfilling root workorders, not shared parts
+            # pulled in from other experiments (which inherit a foreign experiment_name
+            # via assembly_plan_id but carry a different experiment's customer value).
+            _req_rows = project_df[project_df['workorder_id'] == project_df['root_work_order_id']]
+            _cust_source = _req_rows if not _req_rows.empty else project_df
+            for _cv in _cust_source['customer'].dropna().unique():
                 _cv = str(_cv)
                 if _cv not in ('nan', 'None', '') and _cv not in [c for c, *_ in _exp_customers]:
                     _cl, _cbg, _cfg, _cborder = _exp_customer_styles.get(_cv, (_cv.replace('_', ' '), 'rgba(255,255,255,0.15)', 'rgba(255,255,255,0.9)', 'rgba(255,255,255,0.3)'))
@@ -3319,6 +3326,7 @@ def render_all_projects_dashboard(
                         {f'<span class="stat-item" style="background:rgba(124,58,237,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_in_assembly}</span> <span style="font-size:10px;">In Assembly</span></span>' if count_in_assembly > 0 else ''}
                         {f'<span class="stat-item" style="background:rgba(249,115,22,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_active_waiting}</span> <span style="font-size:10px;">Waiting</span></span>' if count_active_waiting > 0 else ''}
                         {f'<span class="stat-item" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">⚠️ {count_stalled}</span> <span style="font-size:10px;">Stalled</span></span>' if count_stalled > 0 else ''}
+                        {f'<span class="stat-item" style="background:rgba(217,119,6,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🔬 {count_asm_review}</span> <span style="font-size:10px;">ASM Review</span></span>' if count_asm_review > 0 else ''}
                         {f'<span class="stat-item" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_blocked}</span> <span style="font-size:10px;">Blocked</span></span>' if count_blocked > 0 else ''}
                         {f'<span class="stat-item" style="background:rgba(100,116,139,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_canceled}</span> <span style="font-size:10px;">Canceled</span></span>' if count_canceled > 0 else ''}
                     </div>

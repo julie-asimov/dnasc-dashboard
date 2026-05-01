@@ -115,7 +115,9 @@ class OpTrackerExtractor:
             MAX(CASE WHEN pt.name = 'Template'        THEN op_param.value END) AS pcr_template,
             MAX(CASE WHEN pt.name = 'Template Stock'  THEN op_param.value END) AS pcr_template_stock,
             MAX(CASE WHEN pt.name = 'Forward Primer'  THEN op_param.value END) AS pcr_fwd_primer,
-            MAX(CASE WHEN pt.name = 'Reverse Primer'  THEN op_param.value END) AS pcr_rev_primer
+            MAX(CASE WHEN pt.name = 'Fwd Primer Stock' THEN op_param.value END) AS pcr_fwd_primer_stock,
+            MAX(CASE WHEN pt.name = 'Reverse Primer'  THEN op_param.value END) AS pcr_rev_primer,
+            MAX(CASE WHEN pt.name = 'Rev Primer Stock' THEN op_param.value END) AS pcr_rev_primer_stock
           FROM `{proj}.op_tracker__src.op_tracker_api_operation` o
           JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
           JOIN `{proj}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
@@ -199,11 +201,10 @@ class OpTrackerExtractor:
                 CAST(pl.well_count AS STRING)
               )
             FROM all_operations a
-            JOIN `{proj}.lims__src.well_content` wc
-              ON wc.oligo_stock_id = SAFE_CAST(JSON_VALUE(a.pcr_fwd_primer, '$.id') AS INT64)
-            JOIN `{proj}.lims__src.well` w ON w.id = wc.well_id
+            JOIN `{proj}.lims__src.well` w
+              ON w.id = SAFE_CAST(JSON_VALUE(a.pcr_fwd_primer_stock, '$.id') AS INT64)
             JOIN `{proj}.lims__src.plate` pl ON pl.id = w.plate_id
-            WHERE a.pcr_fwd_primer IS NOT NULL
+            WHERE a.pcr_fwd_primer IS NOT NULL AND a.pcr_fwd_primer_stock IS NOT NULL
             UNION ALL
             SELECT 2, a.operation_id,
               CONCAT(
@@ -214,11 +215,10 @@ class OpTrackerExtractor:
                 CAST(pl.well_count AS STRING)
               )
             FROM all_operations a
-            JOIN `{proj}.lims__src.well_content` wc
-              ON wc.oligo_stock_id = SAFE_CAST(JSON_VALUE(a.pcr_rev_primer, '$.id') AS INT64)
-            JOIN `{proj}.lims__src.well` w ON w.id = wc.well_id
+            JOIN `{proj}.lims__src.well` w
+              ON w.id = SAFE_CAST(JSON_VALUE(a.pcr_rev_primer_stock, '$.id') AS INT64)
             JOIN `{proj}.lims__src.plate` pl ON pl.id = w.plate_id
-            WHERE a.pcr_rev_primer IS NOT NULL
+            WHERE a.pcr_rev_primer IS NOT NULL AND a.pcr_rev_primer_stock IS NOT NULL
           )
           GROUP BY operation_id
         ),
