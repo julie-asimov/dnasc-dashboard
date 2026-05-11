@@ -522,10 +522,10 @@ def render_all_projects_dashboard(
     .status-SUCCEEDED, .status-FULFILLED { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; padding: 1px 7px; }
     .status-FAILED    { background: #fff1f5; color: #be185d; border: 1px solid #fecdd3; }
     .status-CANCELED  { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
-    .status-RUNNING   { background: #f5f3ff; color: #7c3aed; border: 1px solid #ddd6fe; }
-    .status-LSP_RUNNING { background: #fdf4ff; color: #a21caf; border: 1px solid #f0abfc; }
-    .status-IN_PROGRESS { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; }
-    .status-READY     { background: #f0fdfa; color: #0d9488; border: 1px solid #99f6e4; }
+    .status-RUNNING   { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .status-LSP_RUNNING { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .status-IN_PROGRESS { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .status-READY     { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
     .status-WAITING   { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
     .status-DRAFT     { background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; }
     .status-UNKNOWN   { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
@@ -1128,9 +1128,9 @@ def render_all_projects_dashboard(
             if not lsp_active.empty:
                 target_row = lsp_active.iloc[0]
                 phase_label = "LSP"
-                phase_bg = "#cffafe"
-                phase_color = "#0e7490"
-                phase_border = "#a5f3fc"
+                phase_bg = "#059669"
+                phase_color = "white"
+                phase_border = "#047857"
             elif not asm_active.empty:
                 _progressing = {'RUNNING', 'READY', 'IN_PROGRESS', 'BLOCKED'}
                 asm_progressing = asm_active[asm_active['_eff_status'].isin(_progressing)]
@@ -1140,9 +1140,9 @@ def render_all_projects_dashboard(
                     asm_active['_rank'] = asm_active['_eff_status'].map(asm_priority).fillna(99)
                     target_row = asm_active.sort_values('_rank').iloc[0]
                     phase_label = "ASM"
-                    phase_bg = "#dbeafe"
-                    phase_color = "#1d4ed8"
-                    phase_border = "#bfdbfe"
+                    phase_bg = "#2563eb"
+                    phase_color = "white"
+                    phase_border = "#1d4ed8"
                 else:
                     # All ASM WAITING — show most urgent part, fall back to waiting ASM
                     if not parts_active.empty:
@@ -1173,9 +1173,9 @@ def render_all_projects_dashboard(
                         if target_row is None:
                             target_row = asm_active.iloc[0]
                     phase_label = "PARTS"
-                    phase_bg = "#ffedd5"
-                    phase_color = "#c2410c"
-                    phase_border = "#fed7aa"
+                    phase_bg = "#ea580c"
+                    phase_color = "white"
+                    phase_border = "#c2410c"
             elif not parts_active.empty:
                 parts_active = parts_active.copy()
                 parts_active['_rank'] = parts_active['_eff_status'].map(_parts_priority).fillna(99)
@@ -1199,7 +1199,7 @@ def render_all_projects_dashboard(
                         background: {phase_bg}; color: {phase_color};
                         border: 1px solid {phase_border};
                         padding: 0 5px; border-radius: 3px;
-                        margin-right: 8px; font-weight: 800; font-size: 8.5px;
+                        margin-left: 6px; font-weight: 800; font-size: 8.5px;
                         display: inline-flex; align-items: center; height: 14px;
                     ">{phase_label}</span>
                 '''
@@ -1236,9 +1236,7 @@ def render_all_projects_dashboard(
                         display: inline-flex; align-items: center; line-height: 1;
                         box-sizing: border-box; vertical-align: middle;
                         white-space: nowrap; font-weight: 700; border-radius: 4px;
-                    ">
-                        {phase_html} {display_text}
-                    </span>
+                    ">{display_text}</span>{phase_html}
                 '''
         req_created = to_est(req_df['request_created_at'].iloc[0])
         submitted_str = req_created.strftime('%Y-%m-%d') if req_created else "N/A"
@@ -1836,12 +1834,12 @@ def render_all_projects_dashboard(
             if target_row['type'] == 'lsp_workorder':
                 if active_info:
                     if 'Ready' in active_info and status == 'RUNNING': status = 'READY'
-                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:3px; color:#0e7490; text-align:center;'>{active_info}</div>"
+                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:3px; color:#059669; text-align:center;'>{active_info}</div>"
                 s_class = f"status-LSP_{status}" if status == 'RUNNING' else f"status-{status}"
             else:
                 if active_info:
                     if 'Ready' in active_info and status == 'RUNNING': status = 'READY'
-                    _ei_color = '#c2410c' if target_row['type'] in _parts_types_set else '#1d4ed8'
+                    _ei_color = '#ea580c' if target_row['type'] in _parts_types_set else '#2563eb'
                     header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:3px; color:{_ei_color}; text-align:center;'>{active_info}</div>"
                 s_class = f"status-{status}"
             badges_html += f'<div style="text-align:right"><span class="badge {s_class}"><b>{f_type}: {status}</b></span>{header_extra_info}</div>'
