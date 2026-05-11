@@ -237,7 +237,10 @@ class EnrichmentTransformer:
                 )
             ].empty
 
-            rc_rows     = active_rows[active_rows['type'].isin(_ROOT_CHAIN_TYPES)]
+            rc_rows     = active_rows[
+                active_rows['type'].isin(_ROOT_CHAIN_TYPES) &
+                (active_rows.get('data_source', pd.Series('', index=active_rows.index)) != 'BIOS_DRAFT')
+            ]
             rc_exists   = not rc_rows.empty
             rc_finished = rc_rows['visual_status'].isin(['SUCCEEDED', 'FAILED', 'CANCELED']).all()
 
