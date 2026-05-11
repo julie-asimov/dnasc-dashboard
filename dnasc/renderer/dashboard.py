@@ -524,7 +524,7 @@ def render_all_projects_dashboard(
     .status-CANCELED  { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
     .status-RUNNING   { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
     .status-LSP_RUNNING { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
-    .status-IN_PROGRESS { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .status-IN_PROGRESS { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
     .status-READY     { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
     .status-WAITING   { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
     .status-DRAFT     { background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; }
@@ -1043,7 +1043,7 @@ def render_all_projects_dashboard(
     # 3. HELPER: RENDER SINGLE REQUEST
     # =========================================================================
     def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False):
-        html = ""
+        html = []
         construct = req_df['construct_name'].iloc[0] or "Unknown Construct"
         req_status = req_df['request_status'].iloc[0] if 'request_status' in req_df.columns else "Unknown"
         req_priority = req_df['priority'].iloc[0] if 'priority' in req_df.columns else ""
@@ -1119,6 +1119,12 @@ def render_all_projects_dashboard(
                 ~active_rows['STOCK_ID'].astype(str).isin(all_root_stocks)
             ]
             _parts_priority = {'BLOCKED': 0, 'RUNNING': 1, 'READY': 2, 'IN_PROGRESS': 3, 'WAITING': 4}
+            _parts_type_priority = {
+                'syn_part_synthesis_workorder': 0,
+                'oligo_synthesis_workorder': 1,
+                'pcr_workorder': 2,
+                'plasmid_synthesis_workorder': 3,
+            }
 
             phase_label = ""
             phase_bg = "#f5f5f7"
@@ -1148,7 +1154,8 @@ def render_all_projects_dashboard(
                     if not parts_active.empty:
                         parts_active = parts_active.copy()
                         parts_active['_rank'] = parts_active['_eff_status'].map(_parts_priority).fillna(99)
-                        target_row = parts_active.sort_values('_rank').iloc[0]
+                        parts_active['_type_rank'] = parts_active['type'].map(_parts_type_priority).fillna(99)
+                        target_row = parts_active.sort_values(['_rank', '_type_rank']).iloc[0]
                     else:
                         # parts_active empty — check cross-request fanned-in parts via
                         # global lookup (parts belonging to other req_ids but referenced
@@ -1179,7 +1186,8 @@ def render_all_projects_dashboard(
             elif not parts_active.empty:
                 parts_active = parts_active.copy()
                 parts_active['_rank'] = parts_active['_eff_status'].map(_parts_priority).fillna(99)
-                target_row = parts_active.sort_values('_rank').iloc[0]
+                parts_active['_type_rank'] = parts_active['type'].map(_parts_type_priority).fillna(99)
+                target_row = parts_active.sort_values(['_rank', '_type_rank']).iloc[0]
                 phase_label = "PARTS"
                 phase_bg = "#ffedd5"
                 phase_color = "#c2410c"
@@ -1296,7 +1304,7 @@ def render_all_projects_dashboard(
                     <span style="font-size: 8px; color: #6b7280; font-weight: 700; text-transform: uppercase;">Running:</span>
                     <span style="font-size: 9px; font-weight: 700; color: #4b5563; font-family: monospace;">{running_str}</span>
                 </div>"""
-        html += f"""
+        html.append(f"""
         <div class="req-card">
             <div class="req-title-bar" style="background: {req_bg_color}; border-left-color: {req_border_left};">
                 <div style="flex-grow: 1; min-width: 0;">
@@ -1327,15 +1335,15 @@ def render_all_projects_dashboard(
                     {asm_review_badge}
                 </div>
             </div>
-        """
+        """)
 
-        html += f"""
+        html.append(f"""
         <div style="padding: 3px 6px; background: #fafafa; border-bottom: 1px solid #e5e5e7; cursor: pointer;" onclick="toggleSection('req_{req_id.replace("-", "_")}')">
             <span id="req_{req_id.replace("-", "_")}_icon" class="dropdown-icon">▶</span>
             <span style="font-size: 9px; font-weight: 600; color: #86868b;">Workorder Details</span>
         </div>
         <div id="req_{req_id.replace("-", "_")}" style="display: none;">
-        """
+        """)
 
         is_req_fulfilled = str(req_status).upper() in ['FULFILLED', 'SUCCEEDED']
         root_status_map = {}
@@ -1533,7 +1541,7 @@ def render_all_projects_dashboard(
             is_this_winner = root_status_map[root_id]['is_winner']
             section_class = "assembly-section"
             if is_req_fulfilled and has_winner and not is_this_winner: section_class += " dimmed"
-            row_map = {row['workorder_id']: row.to_dict() for _, row in root_df.iterrows()}
+            row_map = {row['workorder_id']: row for row in root_df.to_dict('records')}
             adj = defaultdict(list)
             roots_in_view = []
             # Fan in parts rows from other roots that share the same assembly plan
@@ -1780,7 +1788,7 @@ def render_all_projects_dashboard(
                 _pn = r.get('protocol_name')
                 if hasattr(_pn, 'tolist'): _pn = _pn.tolist()
                 return isinstance(_pn, list) and len(_pn) > 0
-            if sorted_root_df.empty or not any(_row_is_visible(r) for _, r in sorted_root_df.iterrows()):
+            if sorted_root_df.empty or not any(_row_is_visible(r) for r in sorted_root_df.to_dict('records')):
                 continue
 
             badges_html = ""; header_extra_info = ""; target_row = None
@@ -1855,7 +1863,7 @@ def render_all_projects_dashboard(
             type_counts = _countable_df['type'].value_counts()
             count_str = ", ".join([f"{count} {format_type_label(k).split()[0].upper()}" for k, count in type_counts.items()])
 
-            html += f"""<div class="{section_class}"><button id="{div_id}_btn" class="dropdown-btn" onclick="toggleSection('{div_id}')"><span id="{div_id}_icon" class="dropdown-icon">▶</span><div class="assembly-info"><span class="assembly-type">{assembly_label}</span><span class="stock-tag" style="font-size:9px; padding:3px 8px; background:#ede9fe; color:#6d28d9; border: 1px solid #c4b5fd;">{root_stock}</span><span class="assembly-counts" style="font-weight: 600;">{count_str}</span><span class="wo-id-tag">Root: {root_id}</span></div><div class="status-badges">{badges_html}</div></button><div id="{div_id}" class="content-pane"><table class="wo-table"><thead><tr><th>Type</th><th>Workorder ID</th><th>Status</th><th>Stock ID</th><th>Created</th><th>TAT</th><th>Details</th><th style="width: 350px;">Queue</th></tr></thead><tbody>"""
+            html.append(f"""<div class="{section_class}"><button id="{div_id}_btn" class="dropdown-btn" onclick="toggleSection('{div_id}')"><span id="{div_id}_icon" class="dropdown-icon">▶</span><div class="assembly-info"><span class="assembly-type">{assembly_label}</span><span class="stock-tag" style="font-size:9px; padding:3px 8px; background:#ede9fe; color:#6d28d9; border: 1px solid #c4b5fd;">{root_stock}</span><span class="assembly-counts" style="font-weight: 600;">{count_str}</span><span class="wo-id-tag">Root: {root_id}</span></div><div class="status-badges">{badges_html}</div></button><div id="{div_id}" class="content-pane"><table class="wo-table"><thead><tr><th>Type</th><th>Workorder ID</th><th>Status</th><th>Stock ID</th><th>Created</th><th>TAT</th><th>Details</th><th style="width: 350px;">Queue</th></tr></thead><tbody>""")
 
             _emitted_parts_header = False
             _emitted_retry_header = False
@@ -1864,10 +1872,10 @@ def render_all_projects_dashboard(
             # whose inputs DID have work done (e.g. Gibson canceled after parts were built).
             _section_inputs_have_work = any(
                 r.get('wo_status') != 'CANCELED'
-                for _, r in sorted_root_df.iterrows()
+                for r in sorted_root_df.to_dict('records')
                 if str(r.get('workorder_id', '')) != str(root_id)
             )
-            for _, row in sorted_root_df.iterrows():
+            for row in sorted_root_df.to_dict('records'):
                 # Skip CANCELED workorders that never ran (no queue data) —
                 # these are abandoned attempts that clutter the timeline.
                 # Exception: show a CANCELED fulfills_request root when its input parts
@@ -1895,13 +1903,13 @@ def render_all_projects_dashboard(
                 # "Parts / Inputs" section header — emitted once before the first single-attempt parts row
                 if _is_parts_row and not _emitted_parts_header:
                     _emitted_parts_header = True
-                    html += f"""<tr><td colspan="8" style="padding:5px 10px 4px; background:#f8fafc; border-top:2px solid #e2e8f0; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">Parts / Inputs</span></td></tr>"""
+                    html.append(f"""<tr><td colspan="8" style="padding:5px 10px 4px; background:#f8fafc; border-top:2px solid #e2e8f0; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">Parts / Inputs</span></td></tr>""")
 
                 if _is_parts_row and _has_attempt and row.get('tree_depth', 0) == 0:
                     # "Retried Parts" divider — emitted once before the first retry attempt group
                     if not _emitted_retry_header:
                         _emitted_retry_header = True
-                        html += f"""<tr><td colspan="8" style="padding:5px 10px 4px; background:#fef9ec; border-top:2px solid #fde68a; border-bottom:1px solid #fde68a;"><span style="font-size:10px; font-weight:700; color:#92400e; text-transform:uppercase; letter-spacing:0.05em;">Retried Parts</span></td></tr>"""
+                        html.append(f"""<tr><td colspan="8" style="padding:5px 10px 4px; background:#fef9ec; border-top:2px solid #fde68a; border-bottom:1px solid #fde68a;"><span style="font-size:10px; font-weight:700; color:#92400e; text-transform:uppercase; letter-spacing:0.05em;">Retried Parts</span></td></tr>""")
                     _atype = row.get('type', '')
                     _alabel = format_type_label(_atype)
                     _attempt_total = int(row.get('_attempt_total', 1))
@@ -1911,7 +1919,7 @@ def render_all_projects_dashboard(
                     _vstatus = '' if (isinstance(_vstatus, float) and pd.isna(_vstatus)) else str(_vstatus)
                     _vcolor = _status_colors.get(_vstatus, '#64748b')
                     _vicon = '✓ ' if _vstatus == 'SUCCEEDED' else '✗ ' if _vstatus == 'FAILED' else ''
-                    html += f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:1px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{(_sid_lbl + ' — ') if _sid_lbl else ''}Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_vcolor};">{_vicon}{_vstatus}</span></td></tr>"""
+                    html.append(f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:1px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{(_sid_lbl + ' — ') if _sid_lbl else ''}Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_vcolor};">{_vicon}{_vstatus}</span></td></tr>""")
 
                 elif not _is_parts_row and _has_attempt and row.get('tree_depth', 0) == 0:
                     # Assembly attempt banner (GG/Gibson) — uses best chain status
@@ -1922,7 +1930,7 @@ def render_all_projects_dashboard(
                     _astatus = row.get('visual_status', '') if (_cs_raw is None or (isinstance(_cs_raw, float) and pd.isna(_cs_raw))) else str(_cs_raw)
                     _astatus_color = _status_colors.get(_astatus, '#64748b')
                     _status_icon = '✓ ' if _astatus == 'SUCCEEDED' else '✗ ' if _astatus == 'FAILED' else ''
-                    html += f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:2px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{_alabel} — Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_astatus_color};">{_status_icon}{_astatus}</span></td></tr>"""
+                    html.append(f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:2px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{_alabel} — Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_astatus_color};">{_status_icon}{_astatus}</span></td></tr>""")
                 depth = row.get('tree_depth', 0)
                 row_class = f"tree-row-{min(depth, 2)}"  # CSS only has 0, 1, 2
                 spacer = ""
@@ -1993,7 +2001,7 @@ def render_all_projects_dashboard(
                                 if pid not in lims_plate_map[proto]: lims_plate_map[proto].append(pid)
                 step_keywords = {'Golden Gate Assembly': ['Golden Gate'], 'Gibson Assembly': ['Gibson'], 'STAR Transformation': ['Transformation', 'Agar'], 'Create Minipreps and Glycerol Stocks': ['Overnight', 'Miniprep', 'Glycerol'], 'Rearray 96 to 384': ['Rearray'], 'DNA Quantification': ['Quant', 'DNA'], 'NGS Sequence Confirmation': ['NGS', 'Sequence'], 'PCR': ['PCR'], 'LSP Receiving': ['LSP Receiving'], 'Manual: Miniprep/Glycerol/Media created': ['Overnight', 'Miniprep', 'Glycerol']}
 
-                pipeline_html = '<div class="timeline-container">'
+                pipeline_html = ['<div class="timeline-container">']
                 if row['type'] == 'transformation_workorder':
                     src_id = row.get('source_asm_process_id')
                     if src_id and src_id in parent_details:
@@ -2002,7 +2010,7 @@ def render_all_projects_dashboard(
                         det_pills = f'<span class="t-pill">Linked</span>'
                         if pd.notna(parent['job']): det_pills += f'<a href="https://op-tracker.asimov.io/job/{int(parent["job"])}/group/0/step/0/" target="_blank" class="t-pill">Job {int(parent["job"])}</a>'
                         if pd.notna(parent['plate']): det_pills += f'<a href="https://bios.asimov.io/inventory/plates/{clean_plate_id(parent["plate"])}" target="_blank" class="t-pill">Plate{clean_plate_id(parent["plate"])}</a>'
-                        pipeline_html += f"""<div class="timeline-row"><div class="t-dot source"></div><div class="t-content"><div class="t-header"><span class="t-name" style="color:#1e3a5f">Source: {src_name}</span><span class="t-time">{parent["completion_str"]}</span></div><div class="t-details">{det_pills}</div></div></div>"""
+                        pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot source"></div><div class="t-content"><div class="t-header"><span class="t-name" style="color:#1e3a5f">Source: {src_name}</span><span class="t-time">{parent["completion_str"]}</span></div><div class="t-details">{det_pills}</div></div></div>""")
                 if queue_data:
                     for item in queue_data:
                         is_ready = item['state'] == 'Ready'
@@ -2043,7 +2051,7 @@ def render_all_projects_dashboard(
                                     if (i + 1) % 3 == 0 and i < len(sorted_plates) - 1: tooltip_html += '<br>'
                                 tooltip_html += '</div></div>'
                             details_pills += f"""<div class="plate-hover-container"><span class="plate-trigger">{total_plates} Plates</span><div class="plate-popover">{tooltip_html}</div></div>"""
-                        pipeline_html += f"""<div class="timeline-row"><div class="t-dot {item['class']}"></div><div class="t-content"><div class="t-header"><span class="t-name">{item['queue']}</span><span class="t-time">{time_str}</span></div><div class="t-details">{details_pills}</div></div></div>"""
+                        pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot {item['class']}"></div><div class="t-content"><div class="t-header"><span class="t-name">{item['queue']}</span><span class="t-time">{time_str}</span></div><div class="t-details">{details_pills}</div></div></div>""")
                 else:
                     if lims_plate_map:
                         # Group all LIMS plates under a single manual entry with the same
@@ -2066,13 +2074,13 @@ def render_all_projects_dashboard(
                             'syn_part_synthesis_workorder': 'Syn Part Synthesis',
                         }
                         _fallback_label = _fallback_labels.get(row['type'], 'Manual: Miniprep/Glycerol/Media created')
-                        pipeline_html += f"""<div class="timeline-row"><div class="t-dot succeeded"></div><div class="t-content"><div class="t-header"><span class="t-name">{_fallback_label}</span><span class="t-time"></span></div><div class="t-details">{lims_pills}</div></div></div>"""
+                        pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot succeeded"></div><div class="t-content"><div class="t-header"><span class="t-name">{_fallback_label}</span><span class="t-time"></span></div><div class="t-details">{lims_pills}</div></div></div>""")
                     else:
-                        pipeline_html += '<span style="color: #9ca3af; font-size: 11px;">No queue data</span>'
-                pipeline_html += '</div>'
+                        pipeline_html.append('<span style="color: #9ca3af; font-size: 11px;">No queue data</span>')
+                pipeline_html.append('</div>')
 
                 # --- DETAILS INFO ---
-                details_info = ""
+                details_info = []
                 waiting_items = set()
                 if row['wo_status'] in ['WAITING', 'BLOCKED'] and pd.notna(row.get('Waiting')):
                     waiting_items = set([x.strip() for x in str(row['Waiting']).split(',') if x.strip()])
@@ -2165,7 +2173,7 @@ def render_all_projects_dashboard(
                     if pd.notna(pcr_info):
                         for p in [p for p in str(pcr_info).split(', ') if ':' in p]: inputs_html += render_part_tag(p)
                     inputs_html += '</div>'
-                if 'part-tag' in inputs_html: details_info += inputs_html
+                if 'part-tag' in inputs_html: details_info.append(inputs_html)
 
                 if row['type'] == 'lsp_workorder':
                     lims_id = row.get('lsp_batch_id')
@@ -2436,27 +2444,27 @@ def render_all_projects_dashboard(
                         lsp_parts.append(
                             f'<div style="display:grid;grid-template-columns:58px 1fr;gap:2px 6px;margin-bottom:4px;">{grid_cells}</div>'
                         )
-                    details_info += "".join(lsp_parts)
+                    details_info.append("".join(lsp_parts))
 
                 elif row['type'] in ['oligo_synthesis_workorder', 'pcr_workorder', 'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder']:
                     _vendor = row.get('vendor')
                     if pd.notna(_vendor) and str(_vendor).strip() not in ('', 'nan', 'None'):
-                        details_info += f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Vendor: {str(_vendor).strip()}</div>"
+                        details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Vendor: {str(_vendor).strip()}</div>")
                     if row['type'] == 'pcr_workorder':
                         _wc = row.get('well_comments')
                         _wc_clean = str(_wc).strip().strip(';').strip() if _wc is not None and not (isinstance(_wc, float) and pd.isna(_wc)) else ''
                         if _wc_clean and _wc_clean not in ('nan', 'None', '{;}'):
-                            details_info += f"<div style='font-size:10px;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;margin-top:3px;'>&#9888; {_wc_clean}</div>"
+                            details_info.append(f"<div style='font-size:10px;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;margin-top:3px;'>&#9888; {_wc_clean}</div>")
 
                 elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation']:
                     strain = row.get('cloning_strain')
-                    if pd.notna(strain): details_info += f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Strain: {strain}</div>"
+                    if pd.notna(strain): details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Strain: {strain}</div>")
                     _imaged   = row.get('imaged_colonies')
                     _pickable = row.get('pickable_colonies')
                     _picked   = row.get('picked_colonies')
                     if any(pd.notna(v) for v in [_imaged, _pickable, _picked]):
                         # Colony counts (plain, no link wrapping)
-                        details_info += (
+                        details_info.append(
                             f"<div style='display:grid;grid-template-columns:58px 1fr;gap:1px 4px;margin-top:3px;'>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Imaged</span><span style='font-size:10px;color:#1e293b;'>{int(_imaged)}</span>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Pickable</span><span style='font-size:10px;color:#1e293b;'>{int(_pickable) if pd.notna(_pickable) else 0}</span>"
@@ -2483,7 +2491,7 @@ def render_all_projects_dashboard(
                             except Exception:
                                 pass
                             _well_label = f' · {_well_alpha}' if _well_alpha else ''
-                            details_info += (
+                            details_info.append(
                                 f"<div style='margin-top:4px;margin-bottom:4px;'>"
                                 f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-right:4px;'>Agar</span>"
                                 f"<a href='{_plate_url}' target='_blank' "
@@ -2495,7 +2503,7 @@ def render_all_projects_dashboard(
                     if row['visual_status'] == 'FAILED' and str(row['wo_status']).upper() == 'SUCCEEDED' and not row['is_software_fail']:
                         _tot = row.get('total_colonies')
                         if pd.isna(_tot) or int(_tot) == 0:
-                            details_info += f'<br><span class="colony-badge" style="background:#fce7f3;color:#be185d;">0 colonies</span>'
+                            details_info.append(f'<br><span class="colony-badge" style="background:#fce7f3;color:#be185d;">0 colonies</span>')
                     if row['visual_status'] in ['SUCCEEDED', 'FAILED'] or row['wo_status'] == 'FAILED':
                         tot = row.get('total_colonies'); seq = row.get('seq_confirmed')
                         if pd.notna(tot) and tot > 0:
@@ -2528,10 +2536,10 @@ def render_all_projects_dashboard(
                                         if col_num == selected_col_num: links += f'<a href="{url}" target="_blank" class="popover-link" style="color:#0891b2;">★ {label}</a>'
                                         else: links += f'<a href="{url}" target="_blank" class="popover-link">{label}</a>'
                                     popover_content += f'<div class="popover-group"><div class="popover-title">{protocol_name}</div>{links}</div>'
-                            if popover_content: details_info += f'<br><div class="plate-hover-container"><span class="colony-badge" style="background: {bg}; color: {color}; cursor:pointer;">{seq}/{tot} colonies seq confirmed</span><div class="plate-popover">{popover_content}</div></div>'
-                            else: details_info += f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>'
+                            if popover_content: details_info.append(f'<br><div class="plate-hover-container"><span class="colony-badge" style="background: {bg}; color: {color}; cursor:pointer;">{seq}/{tot} colonies seq confirmed</span><div class="plate-popover">{popover_content}</div></div>')
+                            else: details_info.append(f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>')
                             if row.get('is_seq_rollback') is True or row.get('is_seq_rollback') == True:
-                                details_info += f'<br><span style="font-size:9px;color:#dc2626;background:#fff1f2;border:1px solid #fca5a5;padding:2px 6px;border-radius:3px;display:inline-block;margin-top:3px;font-weight:600;">Seq confirmation rolled back — potential recombination in LSP</span>'
+                                details_info.append(f'<br><span style="font-size:9px;color:#dc2626;background:#fff1f2;border:1px solid #fca5a5;padding:2px 6px;border-radius:3px;display:inline-block;margin-top:3px;font-weight:600;">Seq confirmation rolled back — potential recombination in LSP</span>')
                 _sid = row.get("STOCK_ID", "N/A")
                 _sid_str = str(_sid)
                 if _sid_str.startswith('#'):  # placeholder, not a real stock ID
@@ -2549,10 +2557,10 @@ def render_all_projects_dashboard(
                     _status_cell += f'<div class="bios-override-label">BIOS: {_bios_raw}</div>'
                 _fulfills_attr = "1" if row.get('fulfills_request') else "0"
                 _partner_attr = "1" if str(row.get('for_partner', '')).lower() == 'true' else "0"
-                html += f"""<tr class="{row_class}" data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{details_info}</td><td>{pipeline_html}</td></tr>"""
-            html += "</tbody></table></div></div>"
-        html += "</div></div>"
-        return html
+                html.append(f"""<tr class="{row_class}" data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{"".join(details_info)}</td><td>{"".join(pipeline_html)}</td></tr>""")
+            html.append("</tbody></table></div></div>")
+        html.append("</div></div>")
+        return "".join(html)
 
     # =========================================================================
     # 4. MAIN RENDER LOOP
@@ -3336,24 +3344,31 @@ def render_all_projects_dashboard(
                     <summary class="group-header in-progress">
                         <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''}{f' - 🔬 {count_asm_review} ASM Review' if count_asm_review > 0 else ''})
                     </summary>"""
+            _active_parts = []
             for rid, r_df in active_req_list:
                 is_stalled_req = rid in stalled_reqs
                 is_asm_review_req = rid in asm_review_reqs
-                req_html = render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req)
-                html += req_html
+                _active_parts.append(render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req))
+            html += "".join(_active_parts)
             html += "</details>"
         if new_req_list:
             html += f'<details><summary class="group-header new"><span class="group-arrow">▶</span> New ({len(new_req_list)})</summary>'
-            for rid, r_df in new_req_list: html += render_single_request_html(rid, r_df, False)
+            _new_parts = []
+            for rid, r_df in new_req_list: _new_parts.append(render_single_request_html(rid, r_df, False))
+            html += "".join(_new_parts)
             html += "</details>"
         if fulfilled_req_list:
             html += f'<details><summary class="group-header fulfilled"><span class="group-arrow">▶</span> Fulfilled ({len(fulfilled_req_list)})</summary>'
-            for rid, r_df in fulfilled_req_list: html += render_single_request_html(rid, r_df, False)
+            _fulfilled_parts = []
+            for rid, r_df in fulfilled_req_list: _fulfilled_parts.append(render_single_request_html(rid, r_df, False))
+            html += "".join(_fulfilled_parts)
             html += "</details>"
         if canceled_req_list:
             html += f'<details><summary class="group-header canceled"><span class="group-arrow">▶</span> Canceled ({len(canceled_req_list)})</summary>'
+            _canceled_parts = []
             for rid, r_df in canceled_req_list:
-                html += render_single_request_html(rid, r_df, False)
+                _canceled_parts.append(render_single_request_html(rid, r_df, False))
+            html += "".join(_canceled_parts)
             html += "</details>"
 
         html += "</div>"
