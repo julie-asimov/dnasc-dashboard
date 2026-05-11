@@ -327,14 +327,14 @@ def render_all_projects_dashboard(
     # 2. LOGIC & LOOKUPS
     # =========================================================================
     parent_details = {}
-    well_to_root = {}
-
-    for _, row in df.iterrows():
-        root = row.get('root_work_order_id')
-        if pd.notna(root):
-            search_text = str(row.get('all_locations', '')) + " " + str(row.get('operation_well_locations', ''))
-            found_wells = re.findall(r'\b(\d{5,8})\b', search_text)
-            for w in found_wells: well_to_root[w] = root
+    _wtr_df = df[df['root_work_order_id'].notna()].copy()
+    _wtr_df['_search'] = (
+        _wtr_df.get('all_locations', pd.Series('', index=_wtr_df.index)).fillna('').astype(str) + ' ' +
+        _wtr_df.get('operation_well_locations', pd.Series('', index=_wtr_df.index)).fillna('').astype(str)
+    )
+    _wtr_df['_wells'] = _wtr_df['_search'].str.findall(r'\b(\d{5,8})\b')
+    _wtr_exploded = _wtr_df[_wtr_df['_wells'].str.len() > 0][['_wells', 'root_work_order_id']].explode('_wells')
+    well_to_root = dict(zip(_wtr_exploded['_wells'], _wtr_exploded['root_work_order_id']))
 
     _global_parts_types = {'oligo_synthesis_workorder', 'pcr_workorder',
                            'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder'}
@@ -1206,9 +1206,9 @@ def render_all_projects_dashboard(
                     <span style="
                         background: {phase_bg}; color: {phase_color};
                         border: 1px solid {phase_border};
-                        padding: 0 5px; border-radius: 3px;
-                        margin-left: 6px; font-weight: 800; font-size: 8.5px;
-                        display: inline-flex; align-items: center; height: 14px;
+                        padding: 2px 10px; border-radius: 4px;
+                        margin-left: 6px; font-weight: 800; font-size: 13px;
+                        display: inline-flex; align-items: center; height: 22px;
                     ">{phase_label}</span>
                 '''
 
@@ -1780,7 +1780,7 @@ def render_all_projects_dashboard(
                     dfs_p(child, depth + 1)
             for r in asm_roots_list + other_roots_list: dfs(r, 0)
             for r in parts_roots_list: dfs_p(r, 0)
-            sorted_root_df = pd.DataFrame(ordered_data + parts_ordered)
+            sorted_records = ordered_data + parts_ordered
 
             # Skip root groups where every row is CANCELED with no queue data (empty dropdown)
             def _row_is_visible(r):
@@ -1788,7 +1788,7 @@ def render_all_projects_dashboard(
                 _pn = r.get('protocol_name')
                 if hasattr(_pn, 'tolist'): _pn = _pn.tolist()
                 return isinstance(_pn, list) and len(_pn) > 0
-            if sorted_root_df.empty or not any(_row_is_visible(r) for r in sorted_root_df.to_dict('records')):
+            if not sorted_records or not any(_row_is_visible(r) for r in sorted_records):
                 continue
 
             badges_html = ""; header_extra_info = ""; target_row = None
@@ -1810,8 +1810,8 @@ def render_all_projects_dashboard(
                         -(row_map[r].get('wo_created_at').timestamp() if hasattr(row_map[r].get('wo_created_at'), 'timestamp') else 0)
                     ))
                     target_row = row_map[_best_asm]
-                elif not sorted_root_df.empty:
-                    target_row = sorted_root_df.iloc[0]
+                elif sorted_records:
+                    target_row = sorted_records[0]
                 else:
                     target_row = root_df.iloc[0]
             status = target_row['visual_status']
@@ -1872,10 +1872,11 @@ def render_all_projects_dashboard(
             # whose inputs DID have work done (e.g. Gibson canceled after parts were built).
             _section_inputs_have_work = any(
                 r.get('wo_status') != 'CANCELED'
-                for r in sorted_root_df.to_dict('records')
+                for r in sorted_records
                 if str(r.get('workorder_id', '')) != str(root_id)
             )
-            for row in sorted_root_df.to_dict('records'):
+            tree_stock_ids = {str(r['STOCK_ID']) for r in sorted_records if pd.notna(r.get('STOCK_ID'))}
+            for row in sorted_records:
                 # Skip CANCELED workorders that never ran (no queue data) —
                 # these are abandoned attempts that clutter the timeline.
                 # Exception: show a CANCELED fulfills_request root when its input parts
@@ -2084,7 +2085,6 @@ def render_all_projects_dashboard(
                 waiting_items = set()
                 if row['wo_status'] in ['WAITING', 'BLOCKED'] and pd.notna(row.get('Waiting')):
                     waiting_items = set([x.strip() for x in str(row['Waiting']).split(',') if x.strip()])
-                tree_stock_ids = set(sorted_root_df['STOCK_ID'].dropna().astype(str).values)
                 def render_part_tag(part_name, label_prefix=""):
                     clean_name = part_name.split(':')[0].strip()
                     if not clean_name: return ""
@@ -2712,16 +2712,19 @@ def render_all_projects_dashboard(
 
     # Lookup maps for confirmed assembly inputs (DNA Stocks to Assemble).
     # process_id from lims__src.well is either an LSP batch ID or workorder UUID.
-    _lsp_batch_to_stock: dict = {}  # "LSP-9710" → STOCK_ID
-    _woid_to_stock: dict = {}       # workorder UUID → STOCK_ID
-    for _, _lr in df.iterrows():
-        _lb = str(_lr.get('lsp_batch_id') or '').strip().upper()
-        if _lb and _lb not in ('NAN', 'NONE'):
-            _lsp_batch_to_stock[_lb] = str(_lr.get('STOCK_ID') or '')
-        _wo = str(_lr.get('workorder_id') or '').strip()
-        _st = str(_lr.get('STOCK_ID') or '').strip()
-        if _wo and _st and _st not in ('nan', 'None'):
-            _woid_to_stock[_wo] = _st
+    _lsp_df = df[df['lsp_batch_id'].notna()][['lsp_batch_id', 'STOCK_ID']].drop_duplicates(subset='lsp_batch_id')
+    _lsp_batch_to_stock: dict = {
+        k: str(v or '') for k, v in zip(
+            _lsp_df['lsp_batch_id'].astype(str).str.strip().str.upper(),
+            _lsp_df['STOCK_ID']
+        ) if k not in ('NAN', 'NONE', '')
+    }
+    _wo_df = df[df['STOCK_ID'].notna() & df['workorder_id'].notna()][['workorder_id', 'STOCK_ID']].drop_duplicates(subset='workorder_id')
+    _woid_to_stock: dict = {
+        str(wo).strip(): str(st).strip()
+        for wo, st in zip(_wo_df['workorder_id'], _wo_df['STOCK_ID'])
+        if str(st).strip() not in ('nan', 'None', '')
+    }
 
     # Load experiment due dates (written by fetch_due_dates() before render)
     _due_date_map: dict[str, str] = {}
@@ -3238,8 +3241,8 @@ def render_all_projects_dashboard(
                         f' onmouseenter="document.getElementById(\'{_chain_pop_id}\').style.display=\'block\'"'
                         f' onmouseleave="document.getElementById(\'{_chain_pop_id}\').style.display=\'none\'">'
                         f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
-                        f'background:#059669;color:white;font-size:9px;font-weight:700;'
-                        f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
+                        f'background:#059669;color:white;font-size:11px;font-weight:700;'
+                        f'padding:3px 8px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
                         f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid #34d399;">ASM {_asm_str}</div>'
                         f'{_chain_pop_html}'
                         f'</div>'
@@ -3268,8 +3271,8 @@ def render_all_projects_dashboard(
                             f' onmouseenter="document.getElementById(\'{_lsp_pop_id}\').style.display=\'block\'"'
                             f' onmouseleave="document.getElementById(\'{_lsp_pop_id}\').style.display=\'none\'">'
                             f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
-                            f'background:#0284c7;color:white;font-size:9px;font-weight:700;'
-                            f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
+                            f'background:#0284c7;color:white;font-size:11px;font-weight:700;'
+                            f'padding:3px 8px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
                             f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid #38bdf8;">LSP {_lsp_str}</div>'
                             f'{_lsp_pop_html}'
                             f'</div>'
