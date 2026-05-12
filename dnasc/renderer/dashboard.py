@@ -159,6 +159,16 @@ def render_all_projects_dashboard(
             return dt.tz_convert('US/Eastern')
         except: return None
 
+    def batch_to_est(times: list) -> list:
+        """Vectorized list-of-timestamps → US/Eastern. ~10x faster than calling to_est per item."""
+        if not times:
+            return []
+        try:
+            converted = pd.to_datetime(times, errors='coerce', utc=True).tz_convert('US/Eastern')
+            return [x if not pd.isnull(x) else None for x in converted]
+        except Exception:
+            return [to_est(t) for t in times]
+
     def clean_plate_id(val):
         if pd.isna(val): return None
         match = re.search(r'(\d+)', str(val))
@@ -197,11 +207,13 @@ def render_all_projects_dashboard(
             return []
 
         # --- STEP 1: BUILD RAW OPERATIONS ---
+        n = len(protocol_names)
+        _s_times = batch_to_est(operation_starts[:n])
+        _r_times = batch_to_est(operation_ready_times[:n])
         raw_ops = []
-        for i in range(len(protocol_names)):
-            # Safe access using index checks
-            r_time = to_est(operation_ready_times[i]) if i < len(operation_ready_times) else None
-            s_time = to_est(operation_starts[i]) if i < len(operation_starts) else None
+        for i in range(n):
+            r_time = _r_times[i] if i < len(_r_times) else None
+            s_time = _s_times[i] if i < len(_s_times) else None
             run_num = ngs_run_numbers[i] if i < len(ngs_run_numbers) else None
 
             raw_ops.append({
@@ -342,27 +354,26 @@ def render_all_projects_dashboard(
 
     # Stock-keyed lookup for stage-summary type/vendor checks.
     _global_parts_rows_by_stock: dict = {}
-    for _, _gpr in df[df['type'].isin(_global_parts_types | _global_asm_types)].iterrows():
+    for _gpr in df[df['type'].isin(_global_parts_types | _global_asm_types)].to_dict('records'):
         if _gpr.get('type') in _global_asm_types and _gpr.get('fulfills_request') != False:
             continue
         _gsid = str(_gpr.get('STOCK_ID', '') or '').strip()
         if _gsid and _gsid not in ('nan', 'None', ''):
-            _global_parts_rows_by_stock.setdefault(_gsid, []).append(_gpr.to_dict())
+            _global_parts_rows_by_stock.setdefault(_gsid, []).append(_gpr)
 
-    for _, row in df.iterrows():
+    _ASM_PROTO_MAP = {'golden_gate_workorder': 'Golden Gate Assembly', 'gibson_workorder': 'Gibson Assembly'}
+    for row in df.to_dict('records'):
         wid = str(row['workorder_id'])
         _jid = row.get('job_id')
         if isinstance(_jid, np.ndarray): _jid = _jid.tolist()
         job_id = None
         completion_time = None
-        op_states, op_starts = row.get('operation_state'), row.get('operation_start')
+        op_states = row.get('operation_state')
+        op_starts = row.get('operation_start')
         op_protocols = row.get('protocol_name')
         if isinstance(op_protocols, np.ndarray): op_protocols = op_protocols.tolist()
-        # For GG/Gibson rows, job_id[0] may be a downstream op (STAR/Minipreps) not the assembly op.
-        # Find the job_id belonging to the assembly protocol specifically; fall back to first non-null.
         if isinstance(_jid, list) and isinstance(op_protocols, list):
-            _asm_proto_map = {'golden_gate_workorder': 'Golden Gate Assembly', 'gibson_workorder': 'Gibson Assembly'}
-            _asm_proto = _asm_proto_map.get(str(row.get('type', '')))
+            _asm_proto = _ASM_PROTO_MAP.get(str(row.get('type', '')))
             if _asm_proto:
                 job_id = next((j for proto, j in zip(op_protocols, _jid) if proto == _asm_proto and j is not None and pd.notna(j)), None)
             if job_id is None:
@@ -370,16 +381,17 @@ def render_all_projects_dashboard(
         if isinstance(op_states, np.ndarray): op_states = op_states.tolist()
         if isinstance(op_starts, np.ndarray): op_starts = op_starts.tolist()
         if isinstance(op_states, list) and isinstance(op_starts, list):
-            # For GG/Gibson, use the assembly step time (not the last op which may be NGS)
-            _asm_proto_map = {'golden_gate_workorder': 'Golden Gate Assembly', 'gibson_workorder': 'Gibson Assembly'}
-            _target_proto = _asm_proto_map.get(str(row.get('type', '')))
+            _target_proto = _ASM_PROTO_MAP.get(str(row.get('type', '')))
             if _target_proto and isinstance(op_protocols, list):
-                for proto, state, start in zip(op_protocols, op_states, op_starts):
-                    if proto == _target_proto and state in ('SC', 'FA') and pd.notna(start):
-                        completion_time = to_est(start); break
-            if not completion_time:
-                valid_times = [to_est(start) for state, start in zip(op_states, op_starts) if state in ('SC', 'FA') and pd.notna(start)]
-                if valid_times: completion_time = max(valid_times)
+                sc_fa_starts = next(
+                    ([start] for proto, state, start in zip(op_protocols, op_states, op_starts)
+                     if proto == _target_proto and state in ('SC', 'FA') and pd.notna(start)),
+                    [s for st, s in zip(op_states, op_starts) if st in ('SC', 'FA') and pd.notna(s)]
+                )
+            else:
+                sc_fa_starts = [s for st, s in zip(op_states, op_starts) if st in ('SC', 'FA') and pd.notna(s)]
+            valid_times = [t for t in batch_to_est(sc_fa_starts) if t is not None]
+            if valid_times: completion_time = max(valid_times)
         if not completion_time: completion_time = to_est(row['wo_created_at'])
         plate_id = None
         json_str = row.get('all_protocol_plates', '{}')
@@ -430,6 +442,12 @@ def render_all_projects_dashboard(
         df = df.sort_values(by=['experiment_created_at', 'req_rank', 'req_id', 'group_rank'], ascending=[False, True, True, True])
     else:
         df = df.sort_values(by=['req_rank', 'req_id', 'group_rank'])
+
+    # Convert high-cardinality string columns to categoricals so that inner-loop
+    # .isin() and == comparisons use integer encoding instead of string matching.
+    for _cat_col in ('type', 'wo_status', 'visual_status', 'data_source'):
+        if _cat_col in df.columns:
+            df[_cat_col] = df[_cat_col].astype('category')
 
     # =========================================================================
     # HTML CSS WITH TABS
