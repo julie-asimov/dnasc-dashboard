@@ -274,10 +274,18 @@ class EnrichmentTransformer:
                 and asm_rows_act['visual_status'].isin(['READY', 'WAITING']).any()
             )
 
-            # seq winner: any workorder has ≥1 seq-confirmed colony, but no LSP workorder
-            # exists yet — flags that a winner is in hand but hasn't been acted on.
-            # Suppressed once an LSP is created (someone already picked it up).
-            _seq_col = r_df.get('seq_confirmed') if 'seq_confirmed' in r_df.columns else None
+            # seq winner: root-pAI workorders only have ≥1 seq-confirmed colony,
+            # no LSP workorder exists yet — winner in hand, not yet acted on.
+            # Restricted to root STOCK_ID to avoid foreign-construct inputs (e.g.
+            # a backbone Gibson pAI-21680 used as part of pAI-21430) triggering the flag.
+            _root_stock = (
+                r_df.loc[r_df['workorder_id'] == r_df['root_work_order_id'], 'STOCK_ID']
+                .dropna().iloc[0]
+                if not r_df.loc[r_df['workorder_id'] == r_df['root_work_order_id'], 'STOCK_ID'].dropna().empty
+                else None
+            )
+            _root_rows = r_df[r_df['STOCK_ID'] == _root_stock] if _root_stock else r_df
+            _seq_col = _root_rows['seq_confirmed'] if 'seq_confirmed' in _root_rows.columns else None
             _has_lsp = 'lsp_workorder' in active_rows['type'].values
             req_has_seq_winner[req_id] = (
                 has_real_workorders
