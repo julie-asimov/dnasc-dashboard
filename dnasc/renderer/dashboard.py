@@ -1042,7 +1042,7 @@ def render_all_projects_dashboard(
     # =========================================================================
     # 3. HELPER: RENDER SINGLE REQUEST
     # =========================================================================
-    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False):
+    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False, has_seq_winner=False):
         html = []
         construct = req_df['construct_name'].iloc[0] or "Unknown Construct"
         req_status = req_df['request_status'].iloc[0] if 'request_status' in req_df.columns else "Unknown"
@@ -1255,6 +1255,7 @@ def render_all_projects_dashboard(
 
         stalled_badge = '<span class="badge" style="background:#be185d; color:white; border:2px solid #9f1239; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span>' if is_stalled else ""
         asm_review_badge = '<span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span>' if is_asm_review else ""
+        seq_winner_badge = '<span class="badge" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span>' if has_seq_winner else ""
 
         ready_to_ship_time = None
         final_release_time = None
@@ -1333,6 +1334,7 @@ def render_all_projects_dashboard(
                     {status_badge_html}
                     {stalled_badge}
                     {asm_review_badge}
+                    {seq_winner_badge}
                 </div>
             </div>
         """)
@@ -2760,7 +2762,7 @@ def render_all_projects_dashboard(
         count_blocked = 0; count_stalled = 0; count_in_lsp = 0; count_asm_review = 0
         count_in_assembly = 0; count_active_waiting = 0; count_ship_ready = 0
         new_req_list = []; active_req_list = []; fulfilled_req_list = []; canceled_req_list = []
-        stalled_reqs = set(); asm_review_reqs = set(); production_tats = []; total_tats = []
+        stalled_reqs = set(); asm_review_reqs = set(); seq_winner_reqs = set(); production_tats = []; total_tats = []
         _root_only = project_df[project_df['workorder_id'] == project_df['root_work_order_id']]
         _ptr_source = _root_only if not _root_only.empty else project_df
         has_ptr = _ptr_source['for_partner'].astype(str).str.lower().str.contains('true').any()
@@ -2849,9 +2851,10 @@ def render_all_projects_dashboard(
 
             # is_stalled / is_asm_review / is_blocked / has_real_workorders all
             # pre-computed by the pipeline enrichment step — read from parquet.
-            is_stalled         = bool(r_df['is_stalled'].iloc[0])   if 'is_stalled'    in r_df.columns else False
-            is_asm_review      = bool(r_df['is_asm_review'].iloc[0]) if 'is_asm_review' in r_df.columns else False
-            is_blocked         = bool(r_df['is_blocked'].iloc[0])    if 'is_blocked'    in r_df.columns else False
+            is_stalled         = bool(r_df['is_stalled'].iloc[0])      if 'is_stalled'       in r_df.columns else False
+            is_asm_review      = bool(r_df['is_asm_review'].iloc[0])   if 'is_asm_review'    in r_df.columns else False
+            is_blocked         = bool(r_df['is_blocked'].iloc[0])      if 'is_blocked'       in r_df.columns else False
+            has_seq_winner     = bool(r_df['has_seq_winner'].iloc[0])  if 'has_seq_winner'   in r_df.columns else False
             _draft_mask        = r_df['data_source'].eq('BIOS_DRAFT') if 'data_source' in r_df.columns else pd.Series(False, index=r_df.index)
             has_real_workorders = not r_df[
                 r_df['workorder_id'].notna()
@@ -2881,6 +2884,7 @@ def render_all_projects_dashboard(
                 if not has_real_workorders: count_planned += 1
                 elif is_stalled: count_stalled += 1; stalled_reqs.add(rid)
                 if is_asm_review: count_asm_review += 1; asm_review_reqs.add(rid)
+                if has_seq_winner: seq_winner_reqs.add(rid)
                 elif is_blocked: count_blocked += 1
                 else:
                     is_ship_ready = False
@@ -3351,7 +3355,8 @@ def render_all_projects_dashboard(
             for rid, r_df in active_req_list:
                 is_stalled_req = rid in stalled_reqs
                 is_asm_review_req = rid in asm_review_reqs
-                _active_parts.append(render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req))
+                is_seq_winner_req = rid in seq_winner_reqs
+                _active_parts.append(render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req, is_seq_winner_req))
             html += "".join(_active_parts)
             html += "</details>"
         if new_req_list:

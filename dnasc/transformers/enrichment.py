@@ -202,11 +202,12 @@ class EnrichmentTransformer:
                 stock_to_req[sid] = {'req_id': row.get('req_id'), 'wo_type': row.get('type')}
 
         # ── Per-request computation ───────────────────────────────────
-        req_stage       : dict[str, str]  = {}
-        req_is_stalled  : dict[str, bool] = {}
-        req_is_asm_review: dict[str, bool] = {}
-        req_is_finished : dict[str, bool] = {}
-        req_is_blocked  : dict[str, bool] = {}
+        req_stage         : dict[str, str]  = {}
+        req_is_stalled    : dict[str, bool] = {}
+        req_is_asm_review : dict[str, bool] = {}
+        req_is_finished   : dict[str, bool] = {}
+        req_is_blocked    : dict[str, bool] = {}
+        req_has_seq_winner: dict[str, bool] = {}
 
         for req_id, r_df in df.groupby('req_id', dropna=True):
             status = str(
@@ -273,20 +274,36 @@ class EnrichmentTransformer:
                 and asm_rows_act['visual_status'].isin(['READY', 'WAITING']).any()
             )
 
+            # seq winner: any workorder has ≥1 seq-confirmed colony, but no LSP workorder
+            # exists yet — flags that a winner is in hand but hasn't been acted on.
+            # Suppressed once an LSP is created (someone already picked it up).
+            _seq_col = r_df.get('seq_confirmed') if 'seq_confirmed' in r_df.columns else None
+            _has_lsp = 'lsp_workorder' in active_rows['type'].values
+            req_has_seq_winner[req_id] = (
+                has_real_workorders
+                and not is_finished
+                and status != 'CANCELED'
+                and not _has_lsp
+                and _seq_col is not None
+                and pd.to_numeric(_seq_col, errors='coerce').fillna(0).gt(0).any()
+            )
+
             req_stage[req_id] = _infer_stage(
                 r_df, active_rows, is_stalled, has_real_workorders,
                 status, is_finished, global_parts_by_stock, stock_to_req,
             )
 
         # ── Broadcast back to all rows ────────────────────────────────
-        df['stage']         = df['req_id'].map(req_stage)
-        df['is_stalled']    = df['req_id'].map(req_is_stalled).fillna(False)
-        df['is_asm_review'] = df['req_id'].map(req_is_asm_review).fillna(False)
-        df['is_finished']   = df['req_id'].map(req_is_finished).fillna(False)
-        df['is_blocked']    = df['req_id'].map(req_is_blocked).fillna(False)
+        df['stage']            = df['req_id'].map(req_stage)
+        df['is_stalled']       = df['req_id'].map(req_is_stalled).fillna(False)
+        df['is_asm_review']    = df['req_id'].map(req_is_asm_review).fillna(False)
+        df['is_finished']      = df['req_id'].map(req_is_finished).fillna(False)
+        df['is_blocked']       = df['req_id'].map(req_is_blocked).fillna(False)
+        df['has_seq_winner']   = df['req_id'].map(req_has_seq_winner).fillna(False)
 
         log.info(
-            "Enrichment complete: %d requests → %d stalled, %d asm-review",
+            "Enrichment complete: %d requests → %d stalled, %d asm-review, %d seq-winner",
             len(req_stage), sum(req_is_stalled.values()), sum(req_is_asm_review.values()),
+            sum(req_has_seq_winner.values()),
         )
         return df
