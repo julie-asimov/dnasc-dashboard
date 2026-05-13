@@ -19,6 +19,7 @@ Adds these columns to the parquet:
 from __future__ import annotations
 import numpy as np
 import pandas as pd
+from datetime import datetime, timezone, timedelta
 
 from dnasc.logger import get_logger
 
@@ -202,12 +203,22 @@ class EnrichmentTransformer:
                 stock_to_req[sid] = {'req_id': row.get('req_id'), 'wo_type': row.get('type')}
 
         # ── Per-request computation ───────────────────────────────────
-        req_stage         : dict[str, str]  = {}
-        req_is_stalled    : dict[str, bool] = {}
-        req_is_asm_review : dict[str, bool] = {}
-        req_is_finished   : dict[str, bool] = {}
-        req_is_blocked    : dict[str, bool] = {}
-        req_has_seq_winner: dict[str, bool] = {}
+        req_stage             : dict[str, str]  = {}
+        req_is_stalled        : dict[str, bool] = {}
+        req_is_asm_review     : dict[str, bool] = {}
+        req_is_finished       : dict[str, bool] = {}
+        req_is_blocked        : dict[str, bool] = {}
+        req_has_seq_winner    : dict[str, bool] = {}
+        req_has_order_pending : dict[str, bool] = {}
+
+        _ORDER_PROTOCOLS = frozenset({'Synthesis Order', 'Order Oligos'})
+        _ORDER_PARTS_TYPES = frozenset({
+            'syn_part_synthesis_workorder',
+            'oligo_synthesis_workorder',
+            'plasmid_synthesis_workorder',
+        })
+        _ORDER_THRESHOLD = timedelta(hours=4)
+        _now = datetime.now(timezone.utc)
 
         for req_id, r_df in df.groupby('req_id', dropna=True):
             status = str(
@@ -303,22 +314,43 @@ class EnrichmentTransformer:
                 and pd.to_numeric(_seq_col, errors='coerce').fillna(0).gt(0).any()
             )
 
+            # order pending: any ordering-step part (synpart/plasmid/oligo) stuck in
+            # Synthesis Order or Order Oligos (RD/RU) for > 4 hours
+            _order_pending = False
+            if has_real_workorders and not is_finished and status != 'CANCELED':
+                parts_rows = active_rows[active_rows['type'].isin(_ORDER_PARTS_TYPES)]
+                for _, _pr in parts_rows.iterrows():
+                    _active = _active_protocols(_pr)
+                    if _active & _ORDER_PROTOCOLS:
+                        _created = _pr.get('wo_created_at')
+                        try:
+                            _created = pd.Timestamp(_created)
+                            if _created.tzinfo is None:
+                                _created = _created.tz_localize('UTC')
+                            if (_now - _created.to_pydatetime()) > _ORDER_THRESHOLD:
+                                _order_pending = True
+                                break
+                        except Exception:
+                            pass
+            req_has_order_pending[req_id] = _order_pending
+
             req_stage[req_id] = _infer_stage(
                 r_df, active_rows, is_stalled, has_real_workorders,
                 status, is_finished, global_parts_by_stock, stock_to_req,
             )
 
         # ── Broadcast back to all rows ────────────────────────────────
-        df['stage']            = df['req_id'].map(req_stage)
-        df['is_stalled']       = df['req_id'].map(req_is_stalled).fillna(False)
-        df['is_asm_review']    = df['req_id'].map(req_is_asm_review).fillna(False)
-        df['is_finished']      = df['req_id'].map(req_is_finished).fillna(False)
-        df['is_blocked']       = df['req_id'].map(req_is_blocked).fillna(False)
-        df['has_seq_winner']   = df['req_id'].map(req_has_seq_winner).fillna(False)
+        df['stage']               = df['req_id'].map(req_stage)
+        df['is_stalled']          = df['req_id'].map(req_is_stalled).fillna(False)
+        df['is_asm_review']       = df['req_id'].map(req_is_asm_review).fillna(False)
+        df['is_finished']         = df['req_id'].map(req_is_finished).fillna(False)
+        df['is_blocked']          = df['req_id'].map(req_is_blocked).fillna(False)
+        df['has_seq_winner']      = df['req_id'].map(req_has_seq_winner).fillna(False)
+        df['has_order_pending']   = df['req_id'].map(req_has_order_pending).fillna(False)
 
         log.info(
-            "Enrichment complete: %d requests → %d stalled, %d asm-review, %d seq-winner",
+            "Enrichment complete: %d requests → %d stalled, %d asm-review, %d seq-winner, %d order-pending",
             len(req_stage), sum(req_is_stalled.values()), sum(req_is_asm_review.values()),
-            sum(req_has_seq_winner.values()),
+            sum(req_has_seq_winner.values()), sum(req_has_order_pending.values()),
         )
         return df

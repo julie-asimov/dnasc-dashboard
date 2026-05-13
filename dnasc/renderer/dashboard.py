@@ -1060,7 +1060,7 @@ def render_all_projects_dashboard(
     # =========================================================================
     # 3. HELPER: RENDER SINGLE REQUEST
     # =========================================================================
-    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False, has_seq_winner=False):
+    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False, has_seq_winner=False, has_order_pending=False):
         html = []
         construct = req_df['construct_name'].iloc[0] or "Unknown Construct"
         req_status = req_df['request_status'].iloc[0] if 'request_status' in req_df.columns else "Unknown"
@@ -1274,6 +1274,7 @@ def render_all_projects_dashboard(
         stalled_badge = '<span class="badge" style="background:#be185d; color:white; border:2px solid #9f1239; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span>' if is_stalled else ""
         asm_review_badge = '<span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span>' if is_asm_review else ""
         seq_winner_badge = '<span class="badge" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span>' if has_seq_winner else ""
+        order_pending_badge = '<span class="badge" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span>' if has_order_pending else ""
 
         ready_to_ship_time = None
         final_release_time = None
@@ -1353,6 +1354,7 @@ def render_all_projects_dashboard(
                     {stalled_badge}
                     {asm_review_badge}
                     {seq_winner_badge}
+                    {order_pending_badge}
                 </div>
             </div>
         """)
@@ -2872,7 +2874,8 @@ def render_all_projects_dashboard(
             is_stalled         = bool(r_df['is_stalled'].iloc[0])      if 'is_stalled'       in r_df.columns else False
             is_asm_review      = bool(r_df['is_asm_review'].iloc[0])   if 'is_asm_review'    in r_df.columns else False
             is_blocked         = bool(r_df['is_blocked'].iloc[0])      if 'is_blocked'       in r_df.columns else False
-            has_seq_winner     = bool(r_df['has_seq_winner'].iloc[0])  if 'has_seq_winner'   in r_df.columns else False
+            has_seq_winner     = bool(r_df['has_seq_winner'].iloc[0])     if 'has_seq_winner'    in r_df.columns else False
+            has_order_pending  = bool(r_df['has_order_pending'].iloc[0]) if 'has_order_pending' in r_df.columns else False
             _draft_mask        = r_df['data_source'].eq('BIOS_DRAFT') if 'data_source' in r_df.columns else pd.Series(False, index=r_df.index)
             has_real_workorders = not r_df[
                 r_df['workorder_id'].notna()
@@ -3373,8 +3376,9 @@ def render_all_projects_dashboard(
             for rid, r_df in active_req_list:
                 is_stalled_req = rid in stalled_reqs
                 is_asm_review_req = rid in asm_review_reqs
-                is_seq_winner_req = rid in seq_winner_reqs
-                _active_parts.append(render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req, is_seq_winner_req))
+                is_seq_winner_req    = rid in seq_winner_reqs
+                is_order_pending_req = bool(r_df['has_order_pending'].iloc[0]) if 'has_order_pending' in r_df.columns else False
+                _active_parts.append(render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req, is_seq_winner_req, is_order_pending_req))
             html += "".join(_active_parts)
             html += "</details>"
         if new_req_list:
