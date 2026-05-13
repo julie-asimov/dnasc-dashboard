@@ -1956,6 +1956,22 @@ def render_all_projects_dashboard(
                     html.append(f"""<tr><td colspan="8" style="padding:4px 10px; background:#f1f5f9; border-top:2px solid #cbd5e1; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.04em;">{_alabel} — Attempt {int(_attempt_num)} of {_attempt_total}</span><span style="margin-left:8px; font-size:10px; font-weight:600; color:{_astatus_color};">{_status_icon}{_astatus}</span></td></tr>""")
                 depth = row.get('tree_depth', 0)
                 row_class = f"tree-row-{min(depth, 2)}"  # CSS only has 0, 1, 2
+                _row_order_style = ""
+                if row['type'] in ('syn_part_synthesis_workorder', 'oligo_synthesis_workorder', 'plasmid_synthesis_workorder'):
+                    _rpn = row.get('protocol_name'); _rps = row.get('operation_state')
+                    if isinstance(_rpn, np.ndarray): _rpn = _rpn.tolist()
+                    if isinstance(_rps, np.ndarray): _rps = _rps.tolist()
+                    _row_ap = {p for p, s in zip(_rpn, _rps) if s in ('RD', 'RU')} if isinstance(_rpn, list) and isinstance(_rps, list) else set()
+                    if _row_ap & {'Synthesis Order', 'Order Oligos'}:
+                        try:
+                            from datetime import timedelta as _otd
+                            _rc = pd.Timestamp(row.get('wo_created_at'))
+                            if _rc.tzinfo is None:
+                                _rc = _rc.tz_localize('UTC')
+                            if (datetime.now(pytz.UTC) - _rc.to_pydatetime()) > _otd(hours=4):
+                                _row_order_style = ' style="background:#faf5ff !important; border-left:3px solid #7c3aed !important;"'
+                        except Exception:
+                            pass
                 spacer = ""
                 if depth >= 1:
                     indent = 20 * (depth - 1)  # 0px for depth 1, 20px for depth 2, 40px for depth 3, etc.
@@ -2579,7 +2595,7 @@ def render_all_projects_dashboard(
                     _status_cell += f'<div class="bios-override-label">BIOS: {_bios_raw}</div>'
                 _fulfills_attr = "1" if row.get('fulfills_request') else "0"
                 _partner_attr = "1" if str(row.get('for_partner', '')).lower() == 'true' else "0"
-                html.append(f"""<tr class="{row_class}" data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{"".join(details_info)}</td><td>{"".join(pipeline_html)}</td></tr>""")
+                html.append(f"""<tr class="{row_class}"{_row_order_style} data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{"".join(details_info)}</td><td>{"".join(pipeline_html)}</td></tr>""")
             html.append("</tbody></table></div></div>")
         html.append("</div></div>")
         return "".join(html)
