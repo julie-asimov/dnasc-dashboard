@@ -278,12 +278,18 @@ class EnrichmentTransformer:
             # no LSP workorder exists yet — winner in hand, not yet acted on.
             # Restricted to root STOCK_ID to avoid foreign-construct inputs (e.g.
             # a backbone Gibson pAI-21680 used as part of pAI-21430) triggering the flag.
-            _root_stock = (
-                r_df.loc[r_df['workorder_id'] == r_df['root_work_order_id'], 'STOCK_ID']
-                .dropna().iloc[0]
-                if not r_df.loc[r_df['workorder_id'] == r_df['root_work_order_id'], 'STOCK_ID'].dropna().empty
-                else None
-            )
+            # The request's primary STOCK_ID is whichever pAI appears most frequently
+            # among ASM-type self-rooted workorders. Backbone Gibsons (pAI-21680 etc.)
+            # are each one row; the actual construct root appears once per attempt.
+            _self_roots = r_df[r_df['workorder_id'] == r_df['root_work_order_id']]
+            _asm_root_stocks = _self_roots[_self_roots['type'].isin(_ASM_TYPES)]['STOCK_ID'].dropna()
+            if not _asm_root_stocks.empty:
+                _root_stock = _asm_root_stocks.value_counts().idxmax()
+            elif not _self_roots.empty:
+                _root_stock = _self_roots['STOCK_ID'].dropna().value_counts().idxmax()
+            else:
+                _root_stock = None
+            # Only check the primary construct's workorders, not shared backbone Gibsons
             _root_rows = r_df[r_df['STOCK_ID'] == _root_stock] if _root_stock else r_df
             _seq_col = _root_rows['seq_confirmed'] if 'seq_confirmed' in _root_rows.columns else None
             _has_lsp = 'lsp_workorder' in active_rows['type'].values
