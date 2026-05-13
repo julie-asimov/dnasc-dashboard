@@ -283,10 +283,11 @@ class EnrichmentTransformer:
             # are each one row; the actual construct root appears once per attempt.
             _self_roots = r_df[r_df['workorder_id'] == r_df['root_work_order_id']]
             _asm_root_stocks = _self_roots[_self_roots['type'].isin(_ASM_TYPES)]['STOCK_ID'].dropna()
+            _fallback_stocks = _self_roots['STOCK_ID'].dropna()
             if not _asm_root_stocks.empty:
                 _root_stock = _asm_root_stocks.value_counts().idxmax()
-            elif not _self_roots.empty:
-                _root_stock = _self_roots['STOCK_ID'].dropna().value_counts().idxmax()
+            elif not _fallback_stocks.empty:
+                _root_stock = _fallback_stocks.value_counts().idxmax()
             else:
                 _root_stock = None
             # Only check the primary construct's workorders, not shared backbone Gibsons
