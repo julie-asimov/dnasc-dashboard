@@ -292,7 +292,7 @@ class BIOSExtractor:
         WHERE req.created_at >= '{date_filter}'
           AND NOT EXISTS (
               SELECT 1 FROM `{proj}.bios__src.workorder` w
-              WHERE w.request_id = req.id AND w.status != 'DRAFT'
+              WHERE w.request_id = req.id AND w.status NOT IN ('DRAFT', 'CANCELED')
           )
         """
 
