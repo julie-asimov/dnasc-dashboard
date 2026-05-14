@@ -656,6 +656,15 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
             root_map = root_rows.set_index("root_work_order_id")[col].to_dict()
             df[col] = df[col].fillna(df["root_work_order_id"].map(root_map))
 
+    # experiment_name: also overwrite non-null stale values. Cross-experiment
+    # syn_parts (shared across assembly designs) keep their original
+    # experiment_name after req_id is assigned to a different experiment.
+    # root_map still holds the experiment_name mapping from the loop above.
+    if "experiment_name" in df.columns:
+        df["experiment_name"] = (
+            df["root_work_order_id"].map(root_map).fillna(df["experiment_name"])
+        )
+
     # SYNTHETIC_LSP orphans have no real request of their own — always force
     # their req_id/experiment_name from the root, overriding whatever bios_lookup
     # may have set (e.g. a wave5 orphan incorrectly inheriting a wave6 req_id).

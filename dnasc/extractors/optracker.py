@@ -90,6 +90,12 @@ class OpTrackerExtractor:
           WHERE p.name = 'Synthesis Order'
             AND REGEXP_CONTAINS(j.step_groups, r'"tag":\\s*"completion-toggle"')
             AND NOT REGEXP_CONTAINS(j.step_groups, r'"tag":\\s*"completion-toggle"[^}}]*"user_input":\\s*true')
+          UNION DISTINCT
+          -- Pattern 5: NGS jobs where samples were missing at gather step — user chose
+          -- "Samples missing, fail job and send operations back to queue" (user_input=1).
+          SELECT id AS job_id
+          FROM `{proj}.op_tracker__src.op_tracker_api_job`
+          WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"gather-samples-success-or-fail-mode"[^}}]*"user_input":\\s*1')
         ),
         all_operations AS (
           SELECT

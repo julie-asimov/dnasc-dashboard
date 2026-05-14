@@ -527,6 +527,14 @@ def populate_synthetic_optracker_batch(
     plate_syn_pairs = plates_df[["plate_id", "synthetic_id"]].drop_duplicates()
     plate_ids_str   = ",".join(str(p) for p in plates_df["plate_id"].unique())
 
+    # Fetch kicked-back job IDs once so Pass 1 results can be filtered before Pass 2.
+    _kb_df = client.query(f"""
+        SELECT id AS job_id
+        FROM `{project_id}.op_tracker__src.op_tracker_api_job`
+        WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"gather-samples-success-or-fail-mode"[^}}]*"user_input":\\s*1')
+    """).to_dataframe()
+    _kicked_back_job_ids = set(_kb_df["job_id"].dropna().astype(int).tolist())
+
     # Pass 1a and 1b run in parallel — both depend only on plate_ids_str / plate_syn_pairs
     def _fetch_ops_1a():
         df = client.query(f"""
@@ -591,6 +599,10 @@ def populate_synthetic_optracker_batch(
         .dropna(subset=["synthetic_id"])
         .drop_duplicates(subset=["op_id", "synthetic_id"])
     )
+
+    # Remove ops from kicked-back jobs before Pass 2 so their job IDs don't propagate.
+    if _kicked_back_job_ids:
+        ops_pass1 = ops_pass1[~ops_pass1["job_id"].isin(_kicked_back_job_ids)]
 
     # Pass 2: job-level expansion — catches Rearray in the same job as Miniprep/Quant
     job_ids = ops_pass1["job_id"].dropna().unique()
@@ -1157,7 +1169,12 @@ def resolve_downstream_plates(
     # Date filter avoids scanning all historical ops — only fetch from pipeline cutoff.
     date_filter = PipelineConfig.DATE_FILTER
     raw_ops = client.query(f"""
-    WITH all_ops AS (
+    WITH kicked_back_jobs AS (
+      SELECT id AS job_id
+      FROM `{project_id}.op_tracker__src.op_tracker_api_job`
+      WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"gather-samples-success-or-fail-mode"[^}}]*"user_input":\\s*1')
+    ),
+    all_ops AS (
         SELECT
             o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready,
             p.name AS protocol_name,
@@ -1176,6 +1193,7 @@ def resolve_downstream_plates(
         WHERE o.state IN ('SC', 'FA', 'RD', 'RU', 'CA')
           AND p.name IN ('Rearray 96 to 384', 'DNA Quantification', 'NGS Sequence Confirmation')
           AND o.date_created >= '{date_filter}'
+          AND (o.job_id IS NULL OR o.job_id NOT IN (SELECT job_id FROM kicked_back_jobs))
         GROUP BY 1,2,3,4,5,6,7
     )
     SELECT a.*,

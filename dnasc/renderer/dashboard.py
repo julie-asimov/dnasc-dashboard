@@ -1271,10 +1271,10 @@ def render_all_projects_dashboard(
         now = datetime.now(pytz.timezone('US/Eastern'))
         is_done = str(req_status).upper() in ['FULFILLED', 'SUCCEEDED', 'CANCELED']
 
-        stalled_badge = '<span class="badge" style="background:#be185d; color:white; border:2px solid #9f1239; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span>' if is_stalled else ""
-        asm_review_badge = '<span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span>' if is_asm_review else ""
-        seq_winner_badge = '<span class="badge" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span>' if has_seq_winner else ""
-        order_pending_badge = '<span class="badge" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span>' if has_order_pending else ""
+        stalled_badge = '<span class="badge" title="No pipeline progress detected — may need intervention" style="background:#be185d; color:white; border:2px solid #9f1239; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span>' if is_stalled else ""
+        asm_review_badge = '<span class="badge" title="Assembly needs review before proceeding" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span>' if is_asm_review else ""
+        seq_winner_badge = '<span class="badge" title="A sequencing winner has been identified — ready for LSP" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span>' if has_seq_winner else ""
+        order_pending_badge = '<span class="badge" title="Parts order submitted to synthesis vendor — waiting on delivery" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span>' if has_order_pending else ""
 
         ready_to_ship_time = None
         final_release_time = None
@@ -2795,10 +2795,10 @@ def render_all_projects_dashboard(
         safe_exp_id = "exp_" + hashlib.md5(experiment_name.encode()).hexdigest()
         now = datetime.now(pytz.timezone('US/Eastern'))
         count_fulfilled = 0; count_canceled = 0; count_new = 0; count_planned = 0
-        count_blocked = 0; count_stalled = 0; count_in_lsp = 0; count_asm_review = 0
+        count_blocked = 0; count_stalled = 0; count_in_lsp = 0; count_asm_review = 0; count_seq_winner = 0; count_order_pending = 0
         count_in_assembly = 0; count_active_waiting = 0; count_ship_ready = 0
         new_req_list = []; active_req_list = []; fulfilled_req_list = []; canceled_req_list = []
-        stalled_reqs = set(); asm_review_reqs = set(); seq_winner_reqs = set(); production_tats = []; total_tats = []
+        stalled_reqs = set(); asm_review_reqs = set(); seq_winner_reqs = set(); order_pending_reqs = set(); production_tats = []; total_tats = []
         _root_only = project_df[project_df['workorder_id'] == project_df['root_work_order_id']]
         _ptr_source = _root_only if not _root_only.empty else project_df
         has_ptr = _ptr_source['for_partner'].astype(str).str.lower().str.contains('true').any()
@@ -2921,7 +2921,8 @@ def render_all_projects_dashboard(
                 if not has_real_workorders: count_planned += 1
                 elif is_stalled: count_stalled += 1; stalled_reqs.add(rid)
                 if is_asm_review: count_asm_review += 1; asm_review_reqs.add(rid)
-                if has_seq_winner: seq_winner_reqs.add(rid)
+                if has_seq_winner: count_seq_winner += 1; seq_winner_reqs.add(rid)
+                if has_order_pending: count_order_pending += 1; order_pending_reqs.add(rid)
                 elif is_blocked: count_blocked += 1
                 else:
                     is_ship_ready = False
@@ -3339,7 +3340,8 @@ def render_all_projects_dashboard(
           </div>
         </div>"""
 
-        db_active = str(project_df.get('experiment_active', ['true']).iloc[0]).lower() in ['true', '1', 't']
+        _ea_vals = project_df['experiment_active'].dropna() if 'experiment_active' in project_df.columns else pd.Series([], dtype=object)
+        db_active = bool(_ea_vals.mode().iloc[0]) if not _ea_vals.empty else True
         exp_header_gradient = "linear-gradient(135deg, #7c3aed 0%, #be185d 100%)" if has_ptr else "linear-gradient(135deg, #1e3a5f 0%, #0891b2 100%)"
 
         _exp_emails_raw = [str(e).strip() for e in project_df['submitter_email'].dropna().unique() if str(e).strip() not in ('', 'nan', 'none', 'None')] if 'submitter_email' in project_df.columns else []
@@ -3370,15 +3372,17 @@ def render_all_projects_dashboard(
                         <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week, stage_items, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)}</div>
                     </div>
                     <div class="header-stats" style="margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap;">
-                        {f'<span class="stat-item" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
-                        {f'<span class="stat-item" style="background:rgba(34,197,94,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_ship_ready}</span> <span style="font-size:10px;">Ship Ready</span></span>' if count_ship_ready > 0 else ''}
-                        {f'<span class="stat-item" style="background:rgba(8,145,178,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_in_lsp}</span> <span style="font-size:10px;">In LSP</span></span>' if count_in_lsp > 0 else ''}
-                        {f'<span class="stat-item" style="background:rgba(124,58,237,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_in_assembly}</span> <span style="font-size:10px;">In Assembly</span></span>' if count_in_assembly > 0 else ''}
-                        {f'<span class="stat-item" style="background:rgba(249,115,22,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_active_waiting}</span> <span style="font-size:10px;">Waiting</span></span>' if count_active_waiting > 0 else ''}
-                        {f'<span class="stat-item" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">⚠️ {count_stalled}</span> <span style="font-size:10px;">Stalled</span></span>' if count_stalled > 0 else ''}
-                        {f'<span class="stat-item" style="background:rgba(217,119,6,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🔬 {count_asm_review}</span> <span style="font-size:10px;">ASM Review</span></span>' if count_asm_review > 0 else ''}
-                        {f'<span class="stat-item" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_blocked}</span> <span style="font-size:10px;">Blocked</span></span>' if count_blocked > 0 else ''}
-                        {f'<span class="stat-item" style="background:rgba(100,116,139,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_canceled}</span> <span style="font-size:10px;">Canceled</span></span>' if count_canceled > 0 else ''}
+                        {f'<span class="stat-item" title="Requests submitted but no work has started yet" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
+                        {f'<span class="stat-item" title="LSP prep complete — ready to ship" style="background:rgba(34,197,94,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_ship_ready}</span> <span style="font-size:10px;">Ship Ready</span></span>' if count_ship_ready > 0 else ''}
+                        {f'<span class="stat-item" title="Requests actively in LSP processing" style="background:rgba(8,145,178,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_in_lsp}</span> <span style="font-size:10px;">In LSP</span></span>' if count_in_lsp > 0 else ''}
+                        {f'<span class="stat-item" title="Requests actively in assembly (GG/Gibson)" style="background:rgba(124,58,237,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_in_assembly}</span> <span style="font-size:10px;">In Assembly</span></span>' if count_in_assembly > 0 else ''}
+                        {f'<span class="stat-item" title="Requests waiting on parts or upstream dependencies" style="background:rgba(249,115,22,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_active_waiting}</span> <span style="font-size:10px;">Waiting</span></span>' if count_active_waiting > 0 else ''}
+                        {f'<span class="stat-item" title="No pipeline progress detected — may need intervention" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">⚠️ {count_stalled}</span> <span style="font-size:10px;">Stalled</span></span>' if count_stalled > 0 else ''}
+                        {f'<span class="stat-item" title="Assembly needs review before proceeding" style="background:rgba(217,119,6,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🔬 {count_asm_review}</span> <span style="font-size:10px;">ASM Review</span></span>' if count_asm_review > 0 else ''}
+                        {f'<span class="stat-item" title="A sequencing winner has been identified — ready for LSP" style="background:rgba(5,150,105,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🏆 {count_seq_winner}</span> <span style="font-size:10px;">Seq Winner</span></span>' if count_seq_winner > 0 else ''}
+                        {f'<span class="stat-item" title="Parts order submitted to synthesis vendor — waiting on delivery" style="background:rgba(124,58,237,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">⏳ {count_order_pending}</span> <span style="font-size:10px;">Order Pending</span></span>' if count_order_pending > 0 else ''}
+                        {f'<span class="stat-item" title="Assembly is blocked — upstream dependency unresolved" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_blocked}</span> <span style="font-size:10px;">Blocked</span></span>' if count_blocked > 0 else ''}
+                        {f'<span class="stat-item" title="Requests canceled" style="background:rgba(100,116,139,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_canceled}</span> <span style="font-size:10px;">Canceled</span></span>' if count_canceled > 0 else ''}
                     </div>
                 </div>"""
 
@@ -3386,7 +3390,7 @@ def render_all_projects_dashboard(
             html += f"""
                 <details>
                     <summary class="group-header in-progress">
-                        <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''}{f' - 🔬 {count_asm_review} ASM Review' if count_asm_review > 0 else ''})
+                        <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''}{f' - 🔬 {count_asm_review} ASM Review' if count_asm_review > 0 else ''}{f' - 🏆 {count_seq_winner} Seq Winner' if count_seq_winner > 0 else ''}{f' - ⏳ {count_order_pending} Order Pending' if count_order_pending > 0 else ''})
                     </summary>"""
             _active_parts = []
             for rid, r_df in active_req_list:
