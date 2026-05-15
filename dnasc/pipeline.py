@@ -736,9 +736,19 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
         req_ts = pd.to_datetime(df["request_created_at"],  utc=True, errors="coerce")
         # Restrict to LSP workorders only — Gibson/Transformation rows are always
         # created FOR their request, not reused across experiments like LSP batches.
+        # Exempt lsp_workorders with a direct wo.request_id link (lsp_own_request_id
+        # not null): LSP Refill batches are done before the formal refill request is
+        # submitted, so wo_created_at < request_created_at is intentional, not spurious.
+        # The disqualifier is only for inherited req_ids (via root-based fill).
+        direct_link = (
+            df["lsp_own_request_id"].notna()
+            if "lsp_own_request_id" in df.columns
+            else pd.Series(False, index=df.index)
+        )
         temporal_mismatch = (
             wo_ts.notna() & req_ts.notna() & (wo_ts < req_ts) &
-            (df["type"] == "lsp_workorder")
+            (df["type"] == "lsp_workorder") &
+            ~direct_link
         )
         df.loc[temporal_mismatch, "req_id"]          = None
         df.loc[temporal_mismatch, "experiment_name"] = None
@@ -758,9 +768,20 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
     # syn_parts (shared across assembly designs) keep their original
     # experiment_name after req_id is assigned to a different experiment.
     # root_map still holds the experiment_name mapping from the loop above.
+    # Exception: lsp_workorders with a direct wo.request_id link (lsp_own_request_id
+    # not null) must keep their own request's experiment_name — overwriting from
+    # the root's experiment (e.g. A581 BMR001 Gibson) would displace LSP Refill
+    # entries from the "LSP Refill Requests" experiment.
     if "experiment_name" in df.columns:
-        df["experiment_name"] = (
-            df["root_work_order_id"].map(root_map).fillna(df["experiment_name"])
+        direct_lsp = (
+            df["lsp_own_request_id"].notna()
+            if "lsp_own_request_id" in df.columns
+            else pd.Series(False, index=df.index)
+        )
+        from_root = df["root_work_order_id"].map(root_map)
+        df["experiment_name"] = df["experiment_name"].where(
+            direct_lsp,
+            from_root.fillna(df["experiment_name"])
         )
 
     # SYNTHETIC_LSP orphans have no real request of their own — always force
