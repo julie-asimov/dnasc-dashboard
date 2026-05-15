@@ -230,6 +230,56 @@ class LIMSExtractor:
         return result
 
     @staticmethod
+    def get_repick_plates(workorder_cutoffs: dict) -> pd.DataFrame:
+        """
+        For GG/Gibson/Transformation workorders that have FAILED NGS, detect
+        manually-created LIMS miniprep plates made AFTER the NGS failure timestamp.
+        These represent a repick of colonies from the original agar plate.
+
+        workorder_cutoffs: {workorder_id: ngs_fa_timestamp_str}
+        Returns DataFrame with (workorder_id, plate_id, plate_created_at).
+        """
+        if not workorder_cutoffs:
+            return pd.DataFrame()
+
+        proj = PipelineConfig.PROJECT_ID
+        client = bigquery.Client(project=proj)
+
+        ids_upper = {k.upper(): v for k, v in workorder_cutoffs.items()}
+        min_cutoff = min(ids_upper.values())
+        ids_str = "', '".join(ids_upper.keys())
+
+        query = f"""
+        SELECT DISTINCT
+            UPPER(COALESCE(d.process_id, g.process_id, a.process_id)) AS workorder_id,
+            b.id AS plate_id,
+            b.protocol AS plate_protocol,
+            b.created_at AS plate_created_at,
+            COALESCE(d.colony_number, g.colony_number) AS colony_number
+        FROM `{proj}.lims__src.well` a
+        JOIN `{proj}.lims__src.plate` b ON a.plate_id = b.id
+        LEFT JOIN `{proj}.lims__src.well_content` c ON c.well_id = a.id
+        LEFT JOIN `{proj}.lims__src.plasmid_stock` d ON d.id = c.plasmid_stock_id
+        LEFT JOIN `{proj}.lims__src.strain` g ON g.id = c.strain_id
+        WHERE UPPER(COALESCE(d.process_id, g.process_id, a.process_id)) IN ('{ids_str}')
+          AND b.protocol IN ('Miniprep', 'Bank Overnights', 'Overnight Culture')
+          AND b.created_at > '{min_cutoff}'
+        """
+        df = client.query(query).to_dataframe()
+        if df.empty:
+            return pd.DataFrame()
+
+        # Filter per-workorder by its specific NGS FA cutoff
+        rows = []
+        for wo_id, cutoff in ids_upper.items():
+            sub = df[df['workorder_id'] == wo_id]
+            sub = sub[sub['plate_created_at'] > pd.Timestamp(cutoff, tz='UTC')]
+            if not sub.empty:
+                rows.append(sub)
+
+        return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+    @staticmethod
     def get_well_comments(workorder_ids: list) -> pd.DataFrame:
         """
         Pull non-null well comments from lims__src.well for the given workorder IDs.

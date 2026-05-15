@@ -275,7 +275,7 @@ def render_all_projects_dashboard(
                 'FA': {'state': 'Failed', 'class': 'failed'},
                 'RU': {'state': 'Running', 'class': 'running'},
                 'RD': {'state': 'Ready', 'class': 'ready'},
-                'CA': {'state': 'Canceled', 'class': 'canceled'}
+                'CA': {'state': 'Canceled', 'class': 'canceled'},
             }
             state_info = state_map.get(state, {'state': 'Unknown', 'class': 'pending'})
 
@@ -326,6 +326,7 @@ def render_all_projects_dashboard(
         for op in queue_data:
             if op['state'] == 'Ready': return f"{op['queue']}: Ready"
             if op['state'] == 'Running': return f"{op['queue']}: Running"
+            if op['queue'] == 'Repick: Miniprep/Glycerol/Media': return f"{op['queue']}: In Progress"
         return None
 
     def format_type_label(type_str):
@@ -541,6 +542,7 @@ def render_all_projects_dashboard(
     .status-FAILED    { background: #fff1f5; color: #be185d; border: 1px solid #fecdd3; }
     .status-CANCELED  { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
     .status-RUNNING   { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .status-REPICK    { background: #ede9fe; color: #7c3aed; border: 1px solid #c4b5fd; }
     .status-LSP_RUNNING { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
     .status-IN_PROGRESS { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
     .status-READY     { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
@@ -583,6 +585,7 @@ def render_all_projects_dashboard(
     .t-dot.pending { background: #e5e5e7; }
     .t-dot.source { background: #6366f1; }
     .t-dot.canceled { background: #9ca3af; }
+    .t-dot.repick   { background: #7c3aed; }
     .t-content { flex-grow: 1; font-size: 8px; }
     .t-header { display: flex; justify-content: space-between; align-items: center; }
     .t-name { font-weight: 700; color: #1d1d1f; white-space: nowrap; font-size: 9px; }
@@ -622,6 +625,12 @@ def render_all_projects_dashboard(
         border: 1px solid #334155; border-radius: 4px; padding: 5px 8px; z-index: 9999; min-width: 220px;
         box-shadow: 0 4px 12px rgba(0,0,0,0.4); pointer-events: none; }
     .missing-tip-wrap:hover .missing-tip { display: block; }
+    .badge-tip-wrap { position: relative; display: inline-block; }
+    .badge-tip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+        background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; padding: 5px 10px;
+        font-size: 11px; font-weight: 500; white-space: nowrap; z-index: 9999;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4); pointer-events: none; }
+    .badge-tip-wrap:hover .badge-tip { display: block; }
     .missing-tip-req { font-family: monospace; font-size: 8px; color: #94a3b8; margin-bottom: 2px; }
     .missing-tip-exp { font-size: 9px; font-weight: 700; color: #e2e8f0; }
     .missing-tip-status { font-size: 8px; color: #be185d; font-weight: 600; margin-top: 2px; }
@@ -1271,10 +1280,10 @@ def render_all_projects_dashboard(
         now = datetime.now(pytz.timezone('US/Eastern'))
         is_done = str(req_status).upper() in ['FULFILLED', 'SUCCEEDED', 'CANCELED']
 
-        stalled_badge = '<span class="badge" title="No pipeline progress detected — may need intervention" style="background:#be185d; color:white; border:2px solid #9f1239; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span>' if is_stalled else ""
-        asm_review_badge = '<span class="badge" title="Assembly needs review before proceeding" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span>' if is_asm_review else ""
-        seq_winner_badge = '<span class="badge" title="A sequencing winner has been identified — ready for LSP" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span>' if has_seq_winner else ""
-        order_pending_badge = '<span class="badge" title="Parts order submitted to synthesis vendor — waiting on delivery" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span>' if has_order_pending else ""
+        stalled_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#be185d; color:white; border:2px solid #9f1239; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span><div class="badge-tip">No pipeline progress detected — may need intervention</div></div>' if is_stalled else ""
+        asm_review_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span><div class="badge-tip">Assembly needs review before proceeding</div></div>' if is_asm_review else ""
+        seq_winner_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span><div class="badge-tip">A sequencing winner has been identified — ready for LSP</div></div>' if has_seq_winner else ""
+        order_pending_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span><div class="badge-tip">Parts order submitted to synthesis vendor — waiting on delivery</div></div>' if has_order_pending else ""
 
         ready_to_ship_time = None
         final_release_time = None
@@ -2038,7 +2047,7 @@ def render_all_projects_dashboard(
                                 pid, proto = match.group(1), match.group(2).strip()
                                 if proto not in lims_plate_map: lims_plate_map[proto] = []
                                 if pid not in lims_plate_map[proto]: lims_plate_map[proto].append(pid)
-                step_keywords = {'Golden Gate Assembly': ['Golden Gate'], 'Gibson Assembly': ['Gibson'], 'STAR Transformation': ['Transformation', 'Agar'], 'Create Minipreps and Glycerol Stocks': ['Overnight', 'Miniprep', 'Glycerol'], 'Rearray 96 to 384': ['Rearray'], 'DNA Quantification': ['Quant', 'DNA'], 'NGS Sequence Confirmation': ['NGS', 'Sequence'], 'PCR': ['PCR'], 'LSP Receiving': ['LSP Receiving'], 'Manual: Miniprep/Glycerol/Media created': ['Overnight', 'Miniprep', 'Glycerol']}
+                step_keywords = {'Golden Gate Assembly': ['Golden Gate'], 'Gibson Assembly': ['Gibson'], 'STAR Transformation': ['Transformation', 'Agar'], 'Create Minipreps and Glycerol Stocks': ['Overnight', 'Miniprep', 'Glycerol'], 'Rearray 96 to 384': ['Rearray'], 'DNA Quantification': ['Quant', 'DNA'], 'NGS Sequence Confirmation': ['NGS', 'Sequence'], 'PCR': ['PCR'], 'LSP Receiving': ['LSP Receiving'], 'Manual: Miniprep/Glycerol/Media created': ['Overnight', 'Miniprep', 'Glycerol'], 'Repick: Miniprep/Glycerol/Media': ['Manual Repick']}
 
                 pipeline_html = ['<div class="timeline-container">']
                 if row['type'] == 'transformation_workorder':
@@ -2090,7 +2099,8 @@ def render_all_projects_dashboard(
                                     if (i + 1) % 3 == 0 and i < len(sorted_plates) - 1: tooltip_html += '<br>'
                                 tooltip_html += '</div></div>'
                             details_pills += f"""<div class="plate-hover-container"><span class="plate-trigger">{total_plates} Plates</span><div class="plate-popover">{tooltip_html}</div></div>"""
-                        pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot {item['class']}"></div><div class="t-content"><div class="t-header"><span class="t-name">{item['queue']}</span><span class="t-time">{time_str}</span></div><div class="t-details">{details_pills}</div></div></div>""")
+                        _dot_cls = "repick" if item['queue'] == 'Repick: Miniprep/Glycerol/Media' else item['class']
+                        pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot {_dot_cls}"></div><div class="t-content"><div class="t-header"><span class="t-name">{item['queue']}</span><span class="t-time">{time_str}</span></div><div class="t-details">{details_pills}</div></div></div>""")
                 else:
                     if lims_plate_map:
                         # Group all LIMS plates under a single manual entry with the same
@@ -2500,15 +2510,24 @@ def render_all_projects_dashboard(
                     _imaged   = row.get('imaged_colonies')
                     _pickable = row.get('pickable_colonies')
                     _picked   = row.get('picked_colonies')
+                    _n_repick = row.get('repick_total_colonies', 0)
+                    try: _n_repick = int(_n_repick) if pd.notna(_n_repick) else 0
+                    except Exception: _n_repick = 0
                     if any(pd.notna(v) for v in [_imaged, _pickable, _picked]):
                         # Colony counts (plain, no link wrapping)
-                        details_info.append(
+                        _grid = (
                             f"<div style='display:grid;grid-template-columns:58px 1fr;gap:1px 4px;margin-top:3px;'>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Imaged</span><span style='font-size:10px;color:#1e293b;'>{int(_imaged)}</span>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Pickable</span><span style='font-size:10px;color:#1e293b;'>{int(_pickable) if pd.notna(_pickable) else 0}</span>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Picked</span><span style='font-size:10px;color:#1e293b;'>{int(_picked) if pd.notna(_picked) else 0}</span>"
-                            f"</div>"
                         )
+                        if _n_repick > 0:
+                            _grid += (
+                                f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#7c3aed;'>Repick</span>"
+                                f"<span style='font-size:10px;color:#7c3aed;'>{_n_repick}</span>"
+                            )
+                        _grid += "</div>"
+                        details_info.append(_grid)
                         # Agar plate link — plate_id + alphanumeric well from colonypickingcounts
                         _cpid   = row.get('colony_plate_id')
                         _cwpos  = row.get('colony_well_position')
@@ -2542,7 +2561,7 @@ def render_all_projects_dashboard(
                         _tot = row.get('total_colonies')
                         if pd.isna(_tot) or int(_tot) == 0:
                             details_info.append(f'<br><span class="colony-badge" style="background:#fce7f3;color:#be185d;">0 colonies</span>')
-                    if row['visual_status'] in ['SUCCEEDED', 'FAILED'] or row['wo_status'] == 'FAILED':
+                    if row['visual_status'] in ['SUCCEEDED', 'FAILED'] or row['wo_status'] == 'FAILED' or _n_repick > 0:
                         tot = row.get('total_colonies'); seq = row.get('seq_confirmed')
                         if pd.notna(tot) and tot > 0:
                             tot = int(tot); seq = int(seq) if pd.notna(seq) else 0
@@ -2576,6 +2595,8 @@ def render_all_projects_dashboard(
                                     popover_content += f'<div class="popover-group"><div class="popover-title">{protocol_name}</div>{links}</div>'
                             if popover_content: details_info.append(f'<br><div class="plate-hover-container"><span class="colony-badge" style="background: {bg}; color: {color}; cursor:pointer;">{seq}/{tot} colonies seq confirmed</span><div class="plate-popover">{popover_content}</div></div>')
                             else: details_info.append(f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>')
+                            if _n_repick > 0:
+                                details_info.append(f'<br><span class="colony-badge" style="background:#ede9fe;color:#7c3aed;">Repick: 0/{_n_repick} colonies seq confirmed</span>')
                             if row.get('is_seq_rollback') is True or row.get('is_seq_rollback') == True:
                                 details_info.append(f'<br><span style="font-size:9px;color:#dc2626;background:#fff1f2;border:1px solid #fca5a5;padding:2px 6px;border-radius:3px;display:inline-block;margin-top:3px;font-weight:600;">Seq confirmation rolled back — potential recombination in LSP</span>')
                 _sid = row.get("STOCK_ID", "N/A")

@@ -318,6 +318,7 @@ def run_pipeline() -> pd.DataFrame:
     # Running this here keeps the stored visual_status in sync with what the
     # renderer would show, so parquet queries and the dashboard agree.
     final_df = _apply_colony_status_overrides(final_df)
+    final_df = _detect_colony_repicks(final_df)
 
     # ── Attempt anchor recompute (must run last, after all row filtering) ────
     # Uses normalized backbone/parts columns. Runs here rather than in Step 2
@@ -447,6 +448,103 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
         != df["wo_status"].astype(str).str.upper()
     ) & df["wo_status"].notna()
     return df
+
+def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For FAILED GG/Gibson/Transformation workorders with NGS FA ops, check LIMS
+    for manually-created miniprep plates made after the NGS failure. If found,
+    append a synthetic 'Repick: Miniprep/Glycerol/Media'
+    op to the timeline and flip visual_status to RUNNING.
+    """
+    import json as _json
+    import numpy as _np
+    from dnasc.extractors.lims import LIMSExtractor
+
+    _COLONY_TYPES = frozenset({
+        "gibson_workorder", "golden_gate_workorder",
+        "transformation_workorder", "transformation_offline_operation",
+    })
+    _SEQ_PROTOCOLS = {"NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing"}
+
+    failed_mask = df["type"].isin(_COLONY_TYPES) & (df["visual_status"] == "FAILED")
+    if not failed_mask.any():
+        return df
+
+    workorder_cutoffs: dict[str, str] = {}
+    for _, row in df[failed_mask].iterrows():
+        pn = row.get("protocol_name")
+        ps = row.get("operation_state")
+        ts = row.get("operation_start")
+        if isinstance(pn, _np.ndarray): pn = list(pn)
+        if isinstance(ps, _np.ndarray): ps = list(ps)
+        if isinstance(ts, _np.ndarray): ts = list(ts)
+        if not (isinstance(pn, list) and isinstance(ps, list) and isinstance(ts, list)):
+            continue
+        fa_times = [t for p, s, t in zip(pn, ps, ts) if p in _SEQ_PROTOCOLS and s == "FA" and t]
+        if not fa_times:
+            continue
+        workorder_cutoffs[str(row["workorder_id"])] = max(str(t) for t in fa_times)
+
+    if not workorder_cutoffs:
+        return df
+
+    repick_df = LIMSExtractor.get_repick_plates(workorder_cutoffs)
+    if repick_df.empty:
+        return df
+
+    log.info("_detect_colony_repicks: repick plates found for %d workorders", repick_df["workorder_id"].nunique())
+
+    # Count distinct colony_numbers per workorder from repick plates
+    repick_colony_counts = (
+        repick_df[repick_df["colony_number"].notna()]
+        .groupby("workorder_id")["colony_number"]
+        .nunique()
+    )
+
+    if "repick_total_colonies" not in df.columns:
+        df["repick_total_colonies"] = 0
+
+    df = df.copy()
+    for wo_id, plates in repick_df.groupby("workorder_id"):
+        mask = df["workorder_id"].str.upper() == str(wo_id).upper()
+        if not mask.any():
+            continue
+        repick_ts = plates["plate_created_at"].min()
+        repick_plate_ids = ",".join(plates["plate_id"].dropna().astype(str).tolist())
+        n_repick = int(repick_colony_counts.get(str(wo_id), 0))
+
+        def _append_val(arr, val):
+            if isinstance(arr, _np.ndarray): arr = list(arr)
+            return (arr + [val]) if isinstance(arr, list) else [val]
+
+        def _inject_repick_plates(json_str, plate_ids_str):
+            try:
+                data = _json.loads(json_str) if pd.notna(json_str) and json_str not in ('{}', '') else {}
+            except Exception:
+                data = {}
+            data["Manual Repick"] = plate_ids_str
+            return _json.dumps(data)
+
+        df.loc[mask, "protocol_name"]      = df.loc[mask, "protocol_name"].apply(_append_val, val="Repick: Miniprep/Glycerol/Media")
+        df.loc[mask, "operation_state"]    = df.loc[mask, "operation_state"].apply(_append_val, val="SC")
+        df.loc[mask, "operation_start"]    = df.loc[mask, "operation_start"].apply(_append_val, val=repick_ts)
+        df.loc[mask, "operation_ready"]    = df.loc[mask, "operation_ready"].apply(_append_val, val=repick_ts)
+        if "job_id" in df.columns:
+            df.loc[mask, "job_id"] = df.loc[mask, "job_id"].apply(_append_val, val=_np.nan)
+        df.loc[mask, "all_protocol_plates"] = df.loc[mask, "all_protocol_plates"].apply(
+            _inject_repick_plates, plate_ids_str=repick_plate_ids
+        )
+        df.loc[mask, "repick_total_colonies"] = n_repick
+        # Clamp original colony count to total minus repick (floor 0)
+        def _clamp_original(tot, n_rp=n_repick):
+            try: return max(0, int(tot) - n_rp)
+            except Exception: return 0
+        df.loc[mask, "total_colonies"] = df.loc[mask, "total_colonies"].apply(_clamp_original)
+        df.loc[mask, "visual_status"]      = "RUNNING"
+        df.loc[mask, "is_seq_rollback"]    = False
+
+    return df
+
 
 def _merge_lsp(lsp_df: pd.DataFrame, aliq_df: pd.DataFrame) -> pd.DataFrame:
     """Primary + secondary LSP merge with orphan recovery."""
