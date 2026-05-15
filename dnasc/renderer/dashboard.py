@@ -326,7 +326,6 @@ def render_all_projects_dashboard(
         for op in queue_data:
             if op['state'] == 'Ready': return f"{op['queue']}: Ready"
             if op['state'] == 'Running': return f"{op['queue']}: Running"
-            if op['queue'] == 'Repick: Miniprep/Glycerol/Media': return f"{op['queue']}: In Progress"
         return None
 
     def format_type_label(type_str):

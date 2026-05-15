@@ -526,7 +526,7 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
             return _json.dumps(data)
 
         df.loc[mask, "protocol_name"]      = df.loc[mask, "protocol_name"].apply(_append_val, val="Repick: Miniprep/Glycerol/Media")
-        df.loc[mask, "operation_state"]    = df.loc[mask, "operation_state"].apply(_append_val, val="SC")
+        df.loc[mask, "operation_state"]    = df.loc[mask, "operation_state"].apply(_append_val, val="RU")
         df.loc[mask, "operation_start"]    = df.loc[mask, "operation_start"].apply(_append_val, val=repick_ts)
         df.loc[mask, "operation_ready"]    = df.loc[mask, "operation_ready"].apply(_append_val, val=repick_ts)
         if "job_id" in df.columns:
