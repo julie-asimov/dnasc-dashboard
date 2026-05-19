@@ -1055,7 +1055,8 @@ def resolve_downstream_plates(
     has_star      = proto_sets.map(lambda s: 'STAR Transformation' in s)
     has_rearray   = proto_sets.map(lambda s: 'Rearray 96 to 384' in s)
 
-    gg_needs = has_miniprep & ~has_seq
+    has_repick = proto_sets.map(lambda s: 'Repick: Miniprep/Glycerol/Media' in s)
+    gg_needs = has_miniprep & (~has_seq | has_repick)
 
     def _tfm_has_ngs_plate(plates_json):
         if not plates_json:
@@ -1099,9 +1100,16 @@ def resolve_downstream_plates(
         log.info("resolve_downstream_plates: no miniprep plate IDs found in all_protocol_plates")
         return final_df
 
-    plate_ids = missing_df['_miniprep_plate_id'].unique().tolist()
-    # Keep as DataFrame — multiple workorders can share the same miniprep plate
-    plate_wid_df = missing_df[['_miniprep_plate_id', 'workorder_id']].drop_duplicates()
+    # Explode comma-separated plate IDs (e.g. "14325,14460" when original + repick
+    # minipreps share the same all_protocol_plates "Miniprep" key).
+    plate_wid_rows: list[dict] = []
+    for _, mrow in missing_df.iterrows():
+        for pid in str(mrow['_miniprep_plate_id']).split(','):
+            pid = pid.strip()
+            if pid and pid not in ('nan', 'None', ''):
+                plate_wid_rows.append({'_miniprep_plate_id': pid, 'workorder_id': mrow['workorder_id']})
+    plate_wid_df = pd.DataFrame(plate_wid_rows).drop_duplicates()
+    plate_ids = plate_wid_df['_miniprep_plate_id'].unique().tolist()
 
     log.info("resolve_downstream_plates: tracing %d miniprep plates", len(plate_ids))
 
@@ -1121,9 +1129,10 @@ def resolve_downstream_plates(
             plates = json.loads(plates_json) if isinstance(plates_json, str) else {}
             for key, val in plates.items():
                 if key in REARRAY_KEYS or key in QUANT_KEYS:
-                    pid = str(val).split(',')[0].strip()
-                    if pid and pid not in ('nan', 'None', ''):
-                        downstream_plate_rows.append({'plate_id_str': pid, 'workorder_id': mrow['workorder_id']})
+                    for pid in str(val).split(','):
+                        pid = pid.strip()
+                        if pid and pid not in ('nan', 'None', ''):
+                            downstream_plate_rows.append({'plate_id_str': pid, 'workorder_id': mrow['workorder_id']})
         except Exception:
             pass
 
@@ -1306,7 +1315,7 @@ def resolve_downstream_plates(
     # Dedup: keep one op per (workorder, protocol, state) — well-level lookups
     # produce one row per plate well; collapse to one representative per group.
     ops_df = ops_df.sort_values(['resolved_workorder', 'date_created'])
-    ops_df = ops_df.drop_duplicates(subset=['resolved_workorder', 'protocol_name', 'state'])
+    ops_df = ops_df.drop_duplicates(subset=['resolved_workorder', 'protocol_name', 'state', 'job_id'])
 
     agg = ops_df.groupby('resolved_workorder').agg(
         protocol_name=('protocol_name', list),
@@ -1420,12 +1429,15 @@ def resolve_downstream_plates(
 
     ops_df['job_id'] = ops_df.apply(_enrich_job, axis=1)
 
-    # Build (resolved_workorder, protocol_name) → plate_id for all_protocol_plates writeback
-    _proto_plate_map: dict = {}  # (workorder_id, protocol_name) → plate_id
+    # Build plate maps for all_protocol_plates writeback.
+    # ops_df is sorted by date_created so first = original, last = repick.
+    _proto_plate_map: dict = {}       # (workorder, protocol) → earliest plate_id
+    _repick_plate_map: dict = {}      # (workorder, protocol) → latest plate_id
     for _, _row in ops_df[ops_df['_plate_id'].notna()].iterrows():
         _key = (_row['resolved_workorder'], _row['protocol_name'])
         if _key not in _proto_plate_map:
             _proto_plate_map[_key] = int(_row['_plate_id'])
+        _repick_plate_map[_key] = int(_row['_plate_id'])  # always update → keeps latest
 
     # Re-aggregate job_id after enrichment
     agg = ops_df.groupby('resolved_workorder').agg(
@@ -1446,6 +1458,7 @@ def resolve_downstream_plates(
         if wid not in update_map:
             return row
         new = update_map[wid]
+        n_new = len(new['protocol_name'])
         for src_col, dst_col in [
             ('protocol_name', 'protocol_name'),
             ('state',         'operation_state'),
@@ -1454,8 +1467,16 @@ def resolve_downstream_plates(
             ('job_id',        'job_id'),
         ]:
             existing = row.get(dst_col)
+            if hasattr(existing, 'tolist'):
+                existing = existing.tolist()
             existing = existing if isinstance(existing, list) else []
             row[dst_col] = existing + new[src_col]
+        # Pad index-aligned columns so appended ops don't lose their slot
+        for _pad_col in ('ngs_run_number', 'well_location'):
+            _existing = row.get(_pad_col)
+            if hasattr(_existing, 'tolist'): _existing = _existing.tolist()
+            if isinstance(_existing, list):
+                row[_pad_col] = _existing + [None] * n_new
 
         # Write discovered plate IDs back to all_protocol_plates
         # so the renderer can display them even when LIMS colony data didn't capture them.
@@ -1469,16 +1490,32 @@ def resolve_downstream_plates(
             _plates_str = row.get('all_protocol_plates') or '{}'
             _plates = json.loads(_plates_str) if isinstance(_plates_str, str) else {}
             _updated = False
-            for _proto in new['protocol_name']:
-                _lims_key = _proto_to_lims_key.get(_proto)
-                if not _lims_key:
-                    continue
-                if _lims_key in _plates:
-                    continue  # already present, don't overwrite
-                _plate_id = _proto_plate_map.get((wid, _proto))
-                if _plate_id:
-                    _plates[_lims_key] = str(_plate_id)
+            _is_repick_wo = 'Manual Repick' in _plates
+            if _is_repick_wo:
+                # LIMS already populated all downstream keys with both original+repick
+                # plates (e.g. "Rearray 96 to 384": "14890,15089"). Split each: the
+                # last plate is from the repick, the rest are from the original pick.
+                for _lims_key in list(_proto_to_lims_key.values()):
+                    _repick_key = _lims_key + ' (Repick)'
+                    if _repick_key in _plates:
+                        continue  # already split (idempotent)
+                    if _lims_key not in _plates:
+                        continue
+                    _all_pids = [p.strip() for p in str(_plates[_lims_key]).split(',') if p.strip()]
+                    if len(_all_pids) < 2:
+                        continue  # only original plate present, nothing to split yet
+                    _plates[_repick_key] = _all_pids[-1]
+                    _plates[_lims_key]   = ','.join(_all_pids[:-1])
                     _updated = True
+            else:
+                for _proto in set(new['protocol_name']):
+                    _lims_key = _proto_to_lims_key.get(_proto)
+                    if not _lims_key or _lims_key in _plates:
+                        continue
+                    _plate_id = _proto_plate_map.get((wid, _proto))
+                    if _plate_id:
+                        _plates[_lims_key] = str(_plate_id)
+                        _updated = True
             if _updated:
                 row['all_protocol_plates'] = json.dumps(_plates)
         except Exception:

@@ -263,12 +263,6 @@ def run_pipeline() -> pd.DataFrame:
     final_df = populate_synthetic_optracker_batch(final_df)
     log.info("Synthetic OpTracker populated in %.2fs", time.time() - t)
 
-    # ── STEP 10b: Resolve downstream plates (Rearray/Quant/NGS) ──────────────  ← ADD HERE
-    log.info("STEP 10b — Downstream plate resolution")
-    t = time.time()
-    final_df = resolve_downstream_plates(final_df)                              
-    log.info("Downstream plate resolution complete in %.2fs", time.time() - t) 
-
     # ── STEP 11: Root repair & metadata backfill ──────────────────────────────
     log.info("STEP 11 — Root repair & metadata backfill")
     t = time.time()
@@ -319,6 +313,91 @@ def run_pipeline() -> pd.DataFrame:
     # renderer would show, so parquet queries and the dashboard agree.
     final_df = _apply_colony_status_overrides(final_df)
     final_df = _detect_colony_repicks(final_df)
+
+    # ── Downstream plate resolution (must run after _detect_colony_repicks) ───
+    # _detect_colony_repicks adds "Repick: Miniprep/Glycerol/Media" to protocol_name
+    # and "Manual Repick" plate IDs to all_protocol_plates. resolve_downstream_plates
+    # gates on has_repick (protocol_name check), so it must run after repick detection
+    # or it always excludes repick workorders that already have original-pick NGS ops.
+    log.info("STEP 10b — Downstream plate resolution (post-repick)")
+    t = time.time()
+    final_df = resolve_downstream_plates(final_df)
+    log.info("Downstream plate resolution complete in %.2fs", time.time() - t)
+
+    # ── Re-derive visual_status for repick workorders from downstream op states ─
+    # _detect_colony_repicks sets visual_status=RUNNING unconditionally. Now that
+    # resolve_downstream_plates has appended the repick's Rearray/Quant/NGS ops,
+    # apply the same colony-status logic as _apply_colony_status_overrides uses
+    # for a SUCCEEDED colony workorder — scoped to the post-repick op slice.
+    # This mirrors how streakout status is derived: OpTracker states + seq_confirmed.
+    _REPICK_PROTO = "Repick: Miniprep/Glycerol/Media"
+    _REPICK_SEQ_PROTOS = frozenset({
+        "NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing"
+    })
+    _REPICK_PROGRESS_PROTOS = frozenset({
+        "Rearray 96 to 384", "DNA Quantification",
+        "NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing",
+    })
+
+    def _repick_status(row):
+        if row.get("visual_status") != "RUNNING":
+            return row["visual_status"]
+        try:
+            tot = int(row.get("repick_total_colonies") or 0)
+            if tot <= 0:
+                return row["visual_status"]
+            pn = row.get("protocol_name")
+            st = row.get("operation_state")
+            if hasattr(pn, "tolist"): pn = pn.tolist()
+            if hasattr(st, "tolist"): st = st.tolist()
+            if not (isinstance(pn, list) and isinstance(st, list)):
+                return row["visual_status"]
+            # Find the LAST repick op (handles >1 repick round)
+            repick_idx = None
+            for i, p in enumerate(pn):
+                if p == _REPICK_PROTO:
+                    repick_idx = i
+            if repick_idx is None:
+                return row["visual_status"]
+            post_pn = pn[repick_idx + 1:]
+            post_st = st[repick_idx + 1:]
+            if not post_pn:
+                return "RUNNING"  # repick plates found, nothing downstream yet
+            # Mirror _apply_colony_status_overrides wo=="SUCCEEDED" + tot>0 branch
+            seq = int(row.get("seq_confirmed") or 0)
+            # Running check first: if ANY post-repick op is still active, not done yet.
+            # Must precede SC/FA check — the post-repick slice also contains original-pick
+            # NGS ops (SC/FA) re-appended by resolve_downstream_plates, so checking SC/FA
+            # first would falsely FAIL a workorder whose repick NGS is still running.
+            if any(s in ("RU", "RD") for s in post_st):
+                return "RUNNING"
+            has_progress = any(
+                p in _REPICK_PROGRESS_PROTOS and s == "SC"
+                for p, s in zip(post_pn, post_st)
+            )
+            if not has_progress:
+                return "RUNNING"  # ops present but none SC yet
+            # Progress ops SC: check seq_confirmed (same as streakout handling)
+            if seq == 0:
+                if any(p in _REPICK_SEQ_PROTOS and s in ("SC", "FA")
+                       for p, s in zip(post_pn, post_st)):
+                    return "FAILED"
+                return "IN_PROGRESS"
+            return "SUCCEEDED"
+        except Exception:
+            pass
+        return row["visual_status"]
+
+    _repick_mask = (
+        (final_df["visual_status"] == "RUNNING") &
+        (final_df.get("repick_total_colonies", pd.Series(0, index=final_df.index)).fillna(0).astype(int) > 0)
+    )
+    if _repick_mask.any():
+        _before = final_df.loc[_repick_mask, "visual_status"].copy()
+        final_df.loc[_repick_mask, "visual_status"] = final_df[_repick_mask].apply(_repick_status, axis=1)
+        _flipped = (_before != final_df.loc[_repick_mask, "visual_status"]).sum()
+        if _flipped:
+            log.info("Repick status re-derived for %d workorders from downstream op states", _flipped)
 
     # ── Attempt anchor recompute (must run last, after all row filtering) ────
     # Uses normalized backbone/parts columns. Runs here rather than in Step 2
@@ -425,7 +504,7 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
                         if seq == 0:
                             _seq_protocols = {"NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing"}
                             if any(p in _seq_protocols and s in ("SC", "FA") for p, s in zip(pn, ps)):
-                                return "FAILED", False, True
+                                return "FAILED", False, False
                             if any(s == "RU" for s in ps): return "RUNNING", False, False
                             if any(s == "RD" for s in ps): return "READY", False, False
                             return "IN_PROGRESS", False, False
@@ -440,9 +519,7 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.loc[col_mask, "visual_status"]    = overrides["visual_status"]
     df.loc[col_mask, "is_software_fail"] = overrides["is_software_fail"]
-    df.loc[col_mask, "is_seq_rollback"]  = overrides["is_seq_rollback"]
     df["is_software_fail"] = df["is_software_fail"].fillna(False)
-    df["is_seq_rollback"]  = df["is_seq_rollback"].fillna(False)
     df["is_status_override"] = (
         df["visual_status"].astype(str).str.upper()
         != df["wo_status"].astype(str).str.upper()
@@ -531,6 +608,9 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[mask, "operation_ready"]    = df.loc[mask, "operation_ready"].apply(_append_val, val=repick_ts)
         if "job_id" in df.columns:
             df.loc[mask, "job_id"] = df.loc[mask, "job_id"].apply(_append_val, val=_np.nan)
+        for _pad_col in ("ngs_run_number", "well_location"):
+            if _pad_col in df.columns:
+                df.loc[mask, _pad_col] = df.loc[mask, _pad_col].apply(_append_val, val=None)
         df.loc[mask, "all_protocol_plates"] = df.loc[mask, "all_protocol_plates"].apply(
             _inject_repick_plates, plate_ids_str=repick_plate_ids
         )
@@ -541,7 +621,6 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
             except Exception: return 0
         df.loc[mask, "total_colonies"] = df.loc[mask, "total_colonies"].apply(_clamp_original)
         df.loc[mask, "visual_status"]      = "RUNNING"
-        df.loc[mask, "is_seq_rollback"]    = False
 
     return df
 
