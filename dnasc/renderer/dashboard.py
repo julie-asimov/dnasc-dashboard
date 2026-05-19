@@ -143,6 +143,7 @@ def render_all_projects_dashboard(
     metrics_icon_b64: str = "",
     cost_icon_b64: str = "",
     generated_at: str = "",
+    experiment_active_map: dict | None = None,
 ) -> str:
 
     if df.empty:
@@ -235,22 +236,39 @@ def render_all_projects_dashboard(
             x['start_time'] if pd.notna(x['start_time']) else pd.Timestamp.min
         ))
 
-        # --- STEP 2b: DEDUP same-protocol same-state ops (e.g. Rearray from OpTracker + downstream) ---
-        # Keep the op that has a job_id; merge wells from both sources.
+        # --- STEP 2b: DEDUP same-protocol same-state same-job ops ---
+        # Ops with different job_ids are distinct pipeline steps (e.g. original Rearray
+        # job 8333 vs repick Rearray job 8388) and must NOT be collapsed.
+        def _safe_job_key(j):
+            try:
+                return None if (j is None or pd.isna(j)) else int(j)
+            except (TypeError, ValueError):
+                return None
+
         seen: dict = {}
         deduped: list = []
         for op in raw_ops:
-            key = (op['protocol'], op['state'])
+            key = (op['protocol'], op['state'], _safe_job_key(op['job_id']))
             if key not in seen:
                 seen[key] = len(deduped)
                 deduped.append(op)
             else:
                 existing = deduped[seen[key]]
-                if op['job_id'] is not None and pd.notna(op['job_id']) and (existing['job_id'] is None or pd.isna(existing['job_id'])):
-                    existing['job_id'] = op['job_id']
                 if op['start_time'] and (not existing['start_time'] or op['start_time'] < existing['start_time']):
                     existing['start_time'] = op['start_time']
         raw_ops = deduped
+
+        # --- STEP 2c: PROPAGATE run_number across states for same (protocol, job) ---
+        # resolve_downstream_plates adds SC ops without run_number; the FA entries
+        # (filtered by soft-fail below) may carry the run number. Propagate first.
+        _run_by_job: dict = {}
+        for op in raw_ops:
+            key = (op['protocol'], _safe_job_key(op['job_id']))
+            if op.get('run_number') is not None and key not in _run_by_job:
+                _run_by_job[key] = op['run_number']
+        for op in raw_ops:
+            if op.get('run_number') is None:
+                op['run_number'] = _run_by_job.get((op['protocol'], _safe_job_key(op['job_id'])))
 
         # --- STEP 3: SOFT FAIL & GROUPING ---
         protocol_success = {op['protocol'] for op in raw_ops if op['state'] == 'SC'}
@@ -2040,10 +2058,12 @@ def render_all_projects_dashboard(
                 for col in ['colony_plates', 'all_locations']:
                     val = row.get(col, '')
                     if pd.notna(val):
+                        _already_catalogued = {pid for pids in lims_plate_map.values() for pid in pids}
                         for entry in str(val).split(' | '):
                             match = re.search(r'Plate(\d+)\s*\(([^)]+)\)', entry)
                             if match:
                                 pid, proto = match.group(1), match.group(2).strip()
+                                if pid in _already_catalogued: continue
                                 if proto not in lims_plate_map: lims_plate_map[proto] = []
                                 if pid not in lims_plate_map[proto]: lims_plate_map[proto].append(pid)
                 step_keywords = {'Golden Gate Assembly': ['Golden Gate'], 'Gibson Assembly': ['Gibson'], 'STAR Transformation': ['Transformation', 'Agar'], 'Create Minipreps and Glycerol Stocks': ['Overnight', 'Miniprep', 'Glycerol'], 'Rearray 96 to 384': ['Rearray'], 'DNA Quantification': ['Quant', 'DNA'], 'NGS Sequence Confirmation': ['NGS', 'Sequence'], 'PCR': ['PCR'], 'LSP Receiving': ['LSP Receiving'], 'Manual: Miniprep/Glycerol/Media created': ['Overnight', 'Miniprep', 'Glycerol'], 'Repick: Miniprep/Glycerol/Media': ['Manual Repick']}
@@ -2059,17 +2079,28 @@ def render_all_projects_dashboard(
                         if pd.notna(parent['plate']): det_pills += f'<a href="https://bios.asimov.io/inventory/plates/{clean_plate_id(parent["plate"])}" target="_blank" class="t-pill">Plate{clean_plate_id(parent["plate"])}</a>'
                         pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot source"></div><div class="t-content"><div class="t-header"><span class="t-name" style="color:#1e3a5f">Source: {src_name}</span><span class="t-time">{parent["completion_str"]}</span></div><div class="t-details">{det_pills}</div></div></div>""")
                 if queue_data:
+                    _past_repick = False
+                    _has_repick_plate_keys = any(lp.endswith(' (Repick)') for lp in lims_plate_map)
                     for item in queue_data:
                         is_ready = item['state'] == 'Ready'
                         time_str = item["ready_time"].strftime("%m/%d/%Y %H:%M") + " (Ready)" if is_ready and pd.notna(item["ready_time"]) else (item["start_time"].strftime("%m/%d/%Y %H:%M") if pd.notna(item["start_time"]) else "")
+                        _row_is_post_repick = _past_repick
+                        if item['queue'] == 'Repick: Miniprep/Glycerol/Media':
+                            _past_repick = True
                         tooltip_groups = {}
                         keywords = step_keywords.get(item['queue'], [])
                         for lims_proto, pids in lims_plate_map.items():
+                            _is_repick_key = lims_proto.endswith(' (Repick)')
+                            # When repick plate keys exist, pre-repick rows skip (Repick) keys
+                            # and post-repick rows skip original keys — prevents double-counting.
+                            if _has_repick_plate_keys and (_row_is_post_repick != _is_repick_key):
+                                continue
+                            _match_proto = lims_proto[:-len(' (Repick)')] if _is_repick_key else lims_proto
                             match = False
                             for kw in keywords:
-                                if kw.lower() in lims_proto.lower():
-                                    if item['queue'] == 'Create Minipreps and Glycerol Stocks' and 'scinomix' in lims_proto.lower(): continue
-                                    if item['queue'] == 'LSP Receiving' and 'scinomix' in lims_proto.lower(): continue
+                                if kw.lower() in _match_proto.lower():
+                                    if item['queue'] == 'Create Minipreps and Glycerol Stocks' and 'scinomix' in _match_proto.lower(): continue
+                                    if item['queue'] == 'LSP Receiving' and 'scinomix' in _match_proto.lower(): continue
                                     match = True; break
                             if match:
                                 if lims_proto not in tooltip_groups: tooltip_groups[lims_proto] = set()
@@ -2596,8 +2627,6 @@ def render_all_projects_dashboard(
                             else: details_info.append(f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>')
                             if _n_repick > 0:
                                 details_info.append(f'<br><span class="colony-badge" style="background:#ede9fe;color:#7c3aed;">Repick: 0/{_n_repick} colonies seq confirmed</span>')
-                            if row.get('is_seq_rollback') is True or row.get('is_seq_rollback') == True:
-                                details_info.append(f'<br><span style="font-size:9px;color:#dc2626;background:#fff1f2;border:1px solid #fca5a5;padding:2px 6px;border-radius:3px;display:inline-block;margin-top:3px;font-weight:600;">Seq confirmation rolled back — potential recombination in LSP</span>')
                 _sid = row.get("STOCK_ID", "N/A")
                 _sid_str = str(_sid)
                 if _sid_str.startswith('#'):  # placeholder, not a real stock ID
@@ -3360,8 +3389,11 @@ def render_all_projects_dashboard(
           </div>
         </div>"""
 
-        _ea_vals = project_df['experiment_active'].dropna() if 'experiment_active' in project_df.columns else pd.Series([], dtype=object)
-        db_active = bool(_ea_vals.mode().iloc[0]) if not _ea_vals.empty else True
+        if experiment_active_map is not None:
+            db_active = experiment_active_map.get(experiment_name, True)
+        else:
+            _ea_vals = project_df['experiment_active'].dropna() if 'experiment_active' in project_df.columns else pd.Series([], dtype=object)
+            db_active = bool((_ea_vals.astype(str).str.lower().isin(['true', '1'])).any()) if not _ea_vals.empty else True
         exp_header_gradient = "linear-gradient(135deg, #7c3aed 0%, #be185d 100%)" if has_ptr else "linear-gradient(135deg, #1e3a5f 0%, #0891b2 100%)"
 
         _exp_emails_raw = [str(e).strip() for e in project_df['submitter_email'].dropna().unique() if str(e).strip() not in ('', 'nan', 'none', 'None')] if 'submitter_email' in project_df.columns else []
@@ -3487,7 +3519,7 @@ def render_all_projects_dashboard(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def render_dashboard(df: pd.DataFrame) -> str:
+def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None) -> str:
     """
     Render the full dashboard HTML for `df`.
     Assets are loaded automatically from the scripts/ directory.
@@ -3505,11 +3537,12 @@ def render_dashboard(df: pd.DataFrame) -> str:
 
     html = render_all_projects_dashboard(
         df,
-        logo_b64          = _ASSETS["logo"],
-        tracking_icon_b64 = _ASSETS["tracking"],
-        metrics_icon_b64  = _ASSETS["metrics"],
-        cost_icon_b64     = _ASSETS["cost"],
-        generated_at      = generated_at,
+        logo_b64               = _ASSETS["logo"],
+        tracking_icon_b64      = _ASSETS["tracking"],
+        metrics_icon_b64       = _ASSETS["metrics"],
+        cost_icon_b64          = _ASSETS["cost"],
+        generated_at           = generated_at,
+        experiment_active_map  = experiment_active_map,
     )
 
     # Wrap in full HTML document with UTF-8 charset + auto-refresh

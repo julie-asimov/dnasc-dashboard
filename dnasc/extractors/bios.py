@@ -299,3 +299,11 @@ class BIOSExtractor:
         df = pd.read_gbq(query, project_id=proj, dialect="standard")
         log.info("BIOS workorders retrieved: %d rows in %.2fs", len(df), time.time() - t0)
         return df
+
+    @staticmethod
+    def get_experiment_active_map() -> dict[str, bool]:
+        """Return {experiment_name: active} from the experiment table directly."""
+        proj = PipelineConfig.PROJECT_ID
+        query = f"SELECT name, active FROM `{proj}.bios__src.experiment`"
+        df = pd.read_gbq(query, project_id=proj, dialect="standard")
+        return {row["name"]: bool(row["active"]) for _, row in df.iterrows() if pd.notna(row["name"])}

@@ -33,6 +33,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 # ── Imports ───────────────────────────────────────────────────────────────────
 from dnasc import run_pipeline, render_dashboard, PipelineConfig
+from dnasc.extractors.bios import BIOSExtractor
 from dnasc.extractors.sheets import fetch_due_dates
 
 # ── Pipeline version (bump this string when you push new code) ───────────────
@@ -61,7 +62,8 @@ def main():
 
     # 4. Render HTML
     print("\n🎨 Rendering dashboard...")
-    html = render_dashboard(final_df)
+    exp_active_map = BIOSExtractor.get_experiment_active_map()
+    html = render_dashboard(final_df, experiment_active_map=exp_active_map)
 
     # 4. Write to www/
     HTML_OUT.write_text(html, encoding="utf-8")
