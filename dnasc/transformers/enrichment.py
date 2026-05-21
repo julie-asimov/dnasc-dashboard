@@ -285,24 +285,15 @@ class EnrichmentTransformer:
                 and asm_rows_act['visual_status'].isin(['READY', 'WAITING']).any()
             )
 
-            # seq winner: root-pAI workorders only have ≥1 seq-confirmed colony,
+            # seq winner: deliverable constructs have ≥1 seq-confirmed colony,
             # no LSP workorder exists yet — winner in hand, not yet acted on.
-            # Restricted to root STOCK_ID to avoid foreign-construct inputs (e.g.
-            # a backbone Gibson pAI-21680 used as part of pAI-21430) triggering the flag.
-            # The request's primary STOCK_ID is whichever pAI appears most frequently
-            # among ASM-type self-rooted workorders. Backbone Gibsons (pAI-21680 etc.)
-            # are each one row; the actual construct root appears once per attempt.
-            _self_roots = r_df[r_df['workorder_id'] == r_df['root_work_order_id']]
-            _asm_root_stocks = _self_roots[_self_roots['type'].isin(_ASM_TYPES)]['STOCK_ID'].dropna()
-            _fallback_stocks = _self_roots['STOCK_ID'].dropna()
-            if not _asm_root_stocks.empty:
-                _root_stock = _asm_root_stocks.value_counts().idxmax()
-            elif not _fallback_stocks.empty:
-                _root_stock = _fallback_stocks.value_counts().idxmax()
-            else:
-                _root_stock = None
-            # Only check the primary construct's workorders, not shared backbone Gibsons
-            _root_rows = r_df[r_df['STOCK_ID'] == _root_stock] if _root_stock else r_df
+            # Restricted to fulfills_request=True stocks to avoid foreign-construct
+            # inputs (e.g. backbone Gibson pAI-21680) triggering the flag.
+            # Draft placeholder stocks (#-prefixed) are excluded.
+            _root_stocks = set(
+                r_df[(r_df['fulfills_request'] == True) & ~r_df['STOCK_ID'].fillna('').str.startswith('#')]['STOCK_ID'].dropna()
+            ) if 'fulfills_request' in r_df.columns else set()
+            _root_rows = r_df[r_df['STOCK_ID'].isin(_root_stocks)] if _root_stocks else r_df
             _seq_col = _root_rows['seq_confirmed'] if 'seq_confirmed' in _root_rows.columns else None
             _has_lsp = 'lsp_workorder' in active_rows['type'].values
             req_has_seq_winner[req_id] = (
