@@ -290,6 +290,7 @@ class BIOSExtractor:
         LEFT JOIN `{proj}.bios__src.plasmidrequest` pr ON req.id = pr.id
         LEFT JOIN `{proj}.bios__src.experiment` exp ON pr.experiment_id = exp.id
         WHERE req.created_at >= '{date_filter}'
+          AND req.status NOT IN ('FULFILLED', 'SUCCEEDED', 'CANCELED')
           AND NOT EXISTS (
               SELECT 1 FROM `{proj}.bios__src.workorder` w
               WHERE w.request_id = req.id AND w.status NOT IN ('DRAFT', 'CANCELED')
