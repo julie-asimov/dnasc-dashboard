@@ -100,6 +100,12 @@ except ImportError:
     def render_lsp_capacity_tab(_df):
         return "<p style='color:#6b7280;padding:1rem;'>LSP capacity view not available.</p>"
 
+try:
+    from dnasc.renderer.inflight import render_inflight_tab
+except ImportError:
+    def render_inflight_tab(_df):
+        return "<p style='color:#6b7280;padding:1rem;'>Requests in flight view not available.</p>"
+
 log = get_logger(__name__)
 
 # ── Asset resolution ──────────────────────────────────────────────────────────
@@ -677,13 +683,25 @@ def render_all_projects_dashboard(
     </style>
 
     <script>
+    var _ifLoaded = false;
     function switchTab(tabName) {
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+        var ifl = document.getElementById('tab-inflight');
+        if (ifl) ifl.style.display = 'none';
         document.querySelector('[data-tab="' + tabName + '"]').classList.add('active');
         document.getElementById('tab-' + tabName).classList.add('active');
         if (tabName === 'capacity' && typeof window.lspInitChart === 'function') {
             setTimeout(window.lspInitChart, 0);
+        }
+        if (tabName === 'inflight') {
+            var el = document.getElementById('tab-inflight');
+            if (el) el.style.display = 'block';
+            var frm = document.getElementById('inflight-frame');
+            if (frm && !_ifLoaded && typeof _IFsrcdoc !== 'undefined') {
+                _ifLoaded = true;
+                frm.srcdoc = _IFsrcdoc;
+            }
         }
     }
     function toggleBucketView(expId) {
@@ -1028,6 +1046,10 @@ def render_all_projects_dashboard(
     # LSP Capacity tab (generated once, injected into template)
     lsp_capacity_html = render_lsp_capacity_tab(df)
 
+    # Requests In Flight tab — stored as JS string, srcdoc assigned lazily on first tab click
+    _inflight_standalone = render_inflight_tab(df)
+    inflight_js_literal = json.dumps(_inflight_standalone).replace('</', '<\\/')
+
     # Part 2: HTML with variables (f-string)
     html += f"""
     <div class="dashboard-container">
@@ -1055,6 +1077,10 @@ def render_all_projects_dashboard(
                 <button class="tab-btn" data-tab="capacity" onclick="switchTab('capacity')">
                     <span style="font-size:16px;">📈</span>
                     <span class="tab-text">LSP Capacity</span>
+                </button>
+                <button class="tab-btn" data-tab="inflight" onclick="switchTab('inflight')">
+                    <span style="font-size:16px;">🗂️</span>
+                    <span class="tab-text">Requests In Flight</span>
                 </button>
             </div>
             <!-- TRACKING TAB -->
@@ -3510,10 +3536,17 @@ def render_all_projects_dashboard(
                 __LSP_CAPACITY_TAB_CONTENT__
             </div>
 
+            <!-- REQUESTS IN FLIGHT TAB -->
+            <div id="tab-inflight" class="tab-content" style="padding:0;">
+                <iframe id="inflight-frame" style="width:100%;height:calc(100vh - 130px);border:none;display:block;"></iframe>
+            </div>
+            <script>var _IFsrcdoc = __INFLIGHT_SRCDOC__;</script>
+
         </div>
     </div>
     """
     html = html.replace("__LSP_CAPACITY_TAB_CONTENT__", lsp_capacity_html)
+    html = html.replace("__INFLIGHT_SRCDOC__", inflight_js_literal)
     return html
 
 
