@@ -684,25 +684,38 @@ def render_all_projects_dashboard(
 
     <script>
     var _ifLoaded = false;
+    function _loadInflight() {
+        var frm = document.getElementById('inflight-frame');
+        if (frm && !_ifLoaded && typeof _IFsrcdoc !== 'undefined') {
+            _ifLoaded = true;
+            frm.addEventListener('load', function() {
+                var ld = document.getElementById('inflight-loading');
+                if (ld) ld.style.display = 'none';
+            });
+            try {
+                var blob = new Blob([_IFsrcdoc], {type: 'text/html'});
+                frm.src = URL.createObjectURL(blob);
+            } catch(e) {
+                frm.srcdoc = _IFsrcdoc;
+            }
+        }
+    }
+    document.addEventListener('DOMContentLoaded', function() { setTimeout(_loadInflight, 500); });
     function switchTab(tabName) {
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
         document.querySelector('[data-tab="' + tabName + '"]').classList.add('active');
         document.getElementById('tab-' + tabName).classList.add('active');
+        try { localStorage.setItem('dash_activeTab', tabName); } catch(e) {}
         if (tabName === 'capacity' && typeof window.lspInitChart === 'function') {
             setTimeout(window.lspInitChart, 0);
         }
         if (tabName === 'inflight') {
-            var frm = document.getElementById('inflight-frame');
-            if (frm && !_ifLoaded && typeof _IFsrcdoc !== 'undefined') {
-                _ifLoaded = true;
-                try {
-                    var blob = new Blob([_IFsrcdoc], {type: 'text/html'});
-                    frm.src = URL.createObjectURL(blob);
-                } catch(e) {
-                    frm.srcdoc = _IFsrcdoc;
-                }
-            }
+            _loadInflight();
+            setTimeout(function() {
+                var frm = document.getElementById('inflight-frame');
+                try { if (frm && frm.contentWindow && typeof frm.contentWindow.ifRender === 'function') frm.contentWindow.ifRender(); } catch(e) {}
+            }, 50);
         }
     }
     function toggleBucketView(expId) {
@@ -1009,9 +1022,12 @@ def render_all_projects_dashboard(
         try {
             var savedActive = localStorage.getItem('dash_activeOnly');
             var savedSearch = localStorage.getItem('dash_search');
+            var savedTab    = localStorage.getItem('dash_activeTab');
             if (savedActive === '1') { document.getElementById('active_toggle').checked = true; }
             if (savedSearch) { document.getElementById('search_box').value = savedSearch; }
             if (savedActive === '1' || savedSearch) { filterDashboard(); }
+            if (savedTab && savedTab !== 'tracking') { switchTab(savedTab); }
+            var eh = document.getElementById('_earlyhide'); if (eh) eh.remove();
         } catch(e) {}
         var firstExp = document.querySelector('.exp-content');
         var firstExpIcon = document.querySelector('.exp-toggle-icon');
@@ -1084,6 +1100,7 @@ def render_all_projects_dashboard(
                     <span class="tab-text">Requests In Flight</span>
                 </button>
             </div>
+            <script>(function(){{try{{var t=localStorage.getItem('dash_activeTab');if(t&&t!=='tracking'){{document.querySelector('[data-tab="tracking"]').classList.remove('active');var b=document.querySelector('[data-tab="'+t+'"]');if(b)b.classList.add('active');var s=document.createElement('style');s.id='_earlyhide';s.textContent='#tab-tracking{{display:none!important}}';document.head.appendChild(s);}}}}catch(e){{}}}}());</script>
             <!-- TRACKING TAB -->
             <div id="tab-tracking" class="tab-content active">
                 <div class="controls-container">
@@ -3538,7 +3555,8 @@ def render_all_projects_dashboard(
             </div>
 
             <!-- REQUESTS IN FLIGHT TAB -->
-            <div id="tab-inflight" class="tab-content" style="padding:0;">
+            <div id="tab-inflight" class="tab-content" style="padding:0;position:relative;">
+                <div id="inflight-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#f9fafb;z-index:10;font-size:14px;color:#6b7280;">Loading requests…</div>
                 <iframe id="inflight-frame" style="width:100%;height:calc(100vh - 130px);border:none;display:block;"></iframe>
             </div>
             <script>var _IFsrcdoc = __INFLIGHT_SRCDOC__;</script>
