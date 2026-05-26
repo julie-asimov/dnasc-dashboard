@@ -696,7 +696,12 @@ def render_all_projects_dashboard(
             var frm = document.getElementById('inflight-frame');
             if (frm && !_ifLoaded && typeof _IFsrcdoc !== 'undefined') {
                 _ifLoaded = true;
-                frm.srcdoc = _IFsrcdoc;
+                try {
+                    var blob = new Blob([_IFsrcdoc], {type: 'text/html'});
+                    frm.src = URL.createObjectURL(blob);
+                } catch(e) {
+                    frm.srcdoc = _IFsrcdoc;
+                }
             }
         }
     }

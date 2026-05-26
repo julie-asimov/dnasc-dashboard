@@ -106,10 +106,18 @@ def _pai_badges(pai_str: str, customer: str = '') -> str:
 
 def _cust_badge(cust: str, for_partner: bool = False) -> str:
     label, bg, color = _CUSTOMER_LABELS.get(cust, ('—', '#f3f4f6', '#6b7280'))
-    partner = (' <span style="padding:1px 4px;border-radius:3px;font-size:9px;'
-               'background:#fef9c3;color:#854d0e;">Partner</span>') if for_partner else ''
     return (f'<span style="padding:2px 6px;border-radius:3px;font-size:10px;'
-            f'background:{bg};color:{color};">{label}</span>{partner}')
+            f'background:{bg};color:{color};">{label}</span>')
+
+
+def _fmt_submitter(email: str) -> str:
+    if not email or '@' not in email:
+        return _e(email)
+    local, domain = email.split('@', 1)
+    name = ' '.join(p.capitalize() for p in local.split('.'))
+    org  = domain.split('.')[0].capitalize()
+    return (f'<span style="display:block;">{_e(name)}</span>'
+            f'<span style="display:block;color:#9ca3af;font-size:9px;">{_e(org)}</span>')
 
 
 def _row_html(r: dict) -> str:
@@ -130,7 +138,7 @@ def _row_html(r: dict) -> str:
         f'<td style="{_TD}max-width:180px;overflow-wrap:break-word;word-break:break-word;">{_e(r["construct"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{_pai_badges(r["pAI"], r["customer"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{_cust_badge(r["customer"], r["fp"])}</td>'
-        f'<td style="{_TD}max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{_e(r["submitter"])}">{_e(r["submitter"])}</td>'
+        f'<td style="{_TD}max-width:110px;">{_fmt_submitter(r["submitter"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{st}</td>'
         f'<td style="{_TD}white-space:nowrap;">{ph}</td>'
         f'<td style="{_TD}max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{_e(r["operation"])}">{_e(r["operation"])}</td>'
@@ -365,7 +373,8 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   var PAI_STY_RD='display:inline-block;background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;font-size:9px;white-space:nowrap;margin:1px 1px;';
   function paiBadges(s,cust){{if(!s)return'';var st=cust==='R_D'?PAI_STY_RD:PAI_STY;return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+st+'">'+esc(p)+'</span>':'';}}).join('');}}
   var CUST_MAP={{'R_D':['R&D','#f0fdf4','#166534'],'INTERNAL_CLD':['CLD','#dbeafe','#1d4ed8'],'TECH_OUT':['Tech Out','#ffedd5','#c2410c'],'EXTERNAL_TECH_OUT':['Ext TechOut','#fce7f3','#be185d']}};
-  function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];var p=fp?'<span style="padding:1px 4px;border-radius:3px;font-size:9px;background:#fef9c3;color:#854d0e;">Partner</span>':'';return'<span style="padding:2px 6px;border-radius:3px;font-size:10px;background:'+m[1]+';color:'+m[2]+';">'+m[0]+'</span>'+p;}}
+  function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];return'<span style="padding:2px 6px;border-radius:3px;font-size:10px;background:'+m[1]+';color:'+m[2]+';">'+m[0]+'</span>';}}
+  function fmtSubmitter(s){{if(!s||s.indexOf('@')===-1)return esc(s);var parts=s.split('@');var local=parts[0];var org=parts[1].split('.')[0];org=org.charAt(0).toUpperCase()+org.slice(1);var name=local.split('.').map(function(p){{return p.charAt(0).toUpperCase()+p.slice(1);}}).join(' ');return'<span style="display:block;">'+esc(name)+'</span><span style="display:block;color:#9ca3af;font-size:9px;">'+esc(org)+'</span>';}}
 
   // ── Row filter ────────────────────────────────────────────────────────────
   function _pass(r) {{
@@ -417,7 +426,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
             + '<td style="'+TD+'max-width:180px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.construct)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
-            + '<td style="'+TD+'max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(r.submitter)+'">'+esc(r.submitter)+'</td>'
+            + '<td style="'+TD+'max-width:110px;">'+fmtSubmitter(r.submitter)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+st+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
             + '<td style="'+TD+'max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(r.operation)+'">'+esc(r.operation)+'</td>'
