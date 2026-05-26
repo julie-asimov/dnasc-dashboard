@@ -116,8 +116,13 @@ def _fmt_submitter(email: str) -> str:
     local, domain = email.split('@', 1)
     name = ' '.join(p.capitalize() for p in local.split('.'))
     org  = domain.split('.')[0].capitalize()
+    external = not domain.lower().startswith('asimov.')
+    org_sty = ('display:block;font-size:9px;font-weight:600;'
+               'background:#fef3c7;color:#92400e;border:1px solid #fcd34d;'
+               'border-radius:3px;padding:1px 5px;margin-top:1px;display:inline-block;'
+               ) if external else 'display:block;color:#9ca3af;font-size:9px;'
     return (f'<span style="display:block;">{_e(name)}</span>'
-            f'<span style="display:block;color:#9ca3af;font-size:9px;">{_e(org)}</span>')
+            f'<span style="{org_sty}">{_e(org)}</span>')
 
 
 def _row_html(r: dict) -> str:
@@ -374,7 +379,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   function paiBadges(s,cust){{if(!s)return'';var st=cust==='R_D'?PAI_STY_RD:PAI_STY;return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+st+'">'+esc(p)+'</span>':'';}}).join('');}}
   var CUST_MAP={{'R_D':['R&D','#f0fdf4','#166534'],'INTERNAL_CLD':['CLD','#dbeafe','#1d4ed8'],'TECH_OUT':['Tech Out','#ffedd5','#c2410c'],'EXTERNAL_TECH_OUT':['Ext TechOut','#fce7f3','#be185d']}};
   function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];return'<span style="padding:2px 6px;border-radius:3px;font-size:10px;background:'+m[1]+';color:'+m[2]+';">'+m[0]+'</span>';}}
-  function fmtSubmitter(s){{if(!s||s.indexOf('@')===-1)return esc(s);var parts=s.split('@');var local=parts[0];var org=parts[1].split('.')[0];org=org.charAt(0).toUpperCase()+org.slice(1);var name=local.split('.').map(function(p){{return p.charAt(0).toUpperCase()+p.slice(1);}}).join(' ');return'<span style="display:block;">'+esc(name)+'</span><span style="display:block;color:#9ca3af;font-size:9px;">'+esc(org)+'</span>';}}
+  function fmtSubmitter(s){{if(!s||s.indexOf('@')===-1)return esc(s);var parts=s.split('@');var local=parts[0];var domain=parts[1];var org=domain.split('.')[0];org=org.charAt(0).toUpperCase()+org.slice(1);var name=local.split('.').map(function(p){{return p.charAt(0).toUpperCase()+p.slice(1);}}).join(' ');var ext=!domain.toLowerCase().startsWith('asimov.');var orgSty=ext?'display:inline-block;font-size:9px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:1px 5px;margin-top:1px;':'display:block;color:#9ca3af;font-size:9px;';return'<span style="display:block;">'+esc(name)+'</span><span style="'+orgSty+'">'+esc(org)+'</span>';}}
 
   // ── Row filter ────────────────────────────────────────────────────────────
   function _pass(r) {{
