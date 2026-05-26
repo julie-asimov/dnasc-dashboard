@@ -687,16 +687,12 @@ def render_all_projects_dashboard(
     function switchTab(tabName) {
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-        var ifl = document.getElementById('tab-inflight');
-        if (ifl) ifl.style.display = 'none';
         document.querySelector('[data-tab="' + tabName + '"]').classList.add('active');
         document.getElementById('tab-' + tabName).classList.add('active');
         if (tabName === 'capacity' && typeof window.lspInitChart === 'function') {
             setTimeout(window.lspInitChart, 0);
         }
         if (tabName === 'inflight') {
-            var el = document.getElementById('tab-inflight');
-            if (el) el.style.display = 'block';
             var frm = document.getElementById('inflight-frame');
             if (frm && !_ifLoaded && typeof _IFsrcdoc !== 'undefined') {
                 _ifLoaded = true;
