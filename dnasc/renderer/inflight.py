@@ -112,6 +112,30 @@ def _cust_badge(cust: str, for_partner: bool = False) -> str:
             f'background:{bg};color:{color};">{label}</span>')
 
 
+_DATE_PILL = ('display:inline-block;padding:0px 5px;border-radius:3px;'
+              'font-size:9px;font-weight:600;white-space:nowrap;margin-top:2px;')
+
+def _fmt_date(date_str: str) -> str:
+    if not date_str:
+        return ''
+    try:
+        from datetime import date as _date
+        d = _date.fromisoformat(date_str)
+        diff = (d - _date.today()).days
+        if diff < 0:
+            bg, clr, lbl = '#fee2e2', '#991b1b', f'{abs(diff)}d ago'
+        elif diff == 0:
+            bg, clr, lbl = '#fef3c7', '#92400e', 'today'
+        elif diff <= 7:
+            bg, clr, lbl = '#fef9c3', '#713f12', f'in {diff}d'
+        else:
+            bg, clr, lbl = '#f3f4f6', '#6b7280', f'in {diff}d'
+        return (f'<span style="color:#374151;">{_e(date_str)}</span>'
+                f'<br><span style="background:{bg};color:{clr};{_DATE_PILL}">{lbl}</span>')
+    except Exception:
+        return _e(date_str)
+
+
 def _fmt_submitter(email: str) -> str:
     if not email or '@' not in email:
         return _e(email)
@@ -150,9 +174,9 @@ def _row_html(r: dict) -> str:
         f'<td style="{_TD}white-space:nowrap;">{ph}</td>'
         f'<td style="{_TD}max-width:160px;overflow-wrap:break-word;word-break:break-word;">{_e(r["operation"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{fl}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_e(r["assembly"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_e(r["lsp_scaleup"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_e(r["due_date"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{_fmt_date(r["assembly"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{_fmt_date(r["lsp_scaleup"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{_fmt_date(r["due_date"])}</td>'
         f'<td style="{_TD}font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">{_e(r["req_id"])}</td>'
         f'</tr>'
     )
@@ -329,6 +353,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 
 <script>
 (function() {{
+  var _TODAY   = '{today.isoformat()}';
   var _IFD     = {data_json};
   var _ALL_EXP  = {json.dumps(all_exps)};
   var _ALL_ST   = {json.dumps(all_statuses)};
@@ -376,6 +401,8 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   function paiBadges(s,cust){{if(!s)return'';var st=cust==='R_D'?PAI_STY_RD:PAI_STY;return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+st+'">'+esc(p)+'</span>':'';}}).join('');}}
   var CUST_MAP={{'R_D':['R&D','#f0fdf4','#166534'],'INTERNAL_CLD':['CLD','#dbeafe','#1d4ed8'],'TECH_OUT':['Tech Out','#ffedd5','#c2410c'],'EXTERNAL_TECH_OUT':['Ext TechOut','#fce7f3','#be185d']}};
   function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];return'<span style="padding:2px 6px;border-radius:3px;font-size:10px;background:'+m[1]+';color:'+m[2]+';">'+m[0]+'</span>';}}
+  var _DPILL='display:inline-block;padding:0px 5px;border-radius:3px;font-size:9px;font-weight:600;white-space:nowrap;margin-top:2px;';
+  function fmtDate(s){{if(!s)return'';var diff=Math.round((new Date(s)-new Date(_TODAY))/(864e5));var bg,clr,lbl;if(diff<0){{bg='#fee2e2';clr='#991b1b';lbl=Math.abs(diff)+'d ago';}}else if(diff===0){{bg='#fef3c7';clr='#92400e';lbl='today';}}else if(diff<=7){{bg='#fef9c3';clr='#713f12';lbl='in '+diff+'d';}}else{{bg='#f3f4f6';clr='#6b7280';lbl='in '+diff+'d';}}return'<span style="color:#374151;">'+esc(s)+'</span><br><span style="background:'+bg+';color:'+clr+';'+_DPILL+'">'+lbl+'</span>';}}
   function fmtSubmitter(s){{if(!s||s.indexOf('@')===-1)return esc(s);var parts=s.split('@');var local=parts[0];var domain=parts[1];var org=domain.split('.')[0];org=org.charAt(0).toUpperCase()+org.slice(1);var name=local.split('.').map(function(p){{return p.charAt(0).toUpperCase()+p.slice(1);}}).join(' ');var ext=!domain.toLowerCase().startsWith('asimov.');var orgSty=ext?'display:inline-block;font-size:9px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:1px 5px;margin-top:1px;':'display:block;color:#9ca3af;font-size:9px;';return'<span style="display:block;">'+esc(name)+'</span><span style="'+orgSty+'">'+esc(org)+'</span>';}}
 
   // ── Row filter ────────────────────────────────────────────────────────────
@@ -433,9 +460,9 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
             + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
             + '<td style="'+TD+'max-width:160px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.operation)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+fl+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+esc(r.assembly)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+esc(r.lsp_scaleup)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+esc(r.due_date)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.assembly)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.lsp_scaleup)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.due_date)+'</td>'
             + '<td style="'+TD+'font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">'+esc(r.req_id)+'</td>'
             + '</tr>';
     }});
