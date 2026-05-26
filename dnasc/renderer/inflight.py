@@ -286,7 +286,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
 <meta charset="utf-8">
 <style>
 *{{box-sizing:border-box;margin:0;padding:0;}}
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff;font-size:10px;}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff;font-size:10px;overflow:hidden;}}
 .iff-active{{outline:2px solid #374151;}}
 </style>
 </head>
@@ -316,7 +316,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   </div>
 
   <!-- Table -->
-  <div style="overflow-x:auto;max-height:75vh;overflow-y:auto;">
+  <div style="overflow-x:auto;">
     <table id="inflight-table" style="width:100%;border-collapse:collapse;">
       <thead id="inflight-thead"></thead>
       <tbody id="inflight-tbody"><tr><td colspan="14" style="padding:20px;color:#6b7280;font-size:11px;">Loading…</td></tr></tbody>
@@ -643,7 +643,12 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   }};
 
 }})();
-// Script is at end of body so DOM is ready; call directly
+function _postH() {{
+  try {{ parent.postMessage({{_ifH: document.body.scrollHeight}}, '*'); }} catch(e) {{}}
+}}
+var _origRender = window.ifRender;
+window.ifRender = function() {{ _origRender(); setTimeout(_postH, 0); }};
+window.addEventListener('resize', _postH);
 if (document.readyState === 'loading') {{
   document.addEventListener('DOMContentLoaded', function() {{
     window.ifBuildHead(); setTimeout(window.ifRender, 0);

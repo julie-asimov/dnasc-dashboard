@@ -701,6 +701,12 @@ def render_all_projects_dashboard(
         }
     }
     document.addEventListener('DOMContentLoaded', function() { setTimeout(_loadInflight, 500); });
+    window.addEventListener('message', function(e) {
+        if (e.data && typeof e.data._ifH === 'number') {
+            var frm = document.getElementById('inflight-frame');
+            if (frm) frm.style.height = e.data._ifH + 'px';
+        }
+    });
     function switchTab(tabName) {
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
@@ -3555,9 +3561,9 @@ def render_all_projects_dashboard(
             </div>
 
             <!-- REQUESTS IN FLIGHT TAB -->
-            <div id="tab-inflight" class="tab-content" style="padding:0;position:relative;">
+            <div id="tab-inflight" class="tab-content" style="padding:0;position:relative;overflow-y:auto;height:calc(100vh - 130px);">
                 <div id="inflight-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#f9fafb;z-index:10;font-size:14px;color:#6b7280;">Loading requests…</div>
-                <iframe id="inflight-frame" style="width:100%;height:calc(100vh - 130px);border:none;display:block;"></iframe>
+                <iframe id="inflight-frame" style="width:100%;min-height:calc(100vh - 130px);border:none;display:block;"></iframe>
             </div>
             <script>var _IFsrcdoc = __INFLIGHT_SRCDOC__;</script>
 
