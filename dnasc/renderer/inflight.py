@@ -30,12 +30,16 @@ def _milestones(created_at, for_partner: bool) -> dict:
     except Exception:
         return {}
     weeks = 5 if for_partner else 6
-    due = cd + timedelta(weeks=weeks)
-    ngs = _last_ngs_before(due - timedelta(days=1))
+    # Find the last NGS run (Mon or Thu) that falls within the delivery window
+    deadline = cd + timedelta(weeks=weeks)
+    ngs = _last_ngs_before(deadline - timedelta(days=1))
     return {
-        'due_date': due,
-        'assembly': ngs - timedelta(days=13),
-        'lsp_ngs':  ngs,
+        'assembly':     ngs - timedelta(days=13),
+        'asm_ngs':      ngs - timedelta(days=6),
+        'lsp_scaleup':  ngs - timedelta(days=5),
+        'lsp_received': ngs - timedelta(days=3),
+        'lsp_ngs':      ngs,
+        'due_date':     ngs + timedelta(days=1),  # LFC release = day after LSP NGS
     }
 
 
@@ -58,14 +62,12 @@ _PHASE_STYLE = {
 }
 _FLAG_STYLE = {
     'PAST_DUE': 'background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;',
-    'AT_RISK':  'background:#ffedd5;color:#7c2d12;border:1px solid #fdba74;',
-    'ASM_LATE': 'background:#fef9c3;color:#713f12;border:1px solid #fde047;',
+    'AT_RISK':  'background:#fef9c3;color:#713f12;border:1px solid #fde047;',
     'STALLED':  'background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;',
 }
 _FLAG_ROW_BG = {
     'PAST_DUE': '#fff5f5',
-    'AT_RISK':  '#fffbf5',
-    'ASM_LATE': '#fffef0',
+    'AT_RISK':  '#fffef0',
     'STALLED':  '#fef2f2',
 }
 _BADGE = 'display:inline-block;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;white-space:nowrap;margin:1px 1px;'
@@ -146,11 +148,11 @@ def _row_html(r: dict) -> str:
         f'<td style="{_TD}max-width:110px;">{_fmt_submitter(r["submitter"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{st}</td>'
         f'<td style="{_TD}white-space:nowrap;">{ph}</td>'
-        f'<td style="{_TD}max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{_e(r["operation"])}">{_e(r["operation"])}</td>'
+        f'<td style="{_TD}max-width:160px;overflow-wrap:break-word;word-break:break-word;">{_e(r["operation"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{fl}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_e(r["due_date"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{_e(r["assembly"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_e(r["lsp_ngs"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{_e(r["lsp_scaleup"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{_e(r["due_date"])}</td>'
         f'<td style="{_TD}font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">{_e(r["req_id"])}</td>'
         f'</tr>'
     )
@@ -213,19 +215,18 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         phase  = str(row.get('req_phase', '') or '')
         op     = str(row.get('req_operation', '') or '')
         status = str(row.get('request_status', '') or '')
-        due    = ms.get('due_date')
-        asm    = ms.get('assembly')
+        due        = ms.get('due_date')
+        asm        = ms.get('assembly')
+        lsp_scaleup = ms.get('lsp_scaleup')
         is_stalled = bool(row.get('is_stalled', False))
         flags: list = []
         if status not in ('FULFILLED', 'CANCELED'):
-            if due:
-                dl = (due - today).days
-                if dl < 0:
-                    flags.append('PAST_DUE')
-                elif dl <= 7:
-                    flags.append('AT_RISK')
-            if asm and asm < today and phase == 'PARTS':
-                flags.append('ASM_LATE')
+            if due and due < today:
+                flags.append('PAST_DUE')
+            elif phase in ('ASM', 'PARTS') and (
+                (asm and asm < today) or (lsp_scaleup and lsp_scaleup < today)
+            ):
+                flags.append('AT_RISK')
         if (is_stalled or not op) and status == 'IN_PROGRESS':
             flags.append('STALLED')
         op_display = '' if is_stalled else op
@@ -241,9 +242,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
             'operation': op_display,
             'flags':     flags,
             'req_id':    req_id,
-            'due_date':  str(due or ''),
-            'assembly':  str(asm or ''),
-            'lsp_ngs':   str(ms.get('lsp_ngs', '')),
+            'due_date':   str(due or ''),
+            'assembly':   str(asm or ''),
+            'lsp_scaleup':str(lsp_scaleup or ''),
             'pinned':    str(row.get('experiment_name', '') or '') in _PINNED_EXPS,
         })
 
@@ -266,7 +267,6 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     flagged  = sum(1 for r in _ip if r['flags'])
     past_due = sum(1 for r in _ip if 'PAST_DUE' in r['flags'])
     at_risk  = sum(1 for r in _ip if 'AT_RISK'  in r['flags'])
-    asm_late = sum(1 for r in _ip if 'ASM_LATE' in r['flags'])
     stalled  = sum(1 for r in _ip if 'STALLED'  in r['flags'])
 
     data_json          = json.dumps(records, ensure_ascii=False)
@@ -298,8 +298,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
     <span style="font-weight:700;color:#374151;">IN PROGRESS: <span style="color:#1d4ed8;">{in_prog}</span></span>
     <span>Flagged: <b style="color:#b45309;">{flagged}</b></span>
     <span>Past Due: <b style="color:#991b1b;">{past_due}</b></span>
-    <span>At Risk: <b style="color:#7c2d12;">{at_risk}</b></span>
-    <span>ASM Late: <b style="color:#713f12;">{asm_late}</b></span>
+    <span>At Risk: <b style="color:#713f12;">{at_risk}</b></span>
     <span>Stalled: <b style="color:#dc2626;">{stalled}</b></span>
   </div>
 
@@ -310,8 +309,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
     <button onclick="ifFlagFilter('ip')"       id="iff-ip"       class="iff-fbtn"            style="{btn_s}">IN PROGRESS</button>
     <button onclick="ifFlagFilter('flagged')"  id="iff-flagged"  class="iff-fbtn"            style="{btn_s}">All Flags</button>
     <button onclick="ifFlagFilter('PAST_DUE')" id="iff-PAST_DUE" class="iff-fbtn"            style="{btn_s}background:#fee2e2;color:#991b1b;border-color:#fca5a5;">Past Due</button>
-    <button onclick="ifFlagFilter('AT_RISK')"  id="iff-AT_RISK"  class="iff-fbtn"            style="{btn_s}background:#ffedd5;color:#7c2d12;border-color:#fdba74;">At Risk</button>
-    <button onclick="ifFlagFilter('ASM_LATE')" id="iff-ASM_LATE" class="iff-fbtn"            style="{btn_s}background:#fef9c3;color:#713f12;border-color:#fde047;">ASM Late</button>
+    <button onclick="ifFlagFilter('AT_RISK')"  id="iff-AT_RISK"  class="iff-fbtn"            style="{btn_s}background:#fef9c3;color:#713f12;border-color:#fde047;">At Risk</button>
     <button onclick="ifFlagFilter('STALLED')"  id="iff-STALLED"  class="iff-fbtn"            style="{btn_s}background:#fef2f2;color:#dc2626;border-color:#fca5a5;">Stalled</button>
   </div>
 
@@ -345,7 +343,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
     exp:       (function(){{ var s=new Set(_ALL_EXP); _EXCL_EXP.forEach(function(e){{s.delete(e);}}); return s; }})(),
     phase:     null,   // null = show all
     fp:        null,   // null = show all; true/false = filter
-    flag:      'all',  // 'all','flagged','ip','PAST_DUE','AT_RISK','ASM_LATE','STALLED'
+    flag:      'all',  // 'all','flagged','ip','PAST_DUE','AT_RISK','STALLED'
     // text search (lowercase, empty = no filter)
     construct: '', pAI: '', customer: '', submitter: '', operation: '', req_id: '',
   }};
@@ -365,10 +363,9 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   var F_ST = {{
     'PAST_DUE':'background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;',
     'AT_RISK': 'background:#ffedd5;color:#7c2d12;border:1px solid #fdba74;',
-    'ASM_LATE':'background:#fef9c3;color:#713f12;border:1px solid #fde047;',
     'STALLED': 'background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;',
   }};
-  var F_BG = {{'PAST_DUE':'#fff5f5','AT_RISK':'#fffbf5','ASM_LATE':'#fffef0','STALLED':'#fafafa'}};
+  var F_BG = {{'PAST_DUE':'#fff5f5','AT_RISK':'#fffef0','STALLED':'#fafafa'}};
   var BDG = 'display:inline-block;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;white-space:nowrap;margin:1px 1px;';
   var TD  = 'padding:5px 6px;border-bottom:1px solid #f0f0f2;vertical-align:top;font-size:10px;';
 
@@ -434,11 +431,11 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
             + '<td style="'+TD+'max-width:110px;">'+fmtSubmitter(r.submitter)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+st+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
-            + '<td style="'+TD+'max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(r.operation)+'">'+esc(r.operation)+'</td>'
+            + '<td style="'+TD+'max-width:160px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.operation)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+fl+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+esc(r.due_date)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+esc(r.assembly)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+esc(r.lsp_ngs)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+esc(r.lsp_scaleup)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+esc(r.due_date)+'</td>'
             + '<td style="'+TD+'font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">'+esc(r.req_id)+'</td>'
             + '</tr>';
     }});
@@ -603,9 +600,9 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
       {{k:'phase',     lbl:'Phase',      filter:true}},
       {{k:'operation', lbl:'Operation',  filter:true}},
       {{k:'flags',     lbl:'Flags',      filter:false}},
-      {{k:'due_date',  lbl:'Due Date',   filter:false}},
-      {{k:'assembly',  lbl:'Assembly',   filter:false}},
-      {{k:'lsp_ngs',   lbl:'LSP NGS',    filter:false}},
+      {{k:'assembly',   lbl:'Assembly',    filter:false}},
+      {{k:'lsp_scaleup',lbl:'LSP Scale-up',filter:false}},
+      {{k:'due_date',   lbl:'Due Date',   filter:false}},
       {{k:'req_id',    lbl:'Req ID',     filter:true}},
     ];
     var tr = document.createElement('tr');
