@@ -713,7 +713,6 @@ def render_all_projects_dashboard(
         document.querySelector('[data-tab="' + tabName + '"]').classList.add('active');
         document.getElementById('tab-' + tabName).classList.add('active');
         try { localStorage.setItem('dash_activeTab', tabName); } catch(e) {}
-        if (tabName !== 'inflight') { document.body.style.overflow = ''; }
         if (tabName === 'capacity' && typeof window.lspInitChart === 'function') {
             setTimeout(window.lspInitChart, 0);
         }
