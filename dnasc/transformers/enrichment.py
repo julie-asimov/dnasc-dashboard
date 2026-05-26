@@ -41,6 +41,51 @@ _PARTS_TYPES = frozenset({
     'oligo_synthesis_workorder', 'plasmid_synthesis_workorder',
 })
 _ACTIVE_STATUSES = frozenset({'RUNNING', 'READY', 'IN_PROGRESS', 'WAITING', 'BLOCKED', 'LSP_RUNNING'})
+_PHASE_ACTIVE    = frozenset({'RUNNING', 'READY', 'IN_PROGRESS', 'WAITING', 'BLOCKED'})
+
+# Maps (protocol_name, operation_state) → (priority, display_label)
+# Higher priority = further along in the pipeline — used to pick the single
+# most-advanced active step to surface as req_operation.
+_PROTO_MAP: dict[tuple[str, str], tuple[int, str]] = {
+    ('Synthesis Order',                      'RD'): (5,  'SYNTHESIS ORDER: READY'),
+    ('Synthesis Order',                      'RU'): (6,  'SYNTHESIS ORDER: RUNNING'),
+    ('Order Oligos',                         'RD'): (5,  'ORDER OLIGOS: READY'),
+    ('Order Oligos',                         'RU'): (6,  'ORDER OLIGOS: RUNNING'),
+    ('Receive SynPart Synthesis',            'RD'): (7,  'RECEIVE SYNPART SYNTHESIS: READY'),
+    ('Receive SynPart Synthesis',            'RU'): (8,  'RECEIVE SYNPART SYNTHESIS: RUNNING'),
+    ('Receive Plasmid Synthesis',            'RD'): (8,  'RECEIVE PLASMID SYNTHESIS: READY'),
+    ('Receive Plasmid Synthesis',            'RU'): (8,  'RECEIVE PLASMID SYNTHESIS: RUNNING'),
+    ('PCR',                                  'RD'): (8,  'PCR: READY'),
+    ('PCR',                                  'RU'): (9,  'PCR: RUNNING'),
+    ('Fragment Analyzer',                    'RD'): (9,  'FRAGMENT ANALYZER: READY'),
+    ('Fragment Analyzer',                    'RU'): (9,  'FRAGMENT ANALYZER: RUNNING'),
+    ('Golden Gate Assembly',                 'RD'): (10, 'GOLDEN GATE ASSEMBLY: READY'),
+    ('Golden Gate Assembly',                 'RU'): (11, 'GOLDEN GATE ASSEMBLY: RUNNING'),
+    ('Gibson Assembly',                      'RD'): (10, 'GIBSON ASSEMBLY: READY'),
+    ('Gibson Assembly',                      'RU'): (11, 'GIBSON ASSEMBLY: RUNNING'),
+    ('STAR Transformation',                  'RD'): (20, 'TRANSFORMATION: READY'),
+    ('STAR Transformation',                  'RU'): (21, 'TRANSFORMATION: RUNNING'),
+    ('Create Minipreps and Glycerol Stocks', 'RD'): (30, 'MINIPREP: READY'),
+    ('Create Minipreps and Glycerol Stocks', 'RU'): (31, 'MINIPREP: RUNNING'),
+    ('Repick: Miniprep/Glycerol/Media',      'RD'): (31, 'REPICK MINIPREP: READY'),
+    ('Repick: Miniprep/Glycerol/Media',      'RU'): (32, 'REPICK MINIPREP: RUNNING'),
+    ('Rearray 96 to 384',                    'RD'): (35, 'REARRAY: READY'),
+    ('Rearray 96 to 384',                    'RU'): (36, 'REARRAY: RUNNING'),
+    ('DNA Quantification',                   'RD'): (40, 'DNA QUANT: READY'),
+    ('DNA Quantification',                   'RU'): (41, 'DNA QUANT: RUNNING'),
+    ('NGS Sequence Confirmation',            'RD'): (50, 'NGS: READY'),
+    ('NGS Sequence Confirmation',            'RU'): (51, 'NGS: RUNNING'),
+    ('LSP Order',                            'RD'): (60, 'LSP ORDER: READY'),
+    ('LSP Order',                            'RU'): (61, 'LSP ORDER: RUNNING'),
+    ('LSP Receiving',                        'RD'): (65, 'LSP RECEIVING: READY'),
+    ('LSP Receiving',                        'RU'): (66, 'LSP RECEIVING: RUNNING'),
+    ('Glycerol Stocking Scinomix',           'RD'): (70, 'GLYCEROL STOCKING: READY'),
+    ('Glycerol Stocking Scinomix',           'RU'): (71, 'GLYCEROL STOCKING: RUNNING'),
+    ('LSP Reviewing',                        'RD'): (80, 'LSP REVIEWING: READY'),
+    ('LSP Reviewing',                        'RU'): (81, 'LSP REVIEWING: RUNNING'),
+    ('LSP Releasing',                        'RD'): (90, 'LSP RELEASING: READY'),
+    ('LSP Releasing',                        'RU'): (91, 'LSP RELEASING: RUNNING'),
+}
 
 
 def _active_protocols(row) -> set:
@@ -204,6 +249,8 @@ class EnrichmentTransformer:
 
         # ── Per-request computation ───────────────────────────────────
         req_stage             : dict[str, str]  = {}
+        req_phase             : dict[str, str]  = {}
+        req_operation         : dict[str, str]  = {}
         req_is_stalled        : dict[str, bool] = {}
         req_is_asm_review     : dict[str, bool] = {}
         req_is_finished       : dict[str, bool] = {}
@@ -285,14 +332,54 @@ class EnrichmentTransformer:
                 and asm_rows_act['visual_status'].isin(['READY', 'WAITING']).any()
             )
 
+            # fulfills_request stocks — reused for phase, seq_winner
+            _root_stocks = set(
+                r_df[(r_df['fulfills_request'] == True) & ~r_df['STOCK_ID'].fillna('').str.startswith('#')]['STOCK_ID'].dropna()
+            ) if 'fulfills_request' in r_df.columns else set()
+
+            # ── phase label (PARTS / ASM / LSP) ──────────────────────────
+            _phase_rows  = r_df[r_df['visual_status'].isin(_PHASE_ACTIVE) & (r_df['wo_status'].astype(str) != 'CANCELED')]
+            _lsp_ph      = _phase_rows[_phase_rows['type'] == 'lsp_workorder']
+            _asm_ph      = _phase_rows[_phase_rows['type'].isin(_ASM_TYPES) & _phase_rows['STOCK_ID'].astype(str).isin(_root_stocks)]
+            _parts_ph    = _phase_rows[(_phase_rows['type'] != 'lsp_workorder') & ~_phase_rows['STOCK_ID'].astype(str).isin(_root_stocks)]
+            _asm_progressing = _asm_ph[_asm_ph['visual_status'].isin({'RUNNING', 'READY', 'IN_PROGRESS', 'BLOCKED'})]
+            if not _lsp_ph.empty:
+                req_phase[req_id] = 'LSP'
+            elif not _asm_progressing.empty:
+                req_phase[req_id] = 'ASM'
+            elif not _asm_ph.empty or not _parts_ph.empty:
+                req_phase[req_id] = 'PARTS'
+            elif is_stalled:
+                # Fallback for stalled requests: infer from highest-priority non-canceled WO type
+                _nc = r_df[r_df['wo_status'].astype(str) != 'CANCELED']
+                if not _nc[_nc['type'] == 'lsp_workorder'].empty:
+                    req_phase[req_id] = 'LSP'
+                elif not _nc[_nc['type'].isin(_ASM_TYPES) & _nc['STOCK_ID'].astype(str).isin(_root_stocks)].empty:
+                    req_phase[req_id] = 'ASM'
+                else:
+                    req_phase[req_id] = 'PARTS'
+            else:
+                req_phase[req_id] = ''
+
+            # ── active operation (highest-priority RD/RU step) ───────────
+            _best_pri, _best_label = -1, ''
+            for _, _row in r_df[r_df['wo_status'].astype(str) != 'CANCELED'].iterrows():
+                for _p, _s in zip(
+                    (_row['protocol_name'] if isinstance(_row.get('protocol_name'), (list, np.ndarray)) else []),
+                    (_row['operation_state'] if isinstance(_row.get('operation_state'), (list, np.ndarray)) else []),
+                ):
+                    _key = (str(_p), str(_s))
+                    if _key in _PROTO_MAP:
+                        _pri, _lbl = _PROTO_MAP[_key]
+                        if _pri > _best_pri:
+                            _best_pri, _best_label = _pri, _lbl
+            req_operation[req_id] = _best_label
+
             # seq winner: deliverable constructs have ≥1 seq-confirmed colony,
             # no LSP workorder exists yet — winner in hand, not yet acted on.
             # Restricted to fulfills_request=True stocks to avoid foreign-construct
             # inputs (e.g. backbone Gibson pAI-21680) triggering the flag.
             # Draft placeholder stocks (#-prefixed) are excluded.
-            _root_stocks = set(
-                r_df[(r_df['fulfills_request'] == True) & ~r_df['STOCK_ID'].fillna('').str.startswith('#')]['STOCK_ID'].dropna()
-            ) if 'fulfills_request' in r_df.columns else set()
             _root_rows = r_df[r_df['STOCK_ID'].isin(_root_stocks)] if _root_stocks else r_df
             _seq_col = _root_rows['seq_confirmed'] if 'seq_confirmed' in _root_rows.columns else None
             _has_lsp = 'lsp_workorder' in active_rows['type'].values
@@ -332,6 +419,8 @@ class EnrichmentTransformer:
 
         # ── Broadcast back to all rows ────────────────────────────────
         df['stage']               = df['req_id'].map(req_stage)
+        df['req_phase']           = df['req_id'].map(req_phase).fillna('')
+        df['req_operation']       = df['req_id'].map(req_operation).fillna('')
         df['is_stalled']          = df['req_id'].map(req_is_stalled).fillna(False)
         df['is_asm_review']       = df['req_id'].map(req_is_asm_review).fillna(False)
         df['is_finished']         = df['req_id'].map(req_is_finished).fillna(False)

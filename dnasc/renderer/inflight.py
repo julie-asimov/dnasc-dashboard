@@ -80,9 +80,12 @@ def _bdg(text: str, sty: str) -> str:
     return f'<span style="{_BADGE}{sty}">{_e(text)}</span>'
 
 
-_PAI_STY  = ('display:inline-block;background:#ede9fe;color:#6d28d9;border:1px solid #c4b5fd;'
-             'padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;'
-             'font-size:9px;white-space:nowrap;margin:1px 1px;')
+_PAI_STY    = ('display:inline-block;background:#ede9fe;color:#6d28d9;border:1px solid #c4b5fd;'
+               'padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;'
+               'font-size:9px;white-space:nowrap;margin:1px 1px;')
+_PAI_STY_RD = ('display:inline-block;background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;'
+               'padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;'
+               'font-size:9px;white-space:nowrap;margin:1px 1px;')
 _CUSTOMER_LABELS = {
     'R_D':               ('R&D',        '#f0fdf4', '#166534'),
     'INTERNAL_CLD':      ('CLD',        '#dbeafe', '#1d4ed8'),
@@ -91,11 +94,12 @@ _CUSTOMER_LABELS = {
 }
 
 
-def _pai_badges(pai_str: str) -> str:
+def _pai_badges(pai_str: str, customer: str = '') -> str:
     if not pai_str:
         return ''
+    sty = _PAI_STY_RD if customer == 'R_D' else _PAI_STY
     return ''.join(
-        f'<span style="{_PAI_STY}">{_e(p.strip())}</span>'
+        f'<span style="{sty}">{_e(p.strip())}</span>'
         for p in pai_str.split(',') if p.strip()
     )
 
@@ -122,19 +126,19 @@ def _row_html(r: dict) -> str:
     return (
         f'<tr style="{bg}">'
         f'<td style="{_TD}{fps}">{"★" if r["fp"] else ""}</td>'
-        f'<td style="{_TD}max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{exp}">{exp}</td>'
-        f'<td style="{_TD}">{_e(r["construct"])}</td>'
-        f'<td style="{_TD}">{_pai_badges(r["pAI"])}</td>'
-        f'<td style="{_TD}">{_cust_badge(r["customer"], r["fp"])}</td>'
-        f'<td style="{_TD}">{_e(r["submitter"])}</td>'
-        f'<td style="{_TD}">{st}</td>'
-        f'<td style="{_TD}">{ph}</td>'
-        f'<td style="{_TD}">{_e(r["operation"])}</td>'
-        f'<td style="{_TD}">{fl}</td>'
+        f'<td style="{_TD}max-width:160px;overflow-wrap:break-word;word-break:break-word;">{exp}</td>'
+        f'<td style="{_TD}max-width:180px;overflow-wrap:break-word;word-break:break-word;">{_e(r["construct"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{_pai_badges(r["pAI"], r["customer"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{_cust_badge(r["customer"], r["fp"])}</td>'
+        f'<td style="{_TD}max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{_e(r["submitter"])}">{_e(r["submitter"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{st}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{ph}</td>'
+        f'<td style="{_TD}max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{_e(r["operation"])}">{_e(r["operation"])}</td>'
+        f'<td style="{_TD}white-space:nowrap;">{fl}</td>'
         f'<td style="{_TD}white-space:nowrap;">{_e(r["due_date"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{_e(r["assembly"])}</td>'
         f'<td style="{_TD}white-space:nowrap;">{_e(r["lsp_ngs"])}</td>'
-        f'<td style="{_TD}font-family:monospace;font-size:9px;color:#9ca3af;word-break:break-all;">{_e(r["req_id"])}</td>'
+        f'<td style="{_TD}font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">{_e(r["req_id"])}</td>'
         f'</tr>'
     )
 
@@ -249,6 +253,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     flagged  = sum(1 for r in _ip if r['flags'])
     past_due = sum(1 for r in _ip if 'PAST_DUE' in r['flags'])
     at_risk  = sum(1 for r in _ip if 'AT_RISK'  in r['flags'])
+    asm_late = sum(1 for r in _ip if 'ASM_LATE' in r['flags'])
     stalled  = sum(1 for r in _ip if 'STALLED'  in r['flags'])
 
     data_json          = json.dumps(records, ensure_ascii=False)
@@ -281,6 +286,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
     <span>Flagged: <b style="color:#b45309;">{flagged}</b></span>
     <span>Past Due: <b style="color:#991b1b;">{past_due}</b></span>
     <span>At Risk: <b style="color:#7c2d12;">{at_risk}</b></span>
+    <span>ASM Late: <b style="color:#713f12;">{asm_late}</b></span>
     <span>Stalled: <b style="color:#dc2626;">{stalled}</b></span>
   </div>
 
@@ -355,8 +361,9 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 
   function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}}
   function bdg(t,st){{return '<span style="'+BDG+st+'">'+esc(t)+'</span>';}}
-  var PAI_STY='display:inline-block;background:#ede9fe;color:#6d28d9;border:1px solid #c4b5fd;padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;font-size:9px;white-space:nowrap;margin:1px 1px;';
-  function paiBadges(s){{if(!s)return'';return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+PAI_STY+'">'+esc(p)+'</span>':'';}}).join('');}}
+  var PAI_STY   ='display:inline-block;background:#ede9fe;color:#6d28d9;border:1px solid #c4b5fd;padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;font-size:9px;white-space:nowrap;margin:1px 1px;';
+  var PAI_STY_RD='display:inline-block;background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;font-size:9px;white-space:nowrap;margin:1px 1px;';
+  function paiBadges(s,cust){{if(!s)return'';var st=cust==='R_D'?PAI_STY_RD:PAI_STY;return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+st+'">'+esc(p)+'</span>':'';}}).join('');}}
   var CUST_MAP={{'R_D':['R&D','#f0fdf4','#166534'],'INTERNAL_CLD':['CLD','#dbeafe','#1d4ed8'],'TECH_OUT':['Tech Out','#ffedd5','#c2410c'],'EXTERNAL_TECH_OUT':['Ext TechOut','#fce7f3','#be185d']}};
   function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];var p=fp?'<span style="padding:1px 4px;border-radius:3px;font-size:9px;background:#fef9c3;color:#854d0e;">Partner</span>':'';return'<span style="padding:2px 6px;border-radius:3px;font-size:10px;background:'+m[1]+';color:'+m[2]+';">'+m[0]+'</span>'+p;}}
 
@@ -406,19 +413,19 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
       var fl  = r.flags.map(function(f){{return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);}}).join('');
       html += '<tr style="'+bg+'">'
             + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
-            + '<td style="'+TD+'max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(r.exp)+'">'+esc(r.exp)+'</td>'
-            + '<td style="'+TD+'">'+esc(r.construct)+'</td>'
-            + '<td style="'+TD+'">'+paiBadges(r.pAI)+'</td>'
-            + '<td style="'+TD+'">'+custBadge(r.customer,r.fp)+'</td>'
-            + '<td style="'+TD+'">'+esc(r.submitter)+'</td>'
-            + '<td style="'+TD+'">'+st+'</td>'
-            + '<td style="'+TD+'">'+ph+'</td>'
-            + '<td style="'+TD+'">'+esc(r.operation)+'</td>'
-            + '<td style="'+TD+'">'+fl+'</td>'
+            + '<td style="'+TD+'max-width:160px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.exp)+'</td>'
+            + '<td style="'+TD+'max-width:180px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.construct)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
+            + '<td style="'+TD+'max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(r.submitter)+'">'+esc(r.submitter)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+st+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
+            + '<td style="'+TD+'max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(r.operation)+'">'+esc(r.operation)+'</td>'
+            + '<td style="'+TD+'white-space:nowrap;">'+fl+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+esc(r.due_date)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+esc(r.assembly)+'</td>'
             + '<td style="'+TD+'white-space:nowrap;">'+esc(r.lsp_ngs)+'</td>'
-            + '<td style="'+TD+'font-family:monospace;font-size:9px;color:#9ca3af;word-break:break-all;">'+esc(r.req_id)+'</td>'
+            + '<td style="'+TD+'font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">'+esc(r.req_id)+'</td>'
             + '</tr>';
     }});
     if (!html) html = '<tr><td colspan="14" style="padding:20px;color:#6b7280;font-size:11px;text-align:center;">No matching requests.</td></tr>';
@@ -625,10 +632,10 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 // Script is at end of body so DOM is ready; call directly
 if (document.readyState === 'loading') {{
   document.addEventListener('DOMContentLoaded', function() {{
-    window.ifBuildHead(); window.ifRender();
+    window.ifBuildHead(); setTimeout(window.ifRender, 0);
   }});
 }} else {{
-  window.ifBuildHead(); window.ifRender();
+  window.ifBuildHead(); setTimeout(window.ifRender, 0);
 }}
 </script>
 </body>
