@@ -70,10 +70,10 @@ class LIMSExtractor:
 
         # Dedup to one row per (workorder_id, colony_number) — a colony can produce
         # multiple well_content JOIN rows (e.g. plasmid_stock + strain records).
-        # Sort available=True first so the "available" flag is preserved on keep="first".
+        # Sort seq_confirmed then available descending so True rows win ties.
         unique_colonies = (
             raw_df[raw_df["colony_number"].notna()]
-            .sort_values("available", ascending=False)
+            .sort_values(["seq_confirmed", "available"], ascending=False)
             .drop_duplicates(subset=["workorder_id", "colony_number"], keep="first")
             .copy()
         )

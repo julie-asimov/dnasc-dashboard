@@ -363,8 +363,14 @@ class EnrichmentTransformer:
                 req_phase[req_id] = ''
 
             # ── active operation (highest-priority RD/RU step) ───────────
+            # Scoped to root/fulfills_request stocks + LSP rows to avoid foreign
+            # backbone constructs (e.g. pAI-21680) polluting the operation label.
+            _nc = r_df[r_df['wo_status'].astype(str) != 'CANCELED']
+            _op_rows = _nc[
+                _nc['STOCK_ID'].isin(_root_stocks) | (_nc['type'] == 'lsp_workorder')
+            ] if _root_stocks else _nc
             _best_pri, _best_label = -1, ''
-            for _, _row in r_df[r_df['wo_status'].astype(str) != 'CANCELED'].iterrows():
+            for _, _row in _op_rows.iterrows():
                 for _p, _s in zip(
                     (_row['protocol_name'] if isinstance(_row.get('protocol_name'), (list, np.ndarray)) else []),
                     (_row['operation_state'] if isinstance(_row.get('operation_state'), (list, np.ndarray)) else []),

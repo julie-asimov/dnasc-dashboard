@@ -1032,8 +1032,8 @@ def render_all_projects_dashboard(
             if (savedActive === '1') { document.getElementById('active_toggle').checked = true; }
             if (savedSearch) { document.getElementById('search_box').value = savedSearch; }
             if (savedActive === '1' || savedSearch) { filterDashboard(); }
-            if (savedTab && savedTab !== 'tracking') { switchTab(savedTab); }
             var eh = document.getElementById('_earlyhide'); if (eh) eh.remove();
+            if (savedTab && savedTab !== 'tracking' && document.querySelector('[data-tab="' + savedTab + '"]')) { switchTab(savedTab); }
         } catch(e) {}
         var firstExp = document.querySelector('.exp-content');
         var firstExpIcon = document.querySelector('.exp-toggle-icon');

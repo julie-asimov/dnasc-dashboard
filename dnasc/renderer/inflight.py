@@ -2,12 +2,12 @@
 dnasc/renderer/inflight.py
 ──────────────────────────
 Requests In Flight tab.
-Default view pre-rendered in Python — instant tab show, no JS needed on load.
-JS handles re-filtering/sorting; all filter state in _flt object (no DOM queries in hot path).
+Python builds the data payload (records list + metadata) and emits it as JSON
+into the iframe HTML. The table is rendered entirely client-side by window.ifRender()
+so filtering and sorting work without round-trips.
 """
 
 from __future__ import annotations
-import html as _html_mod
 import json
 from datetime import date, timedelta
 
@@ -46,165 +46,6 @@ def _milestones(created_at, for_partner: bool) -> dict:
 _DEFAULT_EXCLUDED_EXP  = frozenset()
 _DEFAULT_HIDDEN_STATUS = frozenset(['FULFILLED', 'CANCELED'])
 _PINNED_EXPS           = frozenset(['LSP Refill Requests', 'A469-Build DNASC CHO Destination Vectors'])
-
-# ── Python-side row rendering ─────────────────────────────────────────────────
-
-_STATUS_STYLE = {
-    'IN_PROGRESS': 'background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;',
-    'FULFILLED':   'background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;',
-    'CANCELED':    'background:#f5f5f7;color:#6b7280;border:1px solid #d1d5db;',
-    'PLANNED':     'background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;',
-}
-_PHASE_STYLE = {
-    'LSP':   'background:#059669;color:#fff;border:1px solid #047857;',
-    'ASM':   'background:#2563eb;color:#fff;border:1px solid #1d4ed8;',
-    'PARTS': 'background:#ea580c;color:#fff;border:1px solid #c2410c;',
-}
-_FLAG_STYLE = {
-    'PAST_DUE': 'background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;',
-    'AT_RISK':  'background:#fef9c3;color:#713f12;border:1px solid #fde047;',
-    'STALLED':  'background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;',
-}
-_FLAG_ROW_BG = {
-    'PAST_DUE': '#fff5f5',
-    'AT_RISK':  '#fffef0',
-    'STALLED':  '#fef2f2',
-}
-_BADGE = 'display:inline-block;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;white-space:nowrap;margin:1px 1px;'
-_TD    = 'padding:5px 6px;border-bottom:1px solid #f0f0f2;vertical-align:top;font-size:10px;'
-
-
-def _e(s: str) -> str:
-    return _html_mod.escape(str(s), quote=True)
-
-
-def _bdg(text: str, sty: str) -> str:
-    return f'<span style="{_BADGE}{sty}">{_e(text)}</span>'
-
-
-_PAI_STY    = ('display:inline-block;background:#ede9fe;color:#6d28d9;border:1px solid #c4b5fd;'
-               'padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;'
-               'font-size:9px;white-space:nowrap;margin:1px 1px;')
-_PAI_STY_RD = ('display:inline-block;background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;'
-               'padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;'
-               'font-size:9px;white-space:nowrap;margin:1px 1px;')
-_CUSTOMER_LABELS = {
-    'R_D':               ('R&D',        '#f0fdf4', '#166534'),
-    'INTERNAL_CLD':      ('CLD',        '#dbeafe', '#1d4ed8'),
-    'TECH_OUT':          ('Tech Out',   '#ffedd5', '#c2410c'),
-    'EXTERNAL_TECH_OUT': ('Ext TechOut','#fce7f3', '#be185d'),
-}
-
-
-def _pai_badges(pai_str: str, customer: str = '') -> str:
-    if not pai_str:
-        return ''
-    sty = _PAI_STY_RD if customer == 'R_D' else _PAI_STY
-    return ''.join(
-        f'<span style="{sty}">{_e(p.strip())}</span>'
-        for p in pai_str.split(',') if p.strip()
-    )
-
-
-def _cust_badge(cust: str, for_partner: bool = False) -> str:
-    label, bg, color = _CUSTOMER_LABELS.get(cust, ('—', '#f3f4f6', '#6b7280'))
-    return (f'<span style="padding:2px 6px;border-radius:3px;font-size:10px;'
-            f'background:{bg};color:{color};">{label}</span>')
-
-
-_DATE_PILL = ('display:inline-block;padding:0px 5px;border-radius:3px;'
-              'font-size:9px;font-weight:600;white-space:nowrap;margin-top:2px;')
-
-def _fmt_date(date_str: str) -> str:
-    if not date_str:
-        return ''
-    try:
-        from datetime import date as _date
-        d = _date.fromisoformat(date_str)
-        diff = (d - _date.today()).days
-        if diff < 0:
-            bg, clr, lbl = '#fee2e2', '#991b1b', f'{abs(diff)}d ago'
-        elif diff == 0:
-            bg, clr, lbl = '#fef3c7', '#92400e', 'today'
-        elif diff <= 7:
-            bg, clr, lbl = '#fef9c3', '#713f12', f'in {diff}d'
-        else:
-            bg, clr, lbl = '#f3f4f6', '#6b7280', f'in {diff}d'
-        return (f'<span style="color:#374151;">{_e(date_str)}</span>'
-                f'<br><span style="background:{bg};color:{clr};{_DATE_PILL}">{lbl}</span>')
-    except Exception:
-        return _e(date_str)
-
-
-def _fmt_submitter(email: str) -> str:
-    if not email or '@' not in email:
-        return _e(email)
-    local, domain = email.split('@', 1)
-    name = ' '.join(p.capitalize() for p in local.split('.'))
-    org  = domain.split('.')[0].capitalize()
-    external = not domain.lower().startswith('asimov.')
-    org_sty = ('display:block;font-size:9px;font-weight:600;'
-               'background:#fef3c7;color:#92400e;border:1px solid #fcd34d;'
-               'border-radius:3px;padding:1px 5px;margin-top:1px;display:inline-block;'
-               ) if external else 'display:block;color:#9ca3af;font-size:9px;'
-    return (f'<span style="display:block;">{_e(name)}</span>'
-            f'<span style="{org_sty}">{_e(org)}</span>')
-
-
-def _row_html(r: dict) -> str:
-    bg = ''
-    for f in r['flags']:
-        if f in _FLAG_ROW_BG:
-            bg = f'background:{_FLAG_ROW_BG[f]};'
-            break
-    fps = 'color:#7c3aed;font-weight:700;' if r['fp'] else ''
-    st  = _bdg(r['status'].replace('_', ' '), _STATUS_STYLE.get(r['status'], 'background:#f5f5f7;color:#6b7280;border:1px solid #d1d5db;'))
-    ph  = _bdg(r['phase'], _PHASE_STYLE[r['phase']]) if r['phase'] in _PHASE_STYLE else ''
-    fl  = ''.join(_bdg(f.replace('_', ' '), _FLAG_STYLE.get(f, _FLAG_STYLE['STALLED'])) for f in r['flags'])
-    exp = _e(r['exp'])
-    return (
-        f'<tr style="{bg}">'
-        f'<td style="{_TD}{fps}">{"★" if r["fp"] else ""}</td>'
-        f'<td style="{_TD}max-width:160px;overflow-wrap:break-word;word-break:break-word;">{exp}</td>'
-        f'<td style="{_TD}max-width:180px;overflow-wrap:break-word;word-break:break-word;">{_e(r["construct"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_pai_badges(r["pAI"], r["customer"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_cust_badge(r["customer"], r["fp"])}</td>'
-        f'<td style="{_TD}max-width:110px;">{_fmt_submitter(r["submitter"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{st}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{ph}</td>'
-        f'<td style="{_TD}max-width:160px;overflow-wrap:break-word;word-break:break-word;">{_e(r["operation"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{fl}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_fmt_date(r["assembly"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_fmt_date(r["lsp_scaleup"])}</td>'
-        f'<td style="{_TD}white-space:nowrap;">{_fmt_date(r["due_date"])}</td>'
-        f'<td style="{_TD}font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">{_e(r["req_id"])}</td>'
-        f'</tr>'
-    )
-
-
-def _grp_header_html(exp: str, fp: bool) -> str:
-    star = ' ★' if fp else ''
-    return (
-        f'<tr class="if-grp">'
-        f'<td colspan="14" style="padding:4px 8px;font-size:10px;font-weight:700;color:#4c1d95;'
-        f'background:linear-gradient(90deg,#ede9fe,#faf5ff);border-top:2px solid #7c3aed;">'
-        f'{_e(exp)}{_e(star)}</td></tr>'
-    )
-
-
-def _build_default_tbody(records: list) -> str:
-    parts, prev_exp = [], None
-    for r in records:
-        if r['status'] in _DEFAULT_HIDDEN_STATUS:
-            continue
-        if r['exp'] in _DEFAULT_EXCLUDED_EXP:
-            continue
-        if r['exp'] != prev_exp:
-            prev_exp = r['exp']
-            parts.append(_grp_header_html(r['exp'], r['fp']))
-        parts.append(_row_html(r))
-    return ''.join(parts)
-
 
 # ── Main renderer ─────────────────────────────────────────────────────────────
 
@@ -272,7 +113,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
             'pinned':    str(row.get('experiment_name', '') or '') in _PINNED_EXPS,
         })
 
-    # Sort: pinned last; then experiments with any flag first; flagged rows first within exp; then by assembly date
+    # Sort: pinned last; flagged experiments first; within experiment flagged rows
+    # first; then by assembly date. exp_min and exp come BEFORE per-row flags so
+    # all rows of an experiment stay contiguous (ifRender relies on this).
     _exp_min = {}
     for r in records:
         if r['assembly']:
@@ -281,8 +124,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     records.sort(key=lambda r: (
         1 if r['pinned'] else 0,
         0 if r['exp'] in _exp_has_flags else 1,
-        0 if r['flags'] else 1,
         _exp_min.get(r['exp'], '9999'),
+        r['exp'],
+        0 if r['flags'] else 1,
         r['assembly'],
     ))
 
@@ -364,7 +208,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 
   // ── Filter state — ifRender NEVER reads from DOM ──────────────────────────
   var _flt = {{
-    status:    new Set(['IN_PROGRESS','PLANNED']),
+    status:    new Set(_ALL_ST),
     exp:       (function(){{ var s=new Set(_ALL_EXP); _EXCL_EXP.forEach(function(e){{s.delete(e);}}); return s; }})(),
     phase:     null,   // null = show all
     fp:        null,   // null = show all; true/false = filter
@@ -426,45 +270,53 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   }}
 
   // ── Render (rebuilds tbody from _IFD using _flt) ──────────────────────────
+  // Buckets passing rows by experiment before rendering so column sorts never
+  // produce duplicate experiment headers or scattered rows.
+  function _rowHtml(r) {{
+    var bg='';
+    for(var fi=0;fi<r.flags.length;fi++){{if(F_BG[r.flags[fi]]){{bg='background:'+F_BG[r.flags[fi]]+';';break;}}}}
+    var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
+    var st  = bdg(r.status.replace(/_/g,' '), S_ST[r.status]||'background:#f5f5f7;color:#6b7280;border:1px solid #d1d5db;');
+    var ph  = (r.phase && P_ST[r.phase]) ? bdg(r.phase, P_ST[r.phase]) : '';
+    var fl  = r.flags.map(function(f){{return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);}}).join('');
+    return '<tr style="'+bg+'">'
+          + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
+          + '<td style="'+TD+'max-width:160px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.exp)+'</td>'
+          + '<td style="'+TD+'max-width:180px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.construct)+'</td>'
+          + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
+          + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
+          + '<td style="'+TD+'max-width:110px;">'+fmtSubmitter(r.submitter)+'</td>'
+          + '<td style="'+TD+'white-space:nowrap;">'+st+'</td>'
+          + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
+          + '<td style="'+TD+'max-width:160px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.operation)+'</td>'
+          + '<td style="'+TD+'white-space:nowrap;">'+fl+'</td>'
+          + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.assembly)+'</td>'
+          + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.lsp_scaleup)+'</td>'
+          + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.due_date)+'</td>'
+          + '<td style="'+TD+'font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">'+esc(r.req_id)+'</td>'
+          + '</tr>';
+  }}
   window.ifRender = function() {{
     window.ifBuildHead();
     var tbody = document.getElementById('inflight-tbody');
     if (!tbody) return;
-    var html = '', prevExp = null;
+    var expOrder = [], buckets = {{}};
     _IFD.forEach(function(r) {{
       if (!_pass(r)) return;
-      if (r.exp !== prevExp) {{
-        prevExp = r.exp;
-        var grpSt = r.pinned
-          ? 'background:linear-gradient(90deg,#f3f4f6,#f9fafb);border-top:2px solid #9ca3af;color:#4b5563;'
-          : r.fp
-            ? 'background:linear-gradient(90deg,#ede9fe,#faf5ff);border-top:2px solid #7c3aed;color:#4c1d95;'
-            : 'background:linear-gradient(90deg,#dbeafe,#eff6ff);border-top:2px solid #2563eb;color:#1e3a8a;';
-        html += '<tr class="if-grp"><td colspan="14" style="padding:4px 8px;font-size:10px;font-weight:700;'+grpSt+'">'
-              + esc(r.exp) + (r.fp ? ' ★' : '') + '</td></tr>';
-      }}
-      var bg='';
-      for(var fi=0;fi<r.flags.length;fi++){{if(F_BG[r.flags[fi]]){{bg='background:'+F_BG[r.flags[fi]]+';';break;}}}}
-      var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
-      var st  = bdg(r.status.replace(/_/g,' '), S_ST[r.status]||'background:#f5f5f7;color:#6b7280;border:1px solid #d1d5db;');
-      var ph  = (r.phase && P_ST[r.phase]) ? bdg(r.phase, P_ST[r.phase]) : '';
-      var fl  = r.flags.map(function(f){{return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);}}).join('');
-      html += '<tr style="'+bg+'">'
-            + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
-            + '<td style="'+TD+'max-width:160px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.exp)+'</td>'
-            + '<td style="'+TD+'max-width:180px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.construct)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
-            + '<td style="'+TD+'max-width:110px;">'+fmtSubmitter(r.submitter)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+st+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
-            + '<td style="'+TD+'max-width:160px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.operation)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+fl+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.assembly)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.lsp_scaleup)+'</td>'
-            + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.due_date)+'</td>'
-            + '<td style="'+TD+'font-family:monospace;font-size:9px;color:#9ca3af;overflow-wrap:anywhere;">'+esc(r.req_id)+'</td>'
-            + '</tr>';
+      if (!buckets.hasOwnProperty(r.exp)) {{ expOrder.push(r.exp); buckets[r.exp] = {{rows:[], fp:r.fp, pinned:r.pinned}}; }}
+      buckets[r.exp].rows.push(r);
+    }});
+    var html = '';
+    expOrder.forEach(function(exp) {{
+      var g = buckets[exp];
+      var grpSt = g.pinned
+        ? 'background:linear-gradient(90deg,#f3f4f6,#f9fafb);border-top:2px solid #9ca3af;color:#4b5563;'
+        : g.fp
+          ? 'background:linear-gradient(90deg,#ede9fe,#faf5ff);border-top:2px solid #7c3aed;color:#4c1d95;'
+          : 'background:linear-gradient(90deg,#dbeafe,#eff6ff);border-top:2px solid #2563eb;color:#1e3a8a;';
+      html += '<tr class="if-grp"><td colspan="14" style="padding:4px 8px;font-size:10px;font-weight:700;'+grpSt+'">'
+            + esc(exp) + (g.fp ? ' ★' : '') + '</td></tr>';
+      g.rows.forEach(function(r) {{ html += _rowHtml(r); }});
     }});
     if (!html) html = '<tr><td colspan="14" style="padding:20px;color:#6b7280;font-size:11px;text-align:center;">No matching requests.</td></tr>';
     tbody.innerHTML = html;
@@ -555,7 +407,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
       var chk = (fset === null) || fset.has(v);
       h += '<label style="display:flex;align-items:center;gap:5px;font-size:9px;padding:2px 0;cursor:pointer;">'
          + '<input type="checkbox" class="if-cbx" data-col="'+k+'" data-val="'+esc(v)+'" '+(chk?'checked ':'')
-         + 'onchange="_ifToggle(\\''+k+'\\',\\''+esc(v.replace(/'/g,"'"))+'\\',this.checked)">'
+         + 'onchange="_ifToggle(this.dataset.col,this.dataset.val,this.checked)">'
          + esc(v) + '</label>';
     }});
     return h;

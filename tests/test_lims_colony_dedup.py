@@ -25,7 +25,7 @@ def _compute_colony_summary(raw_df):
     # Fixed: dedup to one row per (workorder_id, colony_number)
     unique_colonies = (
         raw_df[raw_df["colony_number"].notna()]
-        .sort_values("available", ascending=False)
+        .sort_values(["seq_confirmed", "available"], ascending=False)
         .drop_duplicates(subset=["workorder_id", "colony_number"], keep="first")
         .copy()
     )
@@ -33,6 +33,7 @@ def _compute_colony_summary(raw_df):
     colony_summary = unique_colonies.groupby("workorder_id").agg(
         total_colonies    =("colony_number", "nunique"),
         available_colonies=("available", lambda x: x[x == True].count()),
+        seq_confirmed     =("seq_confirmed", lambda x: (x == True).sum()),
     ).reset_index()
 
     # Fixed: filter null-colony rows from plate labels
@@ -46,15 +47,16 @@ def _compute_colony_summary(raw_df):
     return colony_summary, plate_info
 
 
-def _make_raw(workorder_id, colony_number, available, well_id=1, plate_id=100, n_join_rows=1):
+def _make_raw(workorder_id, colony_number, available, well_id=1, plate_id=100, n_join_rows=1, seq_confirmed=None):
     """Create n_join_rows rows for the same colony (simulates multi-join fan-out)."""
     return [
         {
-            "workorder_id":  workorder_id,
-            "colony_number": colony_number,
-            "available":     available,
-            "well_id":       well_id,
-            "plate_id":      plate_id,
+            "workorder_id":   workorder_id,
+            "colony_number":  colony_number,
+            "available":      available,
+            "seq_confirmed":  seq_confirmed,
+            "well_id":        well_id,
+            "plate_id":       plate_id,
             "plate_protocol": "Miniprep",
         }
         for _ in range(n_join_rows)
@@ -94,6 +96,30 @@ class TestColonyDedup:
         summary, _ = _compute_colony_summary(raw)
         assert summary.loc[summary["workorder_id"] == "WO-1", "total_colonies"].iloc[0] == 2
         assert summary.loc[summary["workorder_id"] == "WO-1", "available_colonies"].iloc[0] == 1
+
+
+    def test_seq_confirmed_true_wins_over_nan(self):
+        """plasmid_stock row (seq_confirmed=True) must win over strain row (seq_confirmed=NaN)
+        even when both have the same available value — the bug reported in code review."""
+        rows = [
+            _make_raw("WO-1", 5, True, seq_confirmed=True)[0],   # plasmid_stock row
+            _make_raw("WO-1", 5, True, seq_confirmed=None)[0],   # strain row
+        ]
+        raw = pd.DataFrame(rows)
+        summary, _ = _compute_colony_summary(raw)
+        assert summary.loc[summary["workorder_id"] == "WO-1", "seq_confirmed"].iloc[0] == 1
+
+    def test_seq_confirmed_not_lost_across_multiple_colonies(self):
+        """seq_confirmed count is correct across a mix of sequenced and unsequenced colonies."""
+        rows = (
+            _make_raw("WO-1", 1, True, seq_confirmed=True)[0:1] +   # confirmed
+            _make_raw("WO-1", 1, True, seq_confirmed=None)[0:1] +   # fan-out, should lose tie
+            _make_raw("WO-1", 2, True, seq_confirmed=None)[0:1] +   # not confirmed
+        [])
+        raw = pd.DataFrame(rows)
+        summary, _ = _compute_colony_summary(raw)
+        assert summary.loc[summary["workorder_id"] == "WO-1", "total_colonies"].iloc[0] == 2
+        assert summary.loc[summary["workorder_id"] == "WO-1", "seq_confirmed"].iloc[0] == 1
 
 
 class TestPlateLabelNullFilter:
