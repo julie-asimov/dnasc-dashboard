@@ -28,3 +28,9 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+# Local scratch / notebooks
+chart.min.js
+inventory_check/
+query_results/
+twist_orders.ipynb
