@@ -26,6 +26,7 @@ from google.cloud import bigquery
 
 from dnasc.config import PipelineConfig
 from dnasc.logger import get_logger
+from dnasc import protocols as proto
 
 log = get_logger(__name__)
 
@@ -657,11 +658,8 @@ def populate_synthetic_optracker_batch(
         ops_df["ngs_run_number"] = None
 
     # ── Protocol filtering ────────────────────────────────────────────────────
-    lsp_only = {
-        "LSP Order", "LSP Receiving", "LSP Reviewing", "LSP Releasing",
-        "LSP Aliquoting", "LSP QC", "LSP Processing", "LSP Shipping",
-    }
-    tfm_only = {"STAR Transformation", "Create Minipreps and Glycerol Stocks"}
+    lsp_only = {proto.LSP_ORDER, proto.LSP_RECEIVING, proto.LSP_REVIEWING, proto.LSP_RELEASING}
+    tfm_only = {proto.STAR_TRANSF, proto.MINIPREP}
     is_tfm     = ops_df["synthetic_id"].str.upper().str.contains("STBL3|EPI400|TRANSFORMATION|TFM|STREAK")
     is_lsp_orp = ops_df["synthetic_id"].str.upper().str.startswith("LSP-")
     ops_df = ops_df[
@@ -1040,7 +1038,7 @@ def resolve_downstream_plates(
     import json
 
     # Rearray alone doesn't satisfy downstream — NGS/Quant must be present
-    SEQ_PROTOCOLS = {'DNA Quantification', 'NGS Sequence Confirmation'}
+    SEQ_PROTOCOLS = proto.SEQ_PROTOS
     MINIPREP_KEYS = {'Miniprep', 'miniprep', 'Minipreps', 'minipreps'}
 
     # ── STEP 1: Find workorders missing downstream ops (vectorized) ───────────
@@ -1050,12 +1048,12 @@ def resolve_downstream_plates(
         return set(x) if isinstance(x, list) else set()
 
     proto_sets = final_df['protocol_name'].map(_protocol_set)
-    has_miniprep  = proto_sets.map(lambda s: 'Create Minipreps and Glycerol Stocks' in s)
+    has_miniprep  = proto_sets.map(lambda s: proto.MINIPREP in s)
     has_seq       = proto_sets.map(lambda s: bool(s & SEQ_PROTOCOLS))
-    has_star      = proto_sets.map(lambda s: 'STAR Transformation' in s)
-    has_rearray   = proto_sets.map(lambda s: 'Rearray 96 to 384' in s)
+    has_star      = proto_sets.map(lambda s: proto.STAR_TRANSF in s)
+    has_rearray   = proto_sets.map(lambda s: proto.REARRAY in s)
 
-    has_repick = proto_sets.map(lambda s: 'Repick: Miniprep/Glycerol/Media' in s)
+    has_repick = proto_sets.map(lambda s: proto.REPICK in s)
     gg_needs = has_miniprep & (~has_seq | has_repick)
 
     def _tfm_has_ngs_plate(plates_json):
@@ -1063,7 +1061,7 @@ def resolve_downstream_plates(
             return False
         try:
             plates = json.loads(plates_json) if isinstance(plates_json, str) else {}
-            return 'NGS Sequence Confirmation' in plates
+            return proto.NGS in plates
         except Exception:
             return False
 
@@ -1117,8 +1115,8 @@ def resolve_downstream_plates(
 
     # ── STEP 3: Pre-collect all downstream plate IDs so both LIMS well
     # queries can be merged into one BQ call ──────────────────────────────────
-    REARRAY_KEYS = {'Rearray 96 to 384'}
-    QUANT_KEYS   = {'DNA Quant', 'DNA Quantification', 'Quant'}
+    REARRAY_KEYS = {proto.REARRAY}
+    QUANT_KEYS   = {'DNA Quant', proto.DNA_QUANT, 'Quant'}
 
     downstream_plate_rows: list[dict] = []
     for _, mrow in missing_df.iterrows():
@@ -1200,7 +1198,7 @@ def resolve_downstream_plates(
         JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt
             ON op_param.parameter_type_id = pt.id
         WHERE o.state IN ('SC', 'FA', 'RD', 'RU', 'CA')
-          AND p.name IN ('Rearray 96 to 384', 'DNA Quantification', 'NGS Sequence Confirmation')
+          AND p.name IN ('{proto.REARRAY}', '{proto.DNA_QUANT}', '{proto.NGS}')
           AND o.date_created >= '{date_filter}'
           AND (o.job_id IS NULL OR o.job_id NOT IN (SELECT job_id FROM kicked_back_jobs))
         GROUP BY 1,2,3,4,5,6,7
@@ -1248,7 +1246,7 @@ def resolve_downstream_plates(
     if not downstream_well_wid_df.empty:
         # Only look at Quant/NGS ops for second-hop
         quant_ngs_ops = raw_ops[raw_ops['protocol_name'].isin(
-            ['DNA Quantification', 'NGS Sequence Confirmation']
+            [proto.DNA_QUANT, proto.NGS]
         )]
         ds_parts = []
         for well_col in ['sw_id', 'qw_id', 'dw_id']:
@@ -1482,9 +1480,9 @@ def resolve_downstream_plates(
         # so the renderer can display them even when LIMS colony data didn't capture them.
         # Map: OpTracker protocol_name → all_protocol_plates key
         _proto_to_lims_key = {
-            'Rearray 96 to 384':          'Rearray 96 to 384',
-            'DNA Quantification':          'DNA Quant',
-            'NGS Sequence Confirmation':   'NGS Sequence Confirmation',
+            proto.REARRAY:   proto.REARRAY,
+            proto.DNA_QUANT: 'DNA Quant',
+            proto.NGS:       proto.NGS,
         }
         try:
             _plates_str = row.get('all_protocol_plates') or '{}'
