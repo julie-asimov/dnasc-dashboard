@@ -201,10 +201,24 @@ def run_pipeline() -> pd.DataFrame:
         .str.replace("STBL3_", "", case=False, regex=False)
         .str.lower()
     )
+    # Drop any op_agg columns already present in final_df before merging.
+    # If these columns exist (e.g. as null scalars from an upstream change),
+    # pandas suffix logic would keep the stale column as "protocol_name" and
+    # put the aggregated lists in "protocol_name_raw_op" — then the dedup
+    # guard would discard the lists silently. Explicit drop makes op_agg win.
+    _op_merge_cols = [
+        "protocol_name", "operation_state", "operation_start", "operation_ready",
+        "job_id", "well_location", "ngs_run_number",
+        "confirmed_input_ids", "input_dna_plasmids", "input_stock_wells",
+    ]
+    final_df = final_df.drop(
+        columns=[c for c in _op_merge_cols if c in final_df.columns],
+        errors="ignore",
+    )
     final_df = final_df.merge(
         op_agg,
         left_on="join_key", right_on="process_id",
-        how="left", suffixes=("", "_raw_op"),
+        how="left",
     )
     # For LSP rows that got no queue data from the primary merge,
     # fill from the lsp_op_agg keyed by lsp_batch_id_from_optracker.
@@ -540,7 +554,7 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
         "gibson_workorder", "golden_gate_workorder",
         "transformation_workorder", "transformation_offline_operation",
     })
-    _SEQ_PROTOCOLS = {"NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing"}
+    _SEQ_PROTOCOLS = {"NGS Sequence Confirmation", "Fragment Analyzer"}
 
     failed_mask = df["type"].isin(_COLONY_TYPES) & (df["visual_status"] == "FAILED")
     if not failed_mask.any():
@@ -967,6 +981,10 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
 def _filter_and_enrich(df: pd.DataFrame) -> pd.DataFrame:
     """Smart filtering, status bridging, and UI enrichment."""
     import pandas as pd
+
+    # Guard against duplicate columns reaching here from upstream merges/concats.
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
 
     blacklist = set(PipelineConfig.LSP_BLACKLIST)
     active_statuses = {

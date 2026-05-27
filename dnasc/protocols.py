@@ -11,7 +11,7 @@ Import as:
 
 # ── Parts / ordering ──────────────────────────────────────────────────────────
 SYNTHESIS_ORDER  = "Synthesis Order"
-ORDER_OLIGOS     = "Order Oligos"
+ORDER_OLIGOS     = "Order Oligo"
 RECEIVE_SYNPART  = "Receive SynPart Synthesis"
 RECEIVE_PLASMID  = "Receive Plasmid Synthesis"
 PCR              = "PCR"
@@ -29,19 +29,18 @@ REARRAY           = "Rearray 96 to 384"
 DNA_QUANT         = "DNA Quantification"
 NGS               = "NGS Sequence Confirmation"
 FRAGMENT_ANALYZER = "Fragment Analyzer"
-SANGER            = "Sanger Sequencing"
 
 # ── LSP ───────────────────────────────────────────────────────────────────────
 LSP_ORDER         = "LSP Order"
 LSP_RECEIVING     = "LSP Receiving"
-GLYCEROL_STOCKING = "Glycerol Stocking Scinomix"
 LSP_REVIEWING     = "LSP Reviewing"
 LSP_RELEASING     = "LSP Releasing"
+GLYCEROL_STOCKING = "Glycerol Stocking Scinomix"
 
 # ── Grouped sets ──────────────────────────────────────────────────────────────
 
 # Sequencing protocols: completion (SC/FA) means seq result is known
-SEQ_PROTOS = frozenset({NGS, FRAGMENT_ANALYZER, SANGER})
+SEQ_PROTOS = frozenset({NGS, FRAGMENT_ANALYZER})
 
 # Progress-milestone protocols: SC means downstream work is underway
 PROGRESS_PROTOS = frozenset({REARRAY, DNA_QUANT} | SEQ_PROTOS)

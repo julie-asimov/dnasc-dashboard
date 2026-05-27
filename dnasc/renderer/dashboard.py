@@ -280,7 +280,7 @@ def render_all_projects_dashboard(
         protocol_success = {op['protocol'] for op in raw_ops if op['state'] == 'SC'}
         groupable_protocols = {
             'DNA Quantification', 'Rearray 96 to 384', 'NGS Sequence Confirmation',
-            'Fragment Analyzer', 'Sanger Sequencing'
+            'Fragment Analyzer'
         }
 
         result = []
@@ -2009,7 +2009,7 @@ def render_all_projects_dashboard(
                     if isinstance(_rpn, np.ndarray): _rpn = _rpn.tolist()
                     if isinstance(_rps, np.ndarray): _rps = _rps.tolist()
                     _row_ap = {p for p, s in zip(_rpn, _rps) if s in ('RD', 'RU')} if isinstance(_rpn, list) and isinstance(_rps, list) else set()
-                    if _row_ap & {'Synthesis Order', 'Order Oligos'}:
+                    if _row_ap & {'Synthesis Order', 'Order Oligo'}:
                         try:
                             from datetime import timedelta as _otd
                             _rc = pd.Timestamp(row.get('wo_created_at'))

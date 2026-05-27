@@ -36,11 +36,6 @@ class TestSeqStatusFromOps:
         ps = ["SC", "FA"]
         assert _seq_status_from_ops(pn, ps, seq=0) == "FAILED"
 
-    def test_sanger_sc_no_seq_returns_failed(self):
-        pn = [proto.REARRAY, proto.SANGER]
-        ps = ["SC", "SC"]
-        assert _seq_status_from_ops(pn, ps, seq=0) == "FAILED"
-
     def test_progress_sc_only_no_seq_returns_in_progress(self):
         """Rearray SC but no seq protocol result yet."""
         pn = [proto.REARRAY]
