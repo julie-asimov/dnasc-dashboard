@@ -367,7 +367,9 @@ class EnrichmentTransformer:
             # backbone constructs (e.g. pAI-21680) polluting the operation label.
             _nc = r_df[r_df['wo_status'].astype(str) != 'CANCELED']
             _op_rows = _nc[
-                _nc['STOCK_ID'].isin(_root_stocks) | (_nc['type'] == 'lsp_workorder')
+                _nc['STOCK_ID'].isin(_root_stocks) |
+                (_nc['type'] == 'lsp_workorder') |
+                (_nc['type'].isin(_PARTS_TYPES))
             ] if _root_stocks else _nc
             _best_pri, _best_label = -1, ''
             for _, _row in _op_rows.iterrows():

@@ -92,7 +92,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
                 (asm and asm < today) or (lsp_scaleup and lsp_scaleup < today)
             ):
                 flags.append('AT_RISK')
-        if (is_stalled or not op) and status == 'IN_PROGRESS':
+        if is_stalled and status == 'IN_PROGRESS':
             flags.append('STALLED')
         op_display = '' if is_stalled else op
         records.append({
