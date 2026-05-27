@@ -22,6 +22,7 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 
 from dnasc.logger import get_logger
+from dnasc import protocols as proto
 
 log = get_logger(__name__)
 
@@ -47,44 +48,44 @@ _PHASE_ACTIVE    = frozenset({'RUNNING', 'READY', 'IN_PROGRESS', 'WAITING', 'BLO
 # Higher priority = further along in the pipeline — used to pick the single
 # most-advanced active step to surface as req_operation.
 _PROTO_MAP: dict[tuple[str, str], tuple[int, str]] = {
-    ('Synthesis Order',                      'RD'): (5,  'SYNTHESIS ORDER: READY'),
-    ('Synthesis Order',                      'RU'): (6,  'SYNTHESIS ORDER: RUNNING'),
-    ('Order Oligos',                         'RD'): (5,  'ORDER OLIGOS: READY'),
-    ('Order Oligos',                         'RU'): (6,  'ORDER OLIGOS: RUNNING'),
-    ('Receive SynPart Synthesis',            'RD'): (7,  'RECEIVE SYNPART SYNTHESIS: READY'),
-    ('Receive SynPart Synthesis',            'RU'): (8,  'RECEIVE SYNPART SYNTHESIS: RUNNING'),
-    ('Receive Plasmid Synthesis',            'RD'): (8,  'RECEIVE PLASMID SYNTHESIS: READY'),
-    ('Receive Plasmid Synthesis',            'RU'): (8,  'RECEIVE PLASMID SYNTHESIS: RUNNING'),
-    ('PCR',                                  'RD'): (8,  'PCR: READY'),
-    ('PCR',                                  'RU'): (9,  'PCR: RUNNING'),
-    ('Fragment Analyzer',                    'RD'): (9,  'FRAGMENT ANALYZER: READY'),
-    ('Fragment Analyzer',                    'RU'): (9,  'FRAGMENT ANALYZER: RUNNING'),
-    ('Golden Gate Assembly',                 'RD'): (10, 'GOLDEN GATE ASSEMBLY: READY'),
-    ('Golden Gate Assembly',                 'RU'): (11, 'GOLDEN GATE ASSEMBLY: RUNNING'),
-    ('Gibson Assembly',                      'RD'): (10, 'GIBSON ASSEMBLY: READY'),
-    ('Gibson Assembly',                      'RU'): (11, 'GIBSON ASSEMBLY: RUNNING'),
-    ('STAR Transformation',                  'RD'): (20, 'TRANSFORMATION: READY'),
-    ('STAR Transformation',                  'RU'): (21, 'TRANSFORMATION: RUNNING'),
-    ('Create Minipreps and Glycerol Stocks', 'RD'): (30, 'MINIPREP: READY'),
-    ('Create Minipreps and Glycerol Stocks', 'RU'): (31, 'MINIPREP: RUNNING'),
-    ('Repick: Miniprep/Glycerol/Media',      'RD'): (31, 'REPICK MINIPREP: READY'),
-    ('Repick: Miniprep/Glycerol/Media',      'RU'): (32, 'REPICK MINIPREP: RUNNING'),
-    ('Rearray 96 to 384',                    'RD'): (35, 'REARRAY: READY'),
-    ('Rearray 96 to 384',                    'RU'): (36, 'REARRAY: RUNNING'),
-    ('DNA Quantification',                   'RD'): (40, 'DNA QUANT: READY'),
-    ('DNA Quantification',                   'RU'): (41, 'DNA QUANT: RUNNING'),
-    ('NGS Sequence Confirmation',            'RD'): (50, 'NGS: READY'),
-    ('NGS Sequence Confirmation',            'RU'): (51, 'NGS: RUNNING'),
-    ('LSP Order',                            'RD'): (60, 'LSP ORDER: READY'),
-    ('LSP Order',                            'RU'): (61, 'LSP ORDER: RUNNING'),
-    ('LSP Receiving',                        'RD'): (65, 'LSP RECEIVING: READY'),
-    ('LSP Receiving',                        'RU'): (66, 'LSP RECEIVING: RUNNING'),
-    ('Glycerol Stocking Scinomix',           'RD'): (70, 'GLYCEROL STOCKING: READY'),
-    ('Glycerol Stocking Scinomix',           'RU'): (71, 'GLYCEROL STOCKING: RUNNING'),
-    ('LSP Reviewing',                        'RD'): (80, 'LSP REVIEWING: READY'),
-    ('LSP Reviewing',                        'RU'): (81, 'LSP REVIEWING: RUNNING'),
-    ('LSP Releasing',                        'RD'): (90, 'LSP RELEASING: READY'),
-    ('LSP Releasing',                        'RU'): (91, 'LSP RELEASING: RUNNING'),
+    (proto.SYNTHESIS_ORDER,  'RD'): (5,  'SYNTHESIS ORDER: READY'),
+    (proto.SYNTHESIS_ORDER,  'RU'): (6,  'SYNTHESIS ORDER: RUNNING'),
+    (proto.ORDER_OLIGOS,     'RD'): (5,  'ORDER OLIGOS: READY'),
+    (proto.ORDER_OLIGOS,     'RU'): (6,  'ORDER OLIGOS: RUNNING'),
+    (proto.RECEIVE_SYNPART,  'RD'): (7,  'RECEIVE SYNPART SYNTHESIS: READY'),
+    (proto.RECEIVE_SYNPART,  'RU'): (8,  'RECEIVE SYNPART SYNTHESIS: RUNNING'),
+    (proto.RECEIVE_PLASMID,  'RD'): (8,  'RECEIVE PLASMID SYNTHESIS: READY'),
+    (proto.RECEIVE_PLASMID,  'RU'): (8,  'RECEIVE PLASMID SYNTHESIS: RUNNING'),
+    (proto.PCR,              'RD'): (8,  'PCR: READY'),
+    (proto.PCR,              'RU'): (9,  'PCR: RUNNING'),
+    (proto.FRAGMENT_ANALYZER,'RD'): (9,  'FRAGMENT ANALYZER: READY'),
+    (proto.FRAGMENT_ANALYZER,'RU'): (9,  'FRAGMENT ANALYZER: RUNNING'),
+    (proto.GOLDEN_GATE,      'RD'): (10, 'GOLDEN GATE ASSEMBLY: READY'),
+    (proto.GOLDEN_GATE,      'RU'): (11, 'GOLDEN GATE ASSEMBLY: RUNNING'),
+    (proto.GIBSON,           'RD'): (10, 'GIBSON ASSEMBLY: READY'),
+    (proto.GIBSON,           'RU'): (11, 'GIBSON ASSEMBLY: RUNNING'),
+    (proto.STAR_TRANSF,      'RD'): (20, 'TRANSFORMATION: READY'),
+    (proto.STAR_TRANSF,      'RU'): (21, 'TRANSFORMATION: RUNNING'),
+    (proto.MINIPREP,         'RD'): (30, 'MINIPREP: READY'),
+    (proto.MINIPREP,         'RU'): (31, 'MINIPREP: RUNNING'),
+    (proto.REPICK,           'RD'): (31, 'REPICK MINIPREP: READY'),
+    (proto.REPICK,           'RU'): (32, 'REPICK MINIPREP: RUNNING'),
+    (proto.REARRAY,          'RD'): (35, 'REARRAY: READY'),
+    (proto.REARRAY,          'RU'): (36, 'REARRAY: RUNNING'),
+    (proto.DNA_QUANT,        'RD'): (40, 'DNA QUANT: READY'),
+    (proto.DNA_QUANT,        'RU'): (41, 'DNA QUANT: RUNNING'),
+    (proto.NGS,              'RD'): (50, 'NGS: READY'),
+    (proto.NGS,              'RU'): (51, 'NGS: RUNNING'),
+    (proto.LSP_ORDER,        'RD'): (60, 'LSP ORDER: READY'),
+    (proto.LSP_ORDER,        'RU'): (61, 'LSP ORDER: RUNNING'),
+    (proto.LSP_RECEIVING,    'RD'): (65, 'LSP RECEIVING: READY'),
+    (proto.LSP_RECEIVING,    'RU'): (66, 'LSP RECEIVING: RUNNING'),
+    (proto.GLYCEROL_STOCKING,'RD'): (70, 'GLYCEROL STOCKING: READY'),
+    (proto.GLYCEROL_STOCKING,'RU'): (71, 'GLYCEROL STOCKING: RUNNING'),
+    (proto.LSP_REVIEWING,    'RD'): (80, 'LSP REVIEWING: READY'),
+    (proto.LSP_REVIEWING,    'RU'): (81, 'LSP REVIEWING: RUNNING'),
+    (proto.LSP_RELEASING,    'RD'): (90, 'LSP RELEASING: READY'),
+    (proto.LSP_RELEASING,    'RU'): (91, 'LSP RELEASING: RUNNING'),
 }
 
 
@@ -144,9 +145,9 @@ def _infer_stage(
     # ── LSP phase ────────────────────────────────────────────────────
     if not lsp_s.empty:
         p = _active_protocols(lsp_s.iloc[0])
-        if 'LSP Releasing' in p:                                                    return 'Releasing'
-        if 'LSP Reviewing' in p:                                                    return 'Reviewing'
-        if p & {'DNA Quantification', 'NGS Sequence Confirmation', 'Fragment Analyzer'}: return 'LSP QC'
+        if proto.LSP_RELEASING in p:                                                return 'Releasing'
+        if proto.LSP_REVIEWING in p:                                                return 'Reviewing'
+        if p & {proto.DNA_QUANT, proto.NGS, proto.FRAGMENT_ANALYZER}:              return 'LSP QC'
         return 'LSP'
 
     # ── Assembly phase ───────────────────────────────────────────────
@@ -158,7 +159,7 @@ def _infer_stage(
                 {'RUNNING': 0, 'READY': 1, 'IN_PROGRESS': 2, 'BLOCKED': 3}
             ).fillna(99)
             p = _active_protocols(asm_prog.sort_values('_r').iloc[0])
-            if p & {'DNA Quantification', 'NGS Sequence Confirmation'}:             return 'Assembly QC'
+            if p & {proto.DNA_QUANT, proto.NGS}:                                    return 'Assembly QC'
             return 'Assembly'
 
         # All ASM are WAITING — fall through to parts
@@ -258,7 +259,7 @@ class EnrichmentTransformer:
         req_has_seq_winner    : dict[str, bool] = {}
         req_has_order_pending : dict[str, bool] = {}
 
-        _ORDER_PROTOCOLS = frozenset({'Synthesis Order', 'Order Oligos'})
+        _ORDER_PROTOCOLS = proto.ORDER_PROTOS
         _ORDER_PARTS_TYPES = frozenset({
             'syn_part_synthesis_workorder',
             'oligo_synthesis_workorder',
