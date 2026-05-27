@@ -34,3 +34,4 @@ chart.min.js
 inventory_check/
 query_results/
 twist_orders.ipynb
+dnasc/renderer/lsp_capacity.py
