@@ -209,8 +209,9 @@ def run_pipeline() -> pd.DataFrame:
     # fill from the lsp_op_agg keyed by lsp_batch_id_from_optracker.
     # Pass 1: synthetic LSP rows (workorder_id = "LSP-XXXX")
     # Pass 2: real LSP workorders (UUID workorder_id) using bios_batch_id
+    import numpy as _np
     _op_cols = ["protocol_name", "operation_state", "operation_start", "operation_ready", "job_id", "well_location", "ngs_run_number"]
-    _no_ops = ~final_df["protocol_name"].apply(lambda x: isinstance(x, list) and len(x) > 0)
+    _no_ops = ~final_df["protocol_name"].apply(lambda x: isinstance(x, (list, _np.ndarray)) and len(x) > 0)
 
     _syn_lsp_empty = (
         final_df["workorder_id"].astype(str).str.upper().str.startswith("LSP-") & _no_ops
@@ -228,7 +229,7 @@ def run_pipeline() -> pd.DataFrame:
 
     # Pass 2: real LSP workorders (UUID) with bios_batch_id set but still no queue data
     if "bios_batch_id" in final_df.columns and not lsp_op_agg.empty:
-        _no_ops2 = ~final_df["protocol_name"].apply(lambda x: isinstance(x, list) and len(x) > 0)
+        _no_ops2 = ~final_df["protocol_name"].apply(lambda x: isinstance(x, (list, _np.ndarray)) and len(x) > 0)
         _real_lsp_empty = (
             (final_df["type"] == "lsp_workorder") &
             ~final_df["workorder_id"].astype(str).str.upper().str.startswith("LSP-") &
@@ -452,8 +453,14 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
         if wo in ("", "NAN", "NONE", "UNKNOWN"):
             return row["visual_status"], False, False
 
-        tot = int(row.get("total_colonies")) if pd.notna(row.get("total_colonies")) else 0
-        seq = int(row.get("seq_confirmed"))  if pd.notna(row.get("seq_confirmed"))  else 0
+        try:
+            tot = int(row.get("total_colonies")) if pd.notna(row.get("total_colonies")) else 0
+        except (TypeError, ValueError):
+            tot = 0
+        try:
+            seq = int(row.get("seq_confirmed")) if pd.notna(row.get("seq_confirmed")) else 0
+        except (TypeError, ValueError):
+            seq = 0
 
         if wo == "FAILED" and seq > 0:
             return "SUCCEEDED", True, False
@@ -1008,7 +1015,7 @@ def _filter_and_enrich(df: pd.DataFrame) -> pd.DataFrame:
     canceled_no_work = (
         (df["type"] == "lsp_workorder") &
         (df["wo_status"].astype(str).str.upper() == "CANCELED") &
-        (~df["protocol_name"].apply(lambda x: isinstance(x, list) and len(x) > 0))
+        (~df["protocol_name"].apply(lambda x: isinstance(x, (list, np.ndarray)) and len(x) > 0))
     )
     df = df[~canceled_no_work].copy()
     log.info("Removed %d canceled LSPs with no OpTracker work", canceled_no_work.sum())

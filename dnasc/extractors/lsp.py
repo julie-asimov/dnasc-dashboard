@@ -24,7 +24,8 @@ class LSPExtractor:
     def get_lsp_workorders() -> pd.DataFrame:
         t0 = time.time()
         proj = PipelineConfig.PROJECT_ID
-        log.info("Querying LSP workorders...")
+        date_filter = PipelineConfig.get_date_filter()
+        log.info("Querying LSP workorders (since %s)...", date_filter)
 
         query = f"""
         WITH lsp_base AS (
@@ -62,7 +63,7 @@ class LSPExtractor:
                 ON st.process_id = source_wo_st.id
             WHERE wo.type = 'lsp_workorder'
               AND wo.status NOT IN ('DRAFT')
-              AND wo.created_at >= '2025-01-01'
+              AND wo.created_at >= '{date_filter}'
         )
         SELECT
             lb.*,
@@ -84,6 +85,7 @@ class LSPExtractor:
         LEFT JOIN `{proj}.bios__src.assemblydesignworkorderassociation` adwoa
             ON adwoa.workorder_id = parent_wo.id
         LEFT JOIN `{proj}.bios__src.assemblydesign` ad ON adwoa.assemblydesign_id = ad.id
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY lb.workorder_id ORDER BY ad.created_at ASC NULLS LAST) = 1
         """
 
         df = pd.read_gbq(query, project_id=proj, dialect="standard")

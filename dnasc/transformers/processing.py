@@ -236,8 +236,12 @@ class ProcessingTransformer:
     def _generate_source_links(df: pd.DataFrame) -> pd.DataFrame:
         """Build human-readable source material link strings for LSP rows."""
         log.debug("Generating source material links...")
-        id_to_name  = df.set_index("workorder_id")["construct_name"].to_dict()
-        id_to_stock = df.set_index("workorder_id")["STOCK_ID"].to_dict()
+        id_to_name  = (df.sort_values("construct_name", na_position="last")
+                       .drop_duplicates("workorder_id", keep="first")
+                       .set_index("workorder_id")["construct_name"].to_dict())
+        id_to_stock = (df.sort_values("STOCK_ID", na_position="last")
+                       .drop_duplicates("workorder_id", keep="first")
+                       .set_index("workorder_id")["STOCK_ID"].to_dict())
 
         def _link(row):
             if row["type"] != "lsp_workorder":

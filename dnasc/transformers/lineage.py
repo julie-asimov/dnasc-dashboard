@@ -43,9 +43,12 @@ class LineageTransformer:
             .to_dict()
         )
 
-        # root → req_id mapping (non-LSP rows only)
+        # root → req_id mapping (non-LSP rows only); prefer non-null req_id when
+        # the same root appears under multiple requests
         root_to_req: dict[str, str] = (
             combined.loc[non_lsp]
+            .sort_values("req_id", na_position="last")
+            .drop_duplicates("root_work_order_id", keep="first")
             .set_index("root_work_order_id")["req_id"]
             .to_dict()
         )

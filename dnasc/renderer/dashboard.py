@@ -1610,7 +1610,7 @@ def render_all_projects_dashboard(
                 _root_ws   = str(_root_own['wo_status'].iloc[0])
                 if _root_type in ('golden_gate_workorder', 'gibson_workorder') and _root_ws == 'DRAFT':
                     _section_rows = req_df[req_df['root_work_order_id'] == root_id]
-                    _all_draft = _section_rows['wo_status'].str.upper().eq('DRAFT').all()
+                    _all_draft = _section_rows['wo_status'].fillna('DRAFT').str.upper().eq('DRAFT').all()
                     if _all_draft:
                         continue
             root_df = req_df[req_df['root_work_order_id'] == root_id]
@@ -2650,7 +2650,8 @@ def render_all_projects_dashboard(
                             selected_col = row.get('selected_colony', 'None'); selected_col_num = None
                             if selected_col != 'None' and ':' in str(selected_col):
                                 clean = re.sub(r'\[.*?\]', '', str(selected_col)).strip()
-                                _, selected_col_num = clean.split(':')
+                                parts = clean.split(':', 1)
+                                selected_col_num = parts[1] if len(parts) == 2 else None
                             protocol_wells = {}
                             if pd.notna(seq_conf_list) and seq_conf_list:
                                 for entry in str(seq_conf_list).split(','):
@@ -2953,8 +2954,8 @@ def render_all_projects_dashboard(
         for rid, r_df in req_groups:
             r_created = to_est(r_df['request_created_at'].iloc[0]) or to_est(r_df['wo_created_at'].min())
             if not r_created: continue
-            status = str(r_df.get('request_status', ['NEW']).iloc[0]).upper()
-            is_partner = 'true' in str(r_df.get('for_partner', ['false']).iloc[0]).lower()
+            status = str(r_df['request_status'].iloc[0] if 'request_status' in r_df.columns else 'NEW').upper()
+            is_partner = 'true' in str(r_df['for_partner'].iloc[0] if 'for_partner' in r_df.columns else False).lower()
             if is_partner: yellow_limit, red_limit = 4.0, 5.0
             else: yellow_limit, red_limit = 5.0, 6.0
 

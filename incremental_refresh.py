@@ -94,6 +94,7 @@ def run_incremental() -> pd.DataFrame | None:
     print(f"  📥 Fetching delta since {since_str} UTC...")
 
     # Override pipeline to incremental mode
+    _saved_date_filter = PipelineConfig.DATE_FILTER
     PipelineConfig.INCREMENTAL_MODE = True
     PipelineConfig.DATE_FILTER = since_str
 
@@ -102,6 +103,7 @@ def run_incremental() -> pd.DataFrame | None:
     finally:
         # Always reset back to full mode so next import is clean
         PipelineConfig.INCREMENTAL_MODE = False
+        PipelineConfig.DATE_FILTER = _saved_date_filter
 
     if delta_df is None or delta_df.empty:
         print("  ✅ No changes detected — skipping render")

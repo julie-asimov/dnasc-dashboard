@@ -68,7 +68,15 @@ class LIMSExtractor:
         raw_df["colony_num_str"]   = raw_df["colony_number"].fillna(-1).astype(int).astype(str)
         raw_df["well_col_combined"]= raw_df["well_id_str"] + ":" + raw_df["colony_num_str"]
 
-        unique_colonies = raw_df[raw_df["colony_number"].notna()].copy()
+        # Dedup to one row per (workorder_id, colony_number) — a colony can produce
+        # multiple well_content JOIN rows (e.g. plasmid_stock + strain records).
+        # Sort available=True first so the "available" flag is preserved on keep="first".
+        unique_colonies = (
+            raw_df[raw_df["colony_number"].notna()]
+            .sort_values("available", ascending=False)
+            .drop_duplicates(subset=["workorder_id", "colony_number"], keep="first")
+            .copy()
+        )
 
         # ── Colony counts ─────────────────────────────────────────────────────
         colony_summary = unique_colonies.groupby("workorder_id").agg(
@@ -122,7 +130,8 @@ class LIMSExtractor:
         raw_df["col_label"]    = "col" + raw_df["colony_num_str"]
 
         plate_info = (
-            raw_df.groupby(["workorder_id", "plate_id_str", "plate_protocol"])["col_label"]
+            raw_df[raw_df["colony_number"].notna()]
+            .groupby(["workorder_id", "plate_id_str", "plate_protocol"])["col_label"]
             .apply(lambda x: ", ".join(sorted(x.unique())) if x.notna().any() else "")
             .reset_index()
         )
