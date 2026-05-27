@@ -148,18 +148,10 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
 
     btn_s = 'font-size:9px;padding:2px 8px;border-radius:4px;border:1px solid #d1d5db;background:#fff;cursor:pointer;'
 
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-*{{box-sizing:border-box;margin:0;padding:0;}}
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff;font-size:10px;overflow:hidden;}}
+    return f"""<style>
 .iff-active{{outline:2px solid #374151;}}
 </style>
-</head>
-<body>
-<div style="padding:12px 16px;">
+<div style="padding:12px 16px;background:#fff;min-height:100%;">
 
   <!-- Summary bar -->
   <div style="display:flex;gap:14px;align-items:center;margin-bottom:10px;flex-wrap:wrap;font-size:10px;color:#6b7280;">
@@ -519,20 +511,5 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   }};
 
 }})();
-function _postH() {{
-  try {{ parent.postMessage({{_ifH: document.body.scrollHeight}}, '*'); }} catch(e) {{}}
-}}
-var _origRender = window.ifRender;
-window.ifRender = function() {{ _origRender(); setTimeout(_postH, 0); }};
-window.addEventListener('resize', _postH);
-if (document.readyState === 'loading') {{
-  document.addEventListener('DOMContentLoaded', function() {{
-    window.ifBuildHead(); window.ifRender();
-  }});
-}} else {{
-  window.ifBuildHead(); window.ifRender();
-}}
 </script>
-</body>
-</html>
 """

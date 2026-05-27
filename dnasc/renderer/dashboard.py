@@ -683,30 +683,6 @@ def render_all_projects_dashboard(
     </style>
 
     <script>
-    var _ifLoaded = false;
-    function _loadInflight() {
-        var frm = document.getElementById('inflight-frame');
-        if (frm && !_ifLoaded && typeof _IFsrcdoc !== 'undefined') {
-            _ifLoaded = true;
-            frm.addEventListener('load', function() {
-                var ld = document.getElementById('inflight-loading');
-                if (ld) ld.style.display = 'none';
-            });
-            try {
-                var blob = new Blob([_IFsrcdoc], {type: 'text/html'});
-                frm.src = URL.createObjectURL(blob);
-            } catch(e) {
-                frm.srcdoc = _IFsrcdoc;
-            }
-        }
-    }
-    document.addEventListener('DOMContentLoaded', function() { setTimeout(_loadInflight, 500); });
-    window.addEventListener('message', function(e) {
-        if (e.data && typeof e.data._ifH === 'number') {
-            var frm = document.getElementById('inflight-frame');
-            if (frm) frm.style.height = e.data._ifH + 'px';
-        }
-    });
     function switchTab(tabName) {
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
@@ -717,11 +693,7 @@ def render_all_projects_dashboard(
             setTimeout(window.lspInitChart, 0);
         }
         if (tabName === 'inflight') {
-            _loadInflight();
-            setTimeout(function() {
-                var frm = document.getElementById('inflight-frame');
-                try { if (frm && frm.contentWindow && typeof frm.contentWindow.ifRender === 'function') frm.contentWindow.ifRender(); } catch(e) {}
-            }, 50);
+            if (typeof window.ifBuildHead === 'function') { window.ifBuildHead(); window.ifRender(); }
         }
     }
     function toggleBucketView(expId) {
@@ -1069,9 +1041,8 @@ def render_all_projects_dashboard(
     # LSP Capacity tab (generated once, injected into template)
     lsp_capacity_html = render_lsp_capacity_tab(df)
 
-    # Requests In Flight tab — stored as JS string, srcdoc assigned lazily on first tab click
-    _inflight_standalone = render_inflight_tab(df)
-    inflight_js_literal = json.dumps(_inflight_standalone).replace('</', '<\\/')
+    # Requests In Flight tab — rendered as a plain HTML fragment, injected directly
+    _inflight_fragment = render_inflight_tab(df)
 
     # Part 2: HTML with variables (f-string)
     html += f"""
@@ -3562,17 +3533,15 @@ def render_all_projects_dashboard(
             </div>
 
             <!-- REQUESTS IN FLIGHT TAB -->
-            <div id="tab-inflight" class="tab-content" style="padding:0;position:relative;overflow-y:auto;height:calc(100vh - 130px);">
-                <div id="inflight-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#f9fafb;z-index:10;font-size:14px;color:#6b7280;">Loading requests…</div>
-                <iframe id="inflight-frame" style="width:100%;min-height:calc(100vh - 130px);border:none;display:block;"></iframe>
+            <div id="tab-inflight" class="tab-content" style="padding:0;overflow-y:auto;height:calc(100vh - 130px);">
+                __INFLIGHT_FRAGMENT__
             </div>
-            <script>var _IFsrcdoc = __INFLIGHT_SRCDOC__;</script>
 
         </div>
     </div>
     """
     html = html.replace("__LSP_CAPACITY_TAB_CONTENT__", lsp_capacity_html)
-    html = html.replace("__INFLIGHT_SRCDOC__", inflight_js_literal)
+    html = html.replace("__INFLIGHT_FRAGMENT__", _inflight_fragment)
     return html
 
 
