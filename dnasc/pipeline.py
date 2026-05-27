@@ -15,6 +15,7 @@ from google.cloud import bigquery
 
 from dnasc.config import PipelineConfig
 from dnasc.logger import get_logger
+from dnasc import protocols as proto
 from dnasc.extractors import (
     BIOSExtractor,
     LSPExtractor,
@@ -331,15 +332,6 @@ def run_pipeline() -> pd.DataFrame:
     # apply the same colony-status logic as _apply_colony_status_overrides uses
     # for a SUCCEEDED colony workorder — scoped to the post-repick op slice.
     # This mirrors how streakout status is derived: OpTracker states + seq_confirmed.
-    _REPICK_PROTO = "Repick: Miniprep/Glycerol/Media"
-    _REPICK_SEQ_PROTOS = frozenset({
-        "NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing"
-    })
-    _REPICK_PROGRESS_PROTOS = frozenset({
-        "Rearray 96 to 384", "DNA Quantification",
-        "NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing",
-    })
-
     def _repick_status(row):
         if row.get("visual_status") != "RUNNING":
             return row["visual_status"]
@@ -356,7 +348,7 @@ def run_pipeline() -> pd.DataFrame:
             # Find the LAST repick op (handles >1 repick round)
             repick_idx = None
             for i, p in enumerate(pn):
-                if p == _REPICK_PROTO:
+                if p == proto.REPICK:
                     repick_idx = i
             if repick_idx is None:
                 return row["visual_status"]
@@ -364,27 +356,20 @@ def run_pipeline() -> pd.DataFrame:
             post_st = st[repick_idx + 1:]
             if not post_pn:
                 return "RUNNING"  # repick plates found, nothing downstream yet
-            # Mirror _apply_colony_status_overrides wo=="SUCCEEDED" + tot>0 branch
             seq = int(row.get("seq_confirmed") or 0)
-            # Running check first: if ANY post-repick op is still active, not done yet.
-            # Must precede SC/FA check — the post-repick slice also contains original-pick
-            # NGS ops (SC/FA) re-appended by resolve_downstream_plates, so checking SC/FA
-            # first would falsely FAIL a workorder whose repick NGS is still running.
+            # Active-op check must precede SC/FA check — the post-repick slice also
+            # contains original-pick NGS ops (SC/FA) re-appended by
+            # resolve_downstream_plates, so checking SC/FA first would falsely FAIL
+            # a workorder whose repick NGS is still running.
             if any(s in ("RU", "RD") for s in post_st):
                 return "RUNNING"
             has_progress = any(
-                p in _REPICK_PROGRESS_PROTOS and s == "SC"
+                p in proto.PROGRESS_PROTOS and s == "SC"
                 for p, s in zip(post_pn, post_st)
             )
             if not has_progress:
                 return "RUNNING"  # ops present but none SC yet
-            # Progress ops SC: check seq_confirmed (same as streakout handling)
-            if seq == 0:
-                if any(p in _REPICK_SEQ_PROTOS and s in ("SC", "FA")
-                       for p, s in zip(post_pn, post_st)):
-                    return "FAILED"
-                return "IN_PROGRESS"
-            return "SUCCEEDED"
+            return _seq_status_from_ops(post_pn, post_st, seq)
         except Exception:
             pass
         return row["visual_status"]
@@ -432,14 +417,28 @@ _COLONY_TYPES = frozenset({
 })
 
 
+def _seq_status_from_ops(pn: list, ps: list, seq: int) -> str:
+    """
+    Derive visual_status from protocol/state lists when at least one
+    progress-milestone op is already complete (SC) and no ops are still
+    active (RU/RD).  Called by both _apply_colony_status_overrides and
+    _repick_status to avoid duplicating this logic.
+
+    Returns one of: SUCCEEDED, FAILED, IN_PROGRESS.
+    Callers are responsible for the RUNNING/READY guard before calling this.
+    """
+    if seq > 0:
+        return "SUCCEEDED"
+    if any(p in proto.SEQ_PROTOS and s in ("SC", "FA") for p, s in zip(pn, ps)):
+        return "FAILED"
+    return "IN_PROGRESS"
+
+
 def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
     """
     Apply LIMS colony-count overrides to visual_status for colony-type workorders.
     Also sets is_software_fail (BIOS=FAILED but seq confirmed → display SUCCEEDED).
-
-    Mirrors the get_visual_status() logic from the renderer exactly so the stored
-    visual_status matches what the dashboard shows — keeping parquet and dashboard
-    in sync. Must run after _bridge_status.
+    Must run after _bridge_status (which sets the initial visual_status).
     """
     import numpy as _np
 
@@ -477,9 +476,7 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
             if tot == 0:
                 if isinstance(pn, list) and isinstance(ps, list):
                     transf_done = any(
-                        p in ("STAR Transformation", "Transformation",
-                              "Create Minipreps and Glycerol Stocks")
-                        and s in ("SC", "FA")
+                        p in proto.TRANSF_PROTOS and s in ("SC", "FA")
                         for p, s in zip(pn, ps)
                     )
                     if not transf_done:
@@ -487,7 +484,7 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
                         if any(s == "RD" for s in ps): return "READY", False, False
                         return "IN_PROGRESS", False, False
                     miniprep = next(
-                        (s for p, s in zip(pn, ps) if p == "Create Minipreps and Glycerol Stocks"), None
+                        (s for p, s in zip(pn, ps) if p == proto.MINIPREP), None
                     )
                     if miniprep == "RD": return "READY", False, False
                     if miniprep == "RU": return "RUNNING", False, False
@@ -495,26 +492,21 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
 
             if isinstance(pn, list) and len(pn) > 0:
                 if isinstance(ps, list):
-                    _progress_protocols = {
-                        "Rearray 96 to 384", "DNA Quantification",
-                        "NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing",
-                    }
-                    has_progress = any(p in _progress_protocols and s == "SC" for p, s in zip(pn, ps))
+                    has_progress = any(
+                        p in proto.PROGRESS_PROTOS and s == "SC"
+                        for p, s in zip(pn, ps)
+                    )
                     if not has_progress:
                         miniprep_s = next(
-                            (s for p, s in zip(pn, ps) if p == "Create Minipreps and Glycerol Stocks"), None
+                            (s for p, s in zip(pn, ps) if p == proto.MINIPREP), None
                         )
                         if miniprep_s == "SC": return "FAILED", False, False
                         if miniprep_s == "RU": return "RUNNING", False, False
                         if miniprep_s == "RD": return "READY", False, False
                     else:
-                        if seq == 0:
-                            _seq_protocols = {"NGS Sequence Confirmation", "Fragment Analyzer", "Sanger Sequencing"}
-                            if any(p in _seq_protocols and s in ("SC", "FA") for p, s in zip(pn, ps)):
-                                return "FAILED", False, False
-                            if any(s == "RU" for s in ps): return "RUNNING", False, False
-                            if any(s == "RD" for s in ps): return "READY", False, False
-                            return "IN_PROGRESS", False, False
+                        if any(s == "RU" for s in ps): return "RUNNING", False, False
+                        if any(s == "RD" for s in ps): return "READY", False, False
+                        return _seq_status_from_ops(pn, ps, seq), False, False
             else:
                 if tot > 0 and seq == 0:
                     return "RUNNING", False, False
