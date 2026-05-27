@@ -675,10 +675,10 @@ window.ifRender = function() {{ _origRender(); setTimeout(_postH, 0); }};
 window.addEventListener('resize', _postH);
 if (document.readyState === 'loading') {{
   document.addEventListener('DOMContentLoaded', function() {{
-    window.ifBuildHead(); setTimeout(window.ifRender, 0);
+    window.ifBuildHead(); window.ifRender();
   }});
 }} else {{
-  window.ifBuildHead(); setTimeout(window.ifRender, 0);
+  window.ifBuildHead(); window.ifRender();
 }}
 </script>
 </body>
