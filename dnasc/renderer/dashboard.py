@@ -26,6 +26,7 @@ import pandas as pd
 import pytz
 
 from dnasc.logger import get_logger
+from dnasc import protocols as proto
 
 # Omni plate maps: LIMS position is 0-indexed; add 1 to get the 1-indexed key.
 # All formats are column-major (positions fill down each column before moving right).
@@ -279,8 +280,7 @@ def render_all_projects_dashboard(
         # --- STEP 3: SOFT FAIL & GROUPING ---
         protocol_success = {op['protocol'] for op in raw_ops if op['state'] == 'SC'}
         groupable_protocols = {
-            'DNA Quantification', 'Rearray 96 to 384', 'NGS Sequence Confirmation',
-            'Fragment Analyzer'
+            proto.DNA_QUANT, proto.REARRAY, proto.NGS, proto.FRAGMENT_ANALYZER,
         }
 
         result = []
@@ -385,7 +385,7 @@ def render_all_projects_dashboard(
         if _gsid and _gsid not in ('nan', 'None', ''):
             _global_parts_rows_by_stock.setdefault(_gsid, []).append(_gpr)
 
-    _ASM_PROTO_MAP = {'golden_gate_workorder': 'Golden Gate Assembly', 'gibson_workorder': 'Gibson Assembly'}
+    _ASM_PROTO_MAP = {'golden_gate_workorder': proto.GOLDEN_GATE, 'gibson_workorder': proto.GIBSON}
     for row in df.to_dict('records'):
         wid = str(row['workorder_id'])
         _jid = row.get('job_id')
@@ -422,9 +422,9 @@ def render_all_projects_dashboard(
         if pd.notna(json_str) and json_str != '{}':
             try:
                 data = json.loads(json_str)
-                for proto in ['Golden Gate Assembly', 'Gibson Assembly', 'PCR', 'DNA Quantification']:
-                    if proto in data:
-                        raw = str(data[proto]).split(',')[0]; clean = clean_plate_id(raw)
+                for _pn in [proto.GOLDEN_GATE, proto.GIBSON, proto.PCR, proto.DNA_QUANT]:
+                    if _pn in data:
+                        raw = str(data[_pn]).split(',')[0]; clean = clean_plate_id(raw)
                         if clean: plate_id = clean; break
             except: pass
         if not plate_id:
@@ -1336,8 +1336,8 @@ def render_all_projects_dashboard(
                 if isinstance(p_starts, np.ndarray): p_starts = p_starts.tolist()
                 if isinstance(p_names, list):
                     for name, state, start in zip(p_names, p_states, p_starts):
-                        if name == 'LSP Reviewing' and state == 'SC': ready_to_ship_time = to_est(start)
-                        if name == 'LSP Releasing' and state == 'SC': final_release_time = to_est(start)
+                        if name == proto.LSP_REVIEWING and state == 'SC': ready_to_ship_time = to_est(start)
+                        if name == proto.LSP_RELEASING and state == 'SC': final_release_time = to_est(start)
 
         time_badges_html = ""
         shared_time_style = "display: flex; align-items: center; background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 4px; border-radius: 2px; gap: 3px; height: 16px;"
@@ -2009,7 +2009,7 @@ def render_all_projects_dashboard(
                     if isinstance(_rpn, np.ndarray): _rpn = _rpn.tolist()
                     if isinstance(_rps, np.ndarray): _rps = _rps.tolist()
                     _row_ap = {p for p, s in zip(_rpn, _rps) if s in ('RD', 'RU')} if isinstance(_rpn, list) and isinstance(_rps, list) else set()
-                    if _row_ap & {'Synthesis Order', 'Order Oligo'}:
+                    if _row_ap & proto.ORDER_PROTOS:
                         try:
                             from datetime import timedelta as _otd
                             _rc = pd.Timestamp(row.get('wo_created_at'))
@@ -2070,11 +2070,11 @@ def render_all_projects_dashboard(
                 if pd.notna(json_str) and json_str.strip() != '{}':
                     try:
                         data = json.loads(json_str)
-                        for proto, plate_str in data.items():
+                        for _pkey, plate_str in data.items():
                             if plate_str:
                                 pids = [clean_plate_id(p) for p in str(plate_str).split(',') if clean_plate_id(p)]
-                                if proto not in lims_plate_map: lims_plate_map[proto] = []
-                                lims_plate_map[proto].extend(pids)
+                                if _pkey not in lims_plate_map: lims_plate_map[_pkey] = []
+                                lims_plate_map[_pkey].extend(pids)
                     except: pass
                 for col in ['colony_plates', 'all_locations']:
                     val = row.get(col, '')
@@ -2083,11 +2083,11 @@ def render_all_projects_dashboard(
                         for entry in str(val).split(' | '):
                             match = re.search(r'Plate(\d+)\s*\(([^)]+)\)', entry)
                             if match:
-                                pid, proto = match.group(1), match.group(2).strip()
+                                pid, _pkey = match.group(1), match.group(2).strip()
                                 if pid in _already_catalogued: continue
-                                if proto not in lims_plate_map: lims_plate_map[proto] = []
-                                if pid not in lims_plate_map[proto]: lims_plate_map[proto].append(pid)
-                step_keywords = {'Golden Gate Assembly': ['Golden Gate'], 'Gibson Assembly': ['Gibson'], 'STAR Transformation': ['Transformation', 'Agar'], 'Create Minipreps and Glycerol Stocks': ['Overnight', 'Miniprep', 'Glycerol'], 'Rearray 96 to 384': ['Rearray'], 'DNA Quantification': ['Quant', 'DNA'], 'NGS Sequence Confirmation': ['NGS', 'Sequence'], 'PCR': ['PCR'], 'LSP Receiving': ['LSP Receiving'], 'Manual: Miniprep/Glycerol/Media created': ['Overnight', 'Miniprep', 'Glycerol'], 'Repick: Miniprep/Glycerol/Media': ['Manual Repick']}
+                                if _pkey not in lims_plate_map: lims_plate_map[_pkey] = []
+                                if pid not in lims_plate_map[_pkey]: lims_plate_map[_pkey].append(pid)
+                step_keywords = {proto.GOLDEN_GATE: ['Golden Gate'], proto.GIBSON: ['Gibson'], proto.STAR_TRANSF: ['Transformation', 'Agar'], proto.MINIPREP: ['Overnight', 'Miniprep', 'Glycerol'], proto.REARRAY: ['Rearray'], proto.DNA_QUANT: ['Quant', 'DNA'], proto.NGS: ['NGS', 'Sequence'], proto.PCR: ['PCR'], proto.LSP_RECEIVING: ['LSP Receiving'], 'Manual: Miniprep/Glycerol/Media created': ['Overnight', 'Miniprep', 'Glycerol'], proto.REPICK: ['Manual Repick']}
 
                 pipeline_html = ['<div class="timeline-container">']
                 if row['type'] == 'transformation_workorder':
@@ -2106,7 +2106,7 @@ def render_all_projects_dashboard(
                         is_ready = item['state'] == 'Ready'
                         time_str = item["ready_time"].strftime("%m/%d/%Y %H:%M") + " (Ready)" if is_ready and pd.notna(item["ready_time"]) else (item["start_time"].strftime("%m/%d/%Y %H:%M") if pd.notna(item["start_time"]) else "")
                         _row_is_post_repick = _past_repick
-                        if item['queue'] == 'Repick: Miniprep/Glycerol/Media':
+                        if item['queue'] == proto.REPICK:
                             _past_repick = True
                         tooltip_groups = {}
                         keywords = step_keywords.get(item['queue'], [])
@@ -2120,8 +2120,8 @@ def render_all_projects_dashboard(
                             match = False
                             for kw in keywords:
                                 if kw.lower() in _match_proto.lower():
-                                    if item['queue'] == 'Create Minipreps and Glycerol Stocks' and 'scinomix' in _match_proto.lower(): continue
-                                    if item['queue'] == 'LSP Receiving' and 'scinomix' in _match_proto.lower(): continue
+                                    if item['queue'] == proto.MINIPREP and 'scinomix' in _match_proto.lower(): continue
+                                    if item['queue'] == proto.LSP_RECEIVING and 'scinomix' in _match_proto.lower(): continue
                                     match = True; break
                             if match:
                                 if lims_proto not in tooltip_groups: tooltip_groups[lims_proto] = set()
@@ -2150,7 +2150,7 @@ def render_all_projects_dashboard(
                                     if (i + 1) % 3 == 0 and i < len(sorted_plates) - 1: tooltip_html += '<br>'
                                 tooltip_html += '</div></div>'
                             details_pills += f"""<div class="plate-hover-container"><span class="plate-trigger">{total_plates} Plates</span><div class="plate-popover">{tooltip_html}</div></div>"""
-                        _dot_cls = "repick" if item['queue'] == 'Repick: Miniprep/Glycerol/Media' else item['class']
+                        _dot_cls = "repick" if item['queue'] == proto.REPICK else item['class']
                         pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot {_dot_cls}"></div><div class="t-content"><div class="t-header"><span class="t-name">{item['queue']}</span><span class="t-time">{time_str}</span></div><div class="t-details">{details_pills}</div></div></div>""")
                 else:
                     if lims_plate_map:
@@ -2632,12 +2632,12 @@ def render_all_projects_dashboard(
                                         well_id, col_num, protocol_name = match.groups()
                                         if protocol_name.strip() not in protocol_wells: protocol_wells[protocol_name.strip()] = {}
                                         protocol_wells[protocol_name.strip()][col_num] = well_id
-                            protocol_order = ['LSP Receiving', 'Miniprep', 'Bank Overnights', 'Rearray 96 to 384', 'Glycerol Stocking Scinomix', 'Glycerol'] if row['type'] == 'lsp_workorder' else ['Miniprep', 'Bank Overnights', 'Rearray 96 to 384', 'Glycerol Stocking Scinomix']
+                            protocol_order = [proto.LSP_RECEIVING, 'Miniprep', 'Bank Overnights', proto.REARRAY, proto.GLYCEROL_STOCKING, 'Glycerol'] if row['type'] == 'lsp_workorder' else ['Miniprep', 'Bank Overnights', proto.REARRAY, proto.GLYCEROL_STOCKING]
                             popover_content = ""
                             for protocol_name in protocol_order:
                                 matching_wells = {}
-                                for proto, wells in protocol_wells.items():
-                                    if protocol_name.lower() in proto.lower(): matching_wells.update(wells)
+                                for _pkey, wells in protocol_wells.items():
+                                    if protocol_name.lower() in _pkey.lower(): matching_wells.update(wells)
                                 if matching_wells:
                                     links = ""
                                     for col_num in sorted(matching_wells.keys(), key=lambda x: int(x)):
@@ -2940,8 +2940,8 @@ def render_all_projects_dashboard(
                     if isinstance(pt, np.ndarray): pt = pt.tolist()
                     if isinstance(pn, list):
                         for name, state, start in zip(pn, ps, pt):
-                            if name == 'LSP Reviewing' and state == 'SC': ready_to_ship_time = to_est(start)
-                            if name == 'LSP Releasing' and state == 'SC': final_release_time = to_est(start)
+                            if name == proto.LSP_REVIEWING and state == 'SC': ready_to_ship_time = to_est(start)
+                            if name == proto.LSP_RELEASING and state == 'SC': final_release_time = to_est(start)
 
             is_finished = status in ['FULFILLED', 'SUCCEEDED']
             if is_finished:
@@ -3003,7 +3003,7 @@ def render_all_projects_dashboard(
                         pnames = lsp_row.get('protocol_name', []); pstates = lsp_row.get('operation_state', [])
                         if isinstance(pnames, list) and isinstance(pstates, list):
                             for name, state in zip(pnames, pstates):
-                                if name == 'LSP Releasing' and state == 'RD': is_ship_ready = True; break
+                                if name == proto.LSP_RELEASING and state == 'RD': is_ship_ready = True; break
                         if is_ship_ready: break
                     if is_ship_ready: count_ship_ready += 1
                     elif not lsp_active.empty: count_in_lsp += 1

@@ -153,7 +153,7 @@ class ProcessingTransformer:
         if len(df) < before:
             log.info("Removed %d rows from all-canceled experiments", before - len(df))
 
-        df.drop("_exp_group", axis=1, inplace=True, errors="ignore")
+        df = df.drop("_exp_group", axis=1, errors="ignore")
         return df
 
     @staticmethod

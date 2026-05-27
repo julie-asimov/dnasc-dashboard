@@ -532,7 +532,7 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.loc[col_mask, "visual_status"]    = overrides["visual_status"]
     df.loc[col_mask, "is_software_fail"] = overrides["is_software_fail"]
-    df["is_software_fail"] = df["is_software_fail"].fillna(False)
+    df["is_software_fail"] = df["is_software_fail"].where(df["is_software_fail"].notna(), False)
     df["is_status_override"] = (
         df["visual_status"].astype(str).str.upper()
         != df["wo_status"].astype(str).str.upper()

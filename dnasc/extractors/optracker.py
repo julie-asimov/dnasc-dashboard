@@ -13,6 +13,7 @@ import pandas as pd
 
 from dnasc.config import PipelineConfig
 from dnasc.logger import get_logger
+from dnasc import protocols as proto
 
 log = get_logger(__name__)
 
@@ -73,7 +74,7 @@ class OpTrackerExtractor:
           SELECT j.id AS job_id
           FROM `{proj}.op_tracker__src.op_tracker_api_job` j
           JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON j.protocol_id = p.id
-          WHERE p.name = 'PCR'
+          WHERE p.name = '{proto.PCR}'
             AND NOT EXISTS (
               SELECT 1 FROM UNNEST(JSON_EXTRACT_ARRAY(j.step_groups)) AS sg
               WHERE JSON_EXTRACT_SCALAR(sg, '$.name') = 'Cleanup PCRs'
@@ -87,7 +88,7 @@ class OpTrackerExtractor:
           SELECT j.id AS job_id
           FROM `{proj}.op_tracker__src.op_tracker_api_job` j
           JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON j.protocol_id = p.id
-          WHERE p.name = 'Synthesis Order'
+          WHERE p.name = '{proto.SYNTHESIS_ORDER}'
             AND REGEXP_CONTAINS(j.step_groups, r'"tag":\\s*"completion-toggle"')
             AND NOT REGEXP_CONTAINS(j.step_groups, r'"tag":\\s*"completion-toggle"[^}}]*"user_input":\\s*true')
           UNION DISTINCT

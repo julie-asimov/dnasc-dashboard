@@ -360,15 +360,17 @@ class RepairTransformer:
         uuids = df["_raw_src"].str.extract(r"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})", flags=re.I)[0]
         wells = df["_raw_src"].str.extract(r"well[_\s]*(\d+)", flags=re.I)[0]
 
-        res_uuid = uuids.map(id_to_root).fillna(uuids.where(uuids.isin(valid_ids)))
+        _mapped = uuids.map(id_to_root)
+        res_uuid = _mapped.where(_mapped.notna(), uuids.where(uuids.isin(valid_ids)))
         lims_res = wells.map(well_id_to_workorder).map(id_to_root)
-        res_well = wells.map(well_to_root).fillna(lims_res)
+        _rw = wells.map(well_to_root)
+        res_well = _rw.where(_rw.notna(), lims_res)
 
         missing_mask = (
             df["root_work_order_id"].isna() |
             df["root_work_order_id"].astype(str).isin(["nan", "None", ""])
         )
-        df.loc[missing_mask, "root_work_order_id"] = res_uuid.fillna(res_well)
+        df.loc[missing_mask, "root_work_order_id"] = res_uuid.where(res_uuid.notna(), res_well)
 
         # ── Backfill req_id + experiment_name: root row first, sibling fallback ─
         # Root-first priority prevents LSP siblings from contaminating cleared
@@ -390,9 +392,8 @@ class RepairTransformer:
         # ── Backfill metadata ──────────────────────────────────────────────────
         for col in ["experiment_name", "root_STOCK_ID", "for_partner"]:
             if col in df.columns:
-                df[col] = df[col].fillna(
-                    df.groupby("root_work_order_id")[col].transform("first")
-                )
+                fill = df.groupby("root_work_order_id")[col].transform("first")
+                df[col] = df[col].where(df[col].notna(), fill)
 
         df.drop(columns=["_raw_src"], inplace=True, errors="ignore")
         log.info("Data repair complete")
@@ -595,11 +596,10 @@ def populate_synthetic_optracker_batch(
         ops_1b = f_1b.result()
 
     # Combine pass 1a + 1b; dedup on (op_id, synthetic_id) so each pair appears once
+    _parts = [df for df in [ops_1a, ops_1b] if not df.empty]
     ops_pass1 = (
-        pd.concat([ops_1a, ops_1b], ignore_index=True)
-        .dropna(subset=["synthetic_id"])
-        .drop_duplicates(subset=["op_id", "synthetic_id"])
-    )
+        pd.concat(_parts, ignore_index=True) if _parts else pd.DataFrame(columns=ops_1a.columns)
+    ).dropna(subset=["synthetic_id"]).drop_duplicates(subset=["op_id", "synthetic_id"])
 
     # Remove ops from kicked-back jobs before Pass 2 so their job IDs don't propagate.
     if _kicked_back_job_ids:
