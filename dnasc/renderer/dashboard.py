@@ -2557,8 +2557,12 @@ def render_all_projects_dashboard(
 
                 elif row['type'] in ['oligo_synthesis_workorder', 'pcr_workorder', 'plasmid_synthesis_workorder', 'syn_part_synthesis_workorder']:
                     _vendor = row.get('vendor')
+                    _vorder = row.get('vendor_order_id')
+                    _vorder_clean = str(_vorder).strip() if _vorder is not None and not (isinstance(_vorder, float) and pd.isna(_vorder)) and str(_vorder).strip() not in ('', 'nan', 'None') else ''
                     if pd.notna(_vendor) and str(_vendor).strip() not in ('', 'nan', 'None'):
-                        details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Vendor: {str(_vendor).strip()}</div>")
+                        _vendor_str = str(_vendor).strip()
+                        _order_tag = f' <span style="font-weight:600;color:#7c3aed">{_vorder_clean}</span>' if _vorder_clean else ''
+                        details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Vendor: {_vendor_str}{_order_tag}</div>")
                     if row['type'] == 'pcr_workorder':
                         _wc = row.get('well_comments')
                         _wc_clean = str(_wc).strip().strip(';').strip() if _wc is not None and not (isinstance(_wc, float) and pd.isna(_wc)) else ''
@@ -3595,13 +3599,18 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
     <title>DNA SC Dashboard</title>
     <script>
     (function() {{
+        // Force fresh fetch on every navigation by cache-busting with a timestamp.
+        // Meta cache-control tags are ignored by modern browsers for navigation requests.
+        if (!window.location.search.includes('v=')) {{
+            window.location.replace(window.location.pathname + '?v=' + Date.now());
+        }}
         var _hiddenAt = null;
         var IDLE_MS = 15 * 60 * 1000;
         document.addEventListener('visibilitychange', function() {{
             if (document.visibilityState === 'hidden') {{
                 _hiddenAt = Date.now();
             }} else if (_hiddenAt && (Date.now() - _hiddenAt) >= IDLE_MS) {{
-                window.location.reload();
+                window.location.href = window.location.pathname + '?v=' + Date.now();
             }}
         }});
     }})();
