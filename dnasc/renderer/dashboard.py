@@ -3611,6 +3611,12 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
                 .catch(function() {{}});
         }}
         setInterval(checkForUpdate, 3 * 60 * 1000);
+        document.addEventListener('keydown', function(e) {{
+            if (e.key === 'F5' || (e.ctrlKey && e.key === 'r') || (e.metaKey && e.key === 'r')) {{
+                e.preventDefault();
+                _reload();
+            }}
+        }});
         var _hiddenAt = null;
         var IDLE_MS = 15 * 60 * 1000;
         document.addEventListener('visibilitychange', function() {{
