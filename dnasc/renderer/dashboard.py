@@ -992,6 +992,12 @@ def render_all_projects_dashboard(
         pop.style.display = 'block';
     }
     document.addEventListener('DOMContentLoaded', function() {
+        var _overlay = document.getElementById('_loading_overlay');
+        function _hideOverlay() {
+            if (!_overlay) return;
+            _overlay.classList.add('fade-out');
+            setTimeout(function() { _overlay.style.display = 'none'; }, 260);
+        }
         try {
             var savedTab = localStorage.getItem('dash_activeTab');
             var eh = document.getElementById('_earlyhide'); if (eh) eh.remove();
@@ -1001,6 +1007,7 @@ def render_all_projects_dashboard(
         var firstExpIcon = document.querySelector('.exp-toggle-icon');
         if (firstExp) { firstExp.style.display = 'block'; }
         if (firstExpIcon) { firstExpIcon.classList.add('open'); }
+        setTimeout(function() { _hideOverlay(); }, 0);
         document.addEventListener('click', function(e) {
             var trigger = e.target.closest('.colony-badge, .plate-trigger');
             if (trigger) {
@@ -2552,6 +2559,18 @@ def render_all_projects_dashboard(
                 elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation']:
                     strain = row.get('cloning_strain')
                     if pd.notna(strain): details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Strain: {strain}</div>")
+                    _ab = row.get('antibiotic')
+                    if _ab is not None and not (isinstance(_ab, float) and pd.isna(_ab)) and str(_ab).strip() not in ('', 'nan', 'None'):
+                        details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Antibiotic: {str(_ab).strip()}</div>")
+                    if row.get('antibiotic_mismatch') is True or row.get('antibiotic_mismatch') == True:
+                        _lims_ab = str(row.get('lims_antibiotic') or '')
+                        _bios_ab = str(row.get('antibiotic') or '')
+                        details_info.append(
+                            f"<div style='font-size:10px;color:#b45309;background:#fffbeb;"
+                            f"border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;"
+                            f"margin-top:3px;'>&#9888; Antibiotic mismatch: "
+                            f"BIOS={_bios_ab}, LIMS={_lims_ab}</div>"
+                        )
                     _imaged   = row.get('imaged_colonies')
                     _pickable = row.get('pickable_colonies')
                     _picked   = row.get('picked_colonies')
@@ -3583,33 +3602,47 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
         var _VER = {generated_ts};
         var _base = window.location.pathname.replace(/\/[^/]+$/, '/');
         function _reload() {{ window.location.href = window.location.pathname + '?v=' + Date.now(); }}
-        function checkForUpdate() {{
+        function _checkAndReload() {{
             fetch(_base + 'dnasc_version.txt?_nc=' + Date.now(), {{cache: 'no-store'}})
                 .then(function(r) {{ return r.text(); }})
                 .then(function(t) {{ if (parseInt(t, 10) > _VER + 120) {{ _reload(); }} }})
-                .catch(function() {{}});
+                .catch(function() {{ _reload(); }});
         }}
-        setInterval(checkForUpdate, 3 * 60 * 1000);
         document.addEventListener('keydown', function(e) {{
             if (e.key === 'F5' || (e.ctrlKey && e.key === 'r') || (e.metaKey && e.key === 'r')) {{
                 e.preventDefault();
-                _reload();
-            }}
-        }});
-        var _hiddenAt = null;
-        var IDLE_MS = 15 * 60 * 1000;
-        document.addEventListener('visibilitychange', function() {{
-            if (document.visibilityState === 'hidden') {{
-                _hiddenAt = Date.now();
-            }} else if (_hiddenAt && (Date.now() - _hiddenAt) >= IDLE_MS) {{
-                _reload();
+                _checkAndReload();
             }}
         }});
     }})();
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+    #_loading_overlay {{
+        position: fixed; inset: 0; z-index: 99999;
+        background: #f5f5f7;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        gap: 14px;
+        transition: opacity 0.25s ease;
+    }}
+    #_loading_overlay.fade-out {{ opacity: 0; pointer-events: none; }}
+    #_loading_overlay .spinner {{
+        width: 36px; height: 36px;
+        border: 3px solid #d1d5db;
+        border-top-color: #6366f1;
+        border-radius: 50%;
+        animation: _spin 0.7s linear infinite;
+    }}
+    @keyframes _spin {{ to {{ transform: rotate(360deg); }} }}
+    #_loading_overlay .label {{
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        font-size: 13px; color: #6b7280; letter-spacing: 0.02em;
+    }}
+    </style>
 </head>
 <body>
+<div id="_loading_overlay"><div class="spinner"></div><div class="label">Loading dashboard…</div></div>
 {html}
 </body>
 </html>"""
