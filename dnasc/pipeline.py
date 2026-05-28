@@ -64,6 +64,7 @@ def run_pipeline() -> pd.DataFrame:
     pd.DataFrame  — fully enriched, render-ready dataset
     """
     pipeline_start = time.time()
+    _step_times: dict[str, float] = {}
     log.info("=" * 70)
     log.info("PIPELINE START  version=%s", PipelineConfig.PIPELINE_VERSION)
     log.info("=" * 70)
@@ -81,7 +82,8 @@ def run_pipeline() -> pd.DataFrame:
         lsp_df       = f_lsp.result()
         aliq_df      = f_aliq.result()
         optracker_raw, _excluded_pids = f_op.result()
-    log.info("Extraction complete in %.2fs", time.time() - t)
+    _step_times["1-extraction"] = time.time() - t
+    log.info("Extraction complete in %.2fs", _step_times["1-extraction"])
 
     if _excluded_pids:
         before = len(bios_df)
@@ -94,7 +96,8 @@ def run_pipeline() -> pd.DataFrame:
     log.info("STEP 2 — LSP merge & orphan recovery")
     t = time.time()
     lsp_full = _merge_lsp(lsp_df, aliq_df)
-    log.info("LSP merge complete in %.2fs", time.time() - t)
+    _step_times["2-lsp-merge"] = time.time() - t
+    log.info("LSP merge complete in %.2fs", _step_times["2-lsp-merge"])
 
     # ── Well mapping: fetch once, reuse in Steps 4 and 11 ────────────────────
     log.info("Fetching recursive well → workorder mapping (shared by Steps 4 + 11)...")
@@ -102,24 +105,38 @@ def run_pipeline() -> pd.DataFrame:
     try:
         _wm_client = bigquery.Client(project=PipelineConfig.PROJECT_ID)
         _well_mapping = _fetch_well_mapping(_wm_client, PipelineConfig.PROJECT_ID)
-        log.info("Well mapping ready: %d wells in %.2fs", len(_well_mapping), time.time() - t)
+        _step_times["2b-well-mapping"] = time.time() - t
+        log.info("Well mapping ready: %d wells in %.2fs", len(_well_mapping), _step_times["2b-well-mapping"])
     except Exception as _exc:
+        _step_times["2b-well-mapping"] = time.time() - t
         log.warning("Well mapping prefetch failed (%s) — Steps 4/11 will fetch independently", _exc)
         _well_mapping = None
 
     # ── STEP 3–5: Lineage, synthetics, processing ─────────────────────────────
     log.info("STEP 3 — Lineage bridging")
+    t = time.time()
     workorder_data = LineageTransformer.bridge_lsp_lineage(bios_df, lsp_full)
+    _step_times["3-lineage"] = time.time() - t
+    log.info("Lineage bridging complete in %.2fs", _step_times["3-lineage"])
 
     log.info("STEP 4 — Synthetic streakout creation")
+    t = time.time()
     workorder_data = RepairTransformer.create_synthetic_streakouts(workorder_data, well_mapping=_well_mapping)
+    _step_times["4-syn-streakouts"] = time.time() - t
+    log.info("Synthetic streakout creation complete in %.2fs", _step_times["4-syn-streakouts"])
 
     log.info("STEP 5 — Core processing")
+    t = time.time()
     processed = ProcessingTransformer.process_workorder_data(workorder_data)
+    _step_times["5-processing"] = time.time() - t
+    log.info("Core processing complete in %.2fs", _step_times["5-processing"])
 
     # ── STEP 6: LSP root assignment ───────────────────────────────────────────
     log.info("STEP 6 — LSP root assignment")
+    t = time.time()
     processed = _assign_lsp_roots(processed)
+    _step_times["6-lsp-roots"] = time.time() - t
+    log.info("LSP root assignment complete in %.2fs", _step_times["6-lsp-roots"])
 
     # ── STEP 7: OpTracker aggregation ─────────────────────────────────────────
     log.info("STEP 7 — OpTracker aggregation")
@@ -164,14 +181,16 @@ def run_pipeline() -> pd.DataFrame:
         .reset_index()
         .rename(columns={"_lsp_key": "lsp_batch_key"})
     )
-    log.info("OpTracker aggregated in %.2fs", time.time() - t)
+    _step_times["7-optracker-agg"] = time.time() - t
+    log.info("OpTracker aggregated in %.2fs", _step_times["7-optracker-agg"])
 
     # ── STEP 7b: LIMS streakout resolution ────────────────────────────────────
     # Must run before Step 8 so colony extraction includes the new synthetic rows.
     log.info("STEP 7b — LIMS streakout resolution")
     t = time.time()
     processed = resolve_lims_streakouts(processed)
-    log.info("LIMS streakout resolution complete in %.2fs", time.time() - t)
+    _step_times["7b-lims-streakouts"] = time.time() - t
+    log.info("LIMS streakout resolution complete in %.2fs", _step_times["7b-lims-streakouts"])
 
     # ── STEP 8: LIMS colony extraction (parallel) ─────────────────────────────
     log.info("STEP 8 — LIMS colony extraction")
@@ -185,7 +204,8 @@ def run_pipeline() -> pd.DataFrame:
         colony_data    = f_colony.result()
         picking_counts = f_picking.result()
         well_comments  = f_comments.result()
-    log.info("Colony data extracted in %.2fs", time.time() - t)
+    _step_times["8-colony-extraction"] = time.time() - t
+    log.info("Colony data extracted in %.2fs", _step_times["8-colony-extraction"])
 
     # ── STEP 9: Final merges ──────────────────────────────────────────────────
     log.info("STEP 9 — Final merges")
@@ -261,7 +281,8 @@ def run_pipeline() -> pd.DataFrame:
                 "Filled OpTracker queue data for %d real LSPs via bios_batch_id",
                 _real_lsp_empty.sum(),
             )
-    log.info("Final merges complete in %.2fs", time.time() - t)
+    _step_times["9-merges"] = time.time() - t
+    log.info("Final merges complete in %.2fs", _step_times["9-merges"])
 
     # Deduplicate columns introduced by the Step 9 merge before any concat steps
     if final_df.columns.duplicated().any():
@@ -271,13 +292,15 @@ def run_pipeline() -> pd.DataFrame:
     log.info("STEP 9b — OpTracker streakout resolution")
     t = time.time()
     final_df = resolve_optracker_streakouts(final_df, optracker_raw)
-    log.info("OpTracker streakout resolution complete in %.2fs", time.time() - t)
+    _step_times["9b-optracker-streakouts"] = time.time() - t
+    log.info("OpTracker streakout resolution complete in %.2fs", _step_times["9b-optracker-streakouts"])
 
     # ── STEP 10: Synthetic OpTracker population ───────────────────────────────
     log.info("STEP 10 — Synthetic OpTracker population")
     t = time.time()
     final_df = populate_synthetic_optracker_batch(final_df)
-    log.info("Synthetic OpTracker populated in %.2fs", time.time() - t)
+    _step_times["10-syn-optracker"] = time.time() - t
+    log.info("Synthetic OpTracker populated in %.2fs", _step_times["10-syn-optracker"])
 
     # ── STEP 11: Root repair & metadata backfill ──────────────────────────────
     log.info("STEP 11 — Root repair & metadata backfill")
@@ -290,13 +313,15 @@ def run_pipeline() -> pd.DataFrame:
     # root_work_order_id, experiment_name, and cloning_strain.
     final_df = _assign_lsp_roots(final_df)
     final_df = _finalize_metadata(final_df)
-    log.info("Repair complete in %.2fs", time.time() - t)
+    _step_times["11-repair"] = time.time() - t
+    log.info("Repair complete in %.2fs", _step_times["11-repair"])
 
     # ── STEP 12: Smart filtering & UI enrichment ──────────────────────────────
     log.info("STEP 12 — Smart filtering & UI enrichment")
     t = time.time()
     final_df = _filter_and_enrich(final_df)
-    log.info("Filtering complete in %.2fs", time.time() - t)
+    _step_times["12-filter-enrich"] = time.time() - t
+    log.info("Filtering complete in %.2fs", _step_times["12-filter-enrich"])
 
     # ── Recompute derived columns that depend on root_work_order_id ──────────
     # is_fulfillment is first set at Step 5 for dedup, but root_work_order_id
@@ -327,8 +352,10 @@ def run_pipeline() -> pd.DataFrame:
     # counts can override that — e.g. BIOS=SUCCEEDED but 0 LIMS colonies → FAILED.
     # Running this here keeps the stored visual_status in sync with what the
     # renderer would show, so parquet queries and the dashboard agree.
+    t = time.time()
     final_df = _apply_colony_status_overrides(final_df)
     final_df = _detect_colony_repicks(final_df)
+    _step_times["12b-colony-overrides"] = time.time() - t
 
     # ── Downstream plate resolution (must run after _detect_colony_repicks) ───
     # _detect_colony_repicks adds "Repick: Miniprep/Glycerol/Media" to protocol_name
@@ -338,7 +365,8 @@ def run_pipeline() -> pd.DataFrame:
     log.info("STEP 10b — Downstream plate resolution (post-repick)")
     t = time.time()
     final_df = resolve_downstream_plates(final_df)
-    log.info("Downstream plate resolution complete in %.2fs", time.time() - t)
+    _step_times["10b-downstream-plates"] = time.time() - t
+    log.info("Downstream plate resolution complete in %.2fs", _step_times["10b-downstream-plates"])
 
     # ── Re-derive visual_status for repick workorders from downstream op states ─
     # _detect_colony_repicks sets visual_status=RUNNING unconditionally. Now that
@@ -404,14 +432,20 @@ def run_pipeline() -> pd.DataFrame:
     # so anchors are never computed against workorders that are later filtered
     # out by repair or _filter_and_enrich — which would leave referencing rows
     # with a stale anchor pointing to a missing workorder.
+    t = time.time()
     final_df = ProcessingTransformer._compute_attempt_anchors(final_df)
+    _step_times["13-attempt-anchors"] = time.time() - t
 
-    # ── Request enrichment (stage / stall / status rank) ──────────────────────
-    # Must run last — depends on visual_status (colony overrides already applied)
-    # and attempt anchors computed above.
+    t = time.time()
     final_df = EnrichmentTransformer.compute_request_enrichment(final_df)
+    _step_times["14-enrichment"] = time.time() - t
 
     elapsed = time.time() - pipeline_start
+    log.info("─" * 70)
+    log.info("STEP TIMING BREAKDOWN (slowest first):")
+    for _sname, _st in sorted(_step_times.items(), key=lambda x: x[1], reverse=True):
+        log.info("  %-30s %6.1fs  (%4.1f%%)", _sname, _st, 100 * _st / elapsed)
+    log.info("─" * 70)
     log.info("=" * 70)
     log.info("PIPELINE COMPLETE  %.1fs  |  %d rows  |  %d experiments  |  %d requests",
              elapsed, len(final_df),

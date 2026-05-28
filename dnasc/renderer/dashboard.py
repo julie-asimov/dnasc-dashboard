@@ -139,6 +139,164 @@ except FileNotFoundError as e:
     _ASSETS = {k: "" for k in _ASSET_FILES}
 
 
+# ── Module-level helpers (extracted from render_all_projects_dashboard) ───────
+
+def to_est(dt_val):
+    if pd.isna(dt_val) or dt_val == '': return None
+    try:
+        dt = pd.to_datetime(dt_val)
+        if dt.tz is None: dt = dt.tz_localize('UTC')
+        return dt.tz_convert('US/Eastern')
+    except: return None
+
+
+def batch_to_est(times: list) -> list:
+    """Vectorized list-of-timestamps → US/Eastern. ~10x faster than calling to_est per item."""
+    if not times:
+        return []
+    try:
+        converted = pd.to_datetime(times, errors='coerce', utc=True).tz_convert('US/Eastern')
+        return [x if not pd.isnull(x) else None for x in converted]
+    except Exception:
+        return [to_est(t) for t in times]
+
+
+def parse_pipeline_operations(protocol_names, operation_states, operation_starts, job_ids, well_locations_list, operation_ready_times, ngs_run_numbers=None):
+    # --- STEP 0: TYPE PROTECTION ---
+    def ensure_list(x):
+        if isinstance(x, (list, np.ndarray)): return list(x)
+        return []
+
+    protocol_names = ensure_list(protocol_names)
+    operation_states = ensure_list(operation_states)
+    operation_starts = ensure_list(operation_starts)
+    job_ids = ensure_list(job_ids)
+    well_locations_list = ensure_list(well_locations_list)
+    operation_ready_times = ensure_list(operation_ready_times)
+    ngs_run_numbers = ensure_list(ngs_run_numbers)
+
+    if not protocol_names:
+        return []
+
+    # --- STEP 1: BUILD RAW OPERATIONS ---
+    n = len(protocol_names)
+    _s_times = batch_to_est(operation_starts[:n])
+    _r_times = batch_to_est(operation_ready_times[:n])
+    raw_ops = []
+    for i in range(n):
+        r_time = _r_times[i] if i < len(_r_times) else None
+        s_time = _s_times[i] if i < len(_s_times) else None
+        run_num = ngs_run_numbers[i] if i < len(ngs_run_numbers) else None
+
+        raw_ops.append({
+            'protocol': protocol_names[i],
+            'state': operation_states[i] if i < len(operation_states) else 'Unknown',
+            'start_time': s_time,
+            'ready_time': r_time,
+            'job_id': job_ids[i] if i < len(job_ids) else None,
+            'well_location': well_locations_list[i] if i < len(well_locations_list) else None,
+            'run_number': run_num if (run_num is not None and pd.notna(run_num)) else None,
+        })
+
+    # --- STEP 2: SORTING ---
+    raw_ops.sort(key=lambda x: (
+        0 if pd.notna(x['ready_time']) else 1,
+        x['ready_time'] if pd.notna(x['ready_time']) else pd.Timestamp.min,
+        0 if pd.notna(x['start_time']) else 1,
+        x['start_time'] if pd.notna(x['start_time']) else pd.Timestamp.min
+    ))
+
+    # --- STEP 2b: DEDUP same-protocol same-state same-job ops ---
+    def _safe_job_key(j):
+        try:
+            return None if (j is None or pd.isna(j)) else int(j)
+        except (TypeError, ValueError):
+            return None
+
+    seen: dict = {}
+    deduped: list = []
+    for op in raw_ops:
+        key = (op['protocol'], op['state'], _safe_job_key(op['job_id']))
+        if key not in seen:
+            seen[key] = len(deduped)
+            deduped.append(op)
+        else:
+            existing = deduped[seen[key]]
+            if op['start_time'] and (not existing['start_time'] or op['start_time'] < existing['start_time']):
+                existing['start_time'] = op['start_time']
+    raw_ops = deduped
+
+    # --- STEP 2c: PROPAGATE run_number across states for same (protocol, job) ---
+    _run_by_job: dict = {}
+    for op in raw_ops:
+        key = (op['protocol'], _safe_job_key(op['job_id']))
+        if op.get('run_number') is not None and key not in _run_by_job:
+            _run_by_job[key] = op['run_number']
+    for op in raw_ops:
+        if op.get('run_number') is None:
+            op['run_number'] = _run_by_job.get((op['protocol'], _safe_job_key(op['job_id'])))
+
+    # --- STEP 3: SOFT FAIL & GROUPING ---
+    protocol_success = {op['protocol'] for op in raw_ops if op['state'] == 'SC'}
+    groupable_protocols = {
+        proto.DNA_QUANT, proto.REARRAY, proto.NGS, proto.FRAGMENT_ANALYZER,
+    }
+
+    result = []
+    current_group = []
+
+    for op in raw_ops:
+        protocol = op['protocol']
+        state = op['state']
+
+        if state in ('FA', 'CA') and protocol in protocol_success:
+            continue
+
+        state_map = {
+            'SC': {'state': 'Completed', 'class': 'succeeded'},
+            'FA': {'state': 'Failed', 'class': 'failed'},
+            'RU': {'state': 'Running', 'class': 'running'},
+            'RD': {'state': 'Ready', 'class': 'ready'},
+            'CA': {'state': 'Canceled', 'class': 'canceled'},
+        }
+        state_info = state_map.get(state, {'state': 'Unknown', 'class': 'pending'})
+
+        clean_op = {
+            'queue': protocol,
+            'state': state_info['state'],
+            'class': state_info['class'],
+            'start_time': op['start_time'],
+            'ready_time': op['ready_time'],
+            'job_id': op['job_id'],
+            'wells': [op['well_location']] if pd.notna(op['well_location']) else [],
+            'run_numbers': [op['run_number']] if op['run_number'] is not None else [],
+        }
+
+        def _job_null(j):
+            try: return j is None or bool(pd.isna(j))
+            except TypeError: return False
+        if not current_group:
+            current_group.append(clean_op)
+        else:
+            prev_op = current_group[-1]
+            same_job = (_job_null(clean_op['job_id']) and _job_null(prev_op['job_id'])) or \
+                       (not _job_null(clean_op['job_id']) and not _job_null(prev_op['job_id']) and clean_op['job_id'] == prev_op['job_id'])
+            if protocol == prev_op['queue'] and protocol in groupable_protocols and same_job:
+                prev_op['wells'].extend(clean_op['wells'])
+                prev_op['run_numbers'].extend(clean_op['run_numbers'])
+                if clean_op['class'] == 'running':
+                    prev_op['state'] = 'Running'
+                    prev_op['class'] = 'running'
+            else:
+                result.append(current_group[0])
+                current_group = [clean_op]
+
+    if current_group:
+        result.append(current_group[0])
+
+    return result
+
+
 # ── Paste render_all_projects_dashboard here ──────────────────────────────────
 # Copy the full function body from your Colab renderer.py unchanged.
 # Only the function signature + the call at the bottom of this file matter here.
@@ -159,24 +317,6 @@ def render_all_projects_dashboard(
     # =========================================================================
     # 1. HELPERS
     # =========================================================================
-    def to_est(dt_val):
-        if pd.isna(dt_val) or dt_val == '': return None
-        try:
-            dt = pd.to_datetime(dt_val)
-            if dt.tz is None: dt = dt.tz_localize('UTC')
-            return dt.tz_convert('US/Eastern')
-        except: return None
-
-    def batch_to_est(times: list) -> list:
-        """Vectorized list-of-timestamps → US/Eastern. ~10x faster than calling to_est per item."""
-        if not times:
-            return []
-        try:
-            converted = pd.to_datetime(times, errors='coerce', utc=True).tz_convert('US/Eastern')
-            return [x if not pd.isnull(x) else None for x in converted]
-        except Exception:
-            return [to_est(t) for t in times]
-
     def clean_plate_id(val):
         if pd.isna(val): return None
         match = re.search(r'(\d+)', str(val))
@@ -195,150 +335,6 @@ def render_all_projects_dashboard(
                     found = True
         if not found: return 99999999
         return min_pai
-
-    def parse_pipeline_operations(protocol_names, operation_states, operation_starts, job_ids, well_locations_list, operation_ready_times, ngs_run_numbers=None):
-        # --- STEP 0: TYPE PROTECTION ---
-        # Force all inputs to be lists. If they are NaN or None, they become empty lists.
-        def ensure_list(x):
-            if isinstance(x, (list, np.ndarray)): return list(x)
-            return []
-
-        protocol_names = ensure_list(protocol_names)
-        operation_states = ensure_list(operation_states)
-        operation_starts = ensure_list(operation_starts)
-        job_ids = ensure_list(job_ids)
-        well_locations_list = ensure_list(well_locations_list)
-        operation_ready_times = ensure_list(operation_ready_times)
-        ngs_run_numbers = ensure_list(ngs_run_numbers)
-
-        if not protocol_names:
-            return []
-
-        # --- STEP 1: BUILD RAW OPERATIONS ---
-        n = len(protocol_names)
-        _s_times = batch_to_est(operation_starts[:n])
-        _r_times = batch_to_est(operation_ready_times[:n])
-        raw_ops = []
-        for i in range(n):
-            r_time = _r_times[i] if i < len(_r_times) else None
-            s_time = _s_times[i] if i < len(_s_times) else None
-            run_num = ngs_run_numbers[i] if i < len(ngs_run_numbers) else None
-
-            raw_ops.append({
-                'protocol': protocol_names[i],
-                'state': operation_states[i] if i < len(operation_states) else 'Unknown',
-                'start_time': s_time,
-                'ready_time': r_time,
-                'job_id': job_ids[i] if i < len(job_ids) else None,
-                'well_location': well_locations_list[i] if i < len(well_locations_list) else None,
-                'run_number': run_num if (run_num is not None and pd.notna(run_num)) else None,
-            })
-
-        # --- STEP 2: SORTING ---
-        # Sort by ready_time then start_time
-        raw_ops.sort(key=lambda x: (
-            0 if pd.notna(x['ready_time']) else 1,
-            x['ready_time'] if pd.notna(x['ready_time']) else pd.Timestamp.min,
-            0 if pd.notna(x['start_time']) else 1,
-            x['start_time'] if pd.notna(x['start_time']) else pd.Timestamp.min
-        ))
-
-        # --- STEP 2b: DEDUP same-protocol same-state same-job ops ---
-        # Ops with different job_ids are distinct pipeline steps (e.g. original Rearray
-        # job 8333 vs repick Rearray job 8388) and must NOT be collapsed.
-        def _safe_job_key(j):
-            try:
-                return None if (j is None or pd.isna(j)) else int(j)
-            except (TypeError, ValueError):
-                return None
-
-        seen: dict = {}
-        deduped: list = []
-        for op in raw_ops:
-            key = (op['protocol'], op['state'], _safe_job_key(op['job_id']))
-            if key not in seen:
-                seen[key] = len(deduped)
-                deduped.append(op)
-            else:
-                existing = deduped[seen[key]]
-                if op['start_time'] and (not existing['start_time'] or op['start_time'] < existing['start_time']):
-                    existing['start_time'] = op['start_time']
-        raw_ops = deduped
-
-        # --- STEP 2c: PROPAGATE run_number across states for same (protocol, job) ---
-        # resolve_downstream_plates adds SC ops without run_number; the FA entries
-        # (filtered by soft-fail below) may carry the run number. Propagate first.
-        _run_by_job: dict = {}
-        for op in raw_ops:
-            key = (op['protocol'], _safe_job_key(op['job_id']))
-            if op.get('run_number') is not None and key not in _run_by_job:
-                _run_by_job[key] = op['run_number']
-        for op in raw_ops:
-            if op.get('run_number') is None:
-                op['run_number'] = _run_by_job.get((op['protocol'], _safe_job_key(op['job_id'])))
-
-        # --- STEP 3: SOFT FAIL & GROUPING ---
-        protocol_success = {op['protocol'] for op in raw_ops if op['state'] == 'SC'}
-        groupable_protocols = {
-            proto.DNA_QUANT, proto.REARRAY, proto.NGS, proto.FRAGMENT_ANALYZER,
-        }
-
-        result = []
-        current_group = []
-
-        for op in raw_ops:
-            protocol = op['protocol']
-            state = op['state']
-
-            # Skip Fails and Cancels if a Success exists for the same protocol
-            if state in ('FA', 'CA') and protocol in protocol_success:
-                continue
-
-            state_map = {
-                'SC': {'state': 'Completed', 'class': 'succeeded'},
-                'FA': {'state': 'Failed', 'class': 'failed'},
-                'RU': {'state': 'Running', 'class': 'running'},
-                'RD': {'state': 'Ready', 'class': 'ready'},
-                'CA': {'state': 'Canceled', 'class': 'canceled'},
-            }
-            state_info = state_map.get(state, {'state': 'Unknown', 'class': 'pending'})
-
-            clean_op = {
-                'queue': protocol,
-                'state': state_info['state'],
-                'class': state_info['class'],
-                'start_time': op['start_time'],
-                'ready_time': op['ready_time'],
-                'job_id': op['job_id'],
-                'wells': [op['well_location']] if pd.notna(op['well_location']) else [],
-                'run_numbers': [op['run_number']] if op['run_number'] is not None else [],
-            }
-
-            # Grouping Engine
-            def _job_null(j):
-                try: return j is None or bool(pd.isna(j))
-                except TypeError: return False
-            if not current_group:
-                current_group.append(clean_op)
-            else:
-                prev_op = current_group[-1]
-                same_job = (_job_null(clean_op['job_id']) and _job_null(prev_op['job_id'])) or \
-                           (not _job_null(clean_op['job_id']) and not _job_null(prev_op['job_id']) and clean_op['job_id'] == prev_op['job_id'])
-                if protocol == prev_op['queue'] and protocol in groupable_protocols and same_job:
-                    # Merge wells and run numbers; update state if necessary
-                    prev_op['wells'].extend(clean_op['wells'])
-                    prev_op['run_numbers'].extend(clean_op['run_numbers'])
-                    if clean_op['class'] == 'running':
-                        prev_op['state'] = 'Running'
-                        prev_op['class'] = 'running'
-                else:
-                    result.append(current_group[0])
-                    current_group = [clean_op]
-
-        if current_group:
-            result.append(current_group[0])
-
-        return result
 
     def get_active_step_info(row):
         queue_data = parse_pipeline_operations(
