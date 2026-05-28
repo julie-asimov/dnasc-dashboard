@@ -11,6 +11,7 @@ Public API:
 
 from __future__ import annotations
 import base64
+import time
 import warnings
 from pathlib import Path
 
@@ -3576,6 +3577,7 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
     log.info("Rendering dashboard for %d rows...", len(df))
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    generated_ts = int(time.time())
 
     html = render_all_projects_dashboard(
         df,
@@ -3599,18 +3601,23 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
     <title>DNA SC Dashboard</title>
     <script>
     (function() {{
-        // Force fresh fetch on every navigation by cache-busting with a timestamp.
-        // Meta cache-control tags are ignored by modern browsers for navigation requests.
-        if (!window.location.search.includes('v=')) {{
-            window.location.replace(window.location.pathname + '?v=' + Date.now());
+        var _VER = {generated_ts};
+        var _base = window.location.pathname.replace(/\/[^/]+$/, '/');
+        function _reload() {{ window.location.href = window.location.pathname + '?v=' + Date.now(); }}
+        function checkForUpdate() {{
+            fetch(_base + 'dnasc_version.txt?_nc=' + Date.now(), {{cache: 'no-store'}})
+                .then(function(r) {{ return r.text(); }})
+                .then(function(t) {{ if (parseInt(t, 10) > _VER + 120) {{ _reload(); }} }})
+                .catch(function() {{}});
         }}
+        setInterval(checkForUpdate, 3 * 60 * 1000);
         var _hiddenAt = null;
         var IDLE_MS = 15 * 60 * 1000;
         document.addEventListener('visibilitychange', function() {{
             if (document.visibilityState === 'hidden') {{
                 _hiddenAt = Date.now();
             }} else if (_hiddenAt && (Date.now() - _hiddenAt) >= IDLE_MS) {{
-                window.location.href = window.location.pathname + '?v=' + Date.now();
+                _reload();
             }}
         }});
     }})();

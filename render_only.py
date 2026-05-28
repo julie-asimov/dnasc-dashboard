@@ -51,6 +51,7 @@ def main():
 
     WWW_DIR.mkdir(parents=True, exist_ok=True)
     HTML_OUT.write_text(html, encoding="utf-8")
+    (WWW_DIR / "dnasc_version.txt").write_text(str(int(time.time())))
     print(f"  Written → {HTML_OUT}  ({time.time() - start:.1f}s)")
 
 if __name__ == "__main__":
