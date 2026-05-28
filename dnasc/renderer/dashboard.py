@@ -745,8 +745,6 @@ def render_all_projects_dashboard(
         var activeOnly = document.getElementById('active_toggle').checked;
         // Don't search on a single character — too many matches causes DOM freeze
         if (searchTerm.length === 1) { return; }
-        try { localStorage.setItem('dash_activeOnly', activeOnly ? '1' : '0'); } catch(e) {}
-        try { localStorage.setItem('dash_search', document.getElementById('search_box').value); } catch(e) {}
         document.querySelectorAll('.search-match').forEach(function(el) { el.classList.remove('search-match'); });
         document.querySelectorAll('.search-match-section').forEach(function(el) { el.classList.remove('search-match-section'); });
         document.querySelectorAll('.req-card').forEach(function(el) { el.style.display = ''; });
@@ -994,18 +992,8 @@ def render_all_projects_dashboard(
         pop.style.display = 'block';
     }
     document.addEventListener('DOMContentLoaded', function() {
-        var _overlay = document.getElementById('_loading_overlay');
-        function _hideOverlay() {
-            if (!_overlay) return;
-            _overlay.classList.add('fade-out');
-            setTimeout(function() { _overlay.style.display = 'none'; }, 260);
-        }
         try {
-            var savedActive = localStorage.getItem('dash_activeOnly');
-            var savedSearch = localStorage.getItem('dash_search');
-            var savedTab    = localStorage.getItem('dash_activeTab');
-            if (savedActive === '1') { document.getElementById('active_toggle').checked = true; }
-            if (savedSearch) { document.getElementById('search_box').value = savedSearch; }
+            var savedTab = localStorage.getItem('dash_activeTab');
             var eh = document.getElementById('_earlyhide'); if (eh) eh.remove();
             if (savedTab && savedTab !== 'tracking' && document.querySelector('[data-tab="' + savedTab + '"]')) { switchTab(savedTab); }
         } catch(e) {}
@@ -1013,15 +1001,6 @@ def render_all_projects_dashboard(
         var firstExpIcon = document.querySelector('.exp-toggle-icon');
         if (firstExp) { firstExp.style.display = 'block'; }
         if (firstExpIcon) { firstExpIcon.classList.add('open'); }
-        // Defer heavy filter so browser paints the overlay before blocking
-        setTimeout(function() {
-            try {
-                var savedActive2 = localStorage.getItem('dash_activeOnly');
-                var savedSearch2 = localStorage.getItem('dash_search');
-                if (savedActive2 === '1' || savedSearch2) { filterDashboard(); }
-            } catch(e) {}
-            _hideOverlay();
-        }, 0);
         document.addEventListener('click', function(e) {
             var trigger = e.target.closest('.colony-badge, .plate-trigger');
             if (trigger) {
@@ -3629,32 +3608,8 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
     }})();
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <style>
-    #_loading_overlay {{
-        position: fixed; inset: 0; z-index: 99999;
-        background: #f5f5f7;
-        display: flex; flex-direction: column;
-        align-items: center; justify-content: center;
-        gap: 14px;
-        transition: opacity 0.25s ease;
-    }}
-    #_loading_overlay.fade-out {{ opacity: 0; pointer-events: none; }}
-    #_loading_overlay .spinner {{
-        width: 36px; height: 36px;
-        border: 3px solid #d1d5db;
-        border-top-color: #6366f1;
-        border-radius: 50%;
-        animation: _spin 0.7s linear infinite;
-    }}
-    @keyframes _spin {{ to {{ transform: rotate(360deg); }} }}
-    #_loading_overlay .label {{
-        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-        font-size: 13px; color: #6b7280; letter-spacing: 0.02em;
-    }}
-    </style>
 </head>
 <body>
-<div id="_loading_overlay"><div class="spinner"></div><div class="label">Loading dashboard…</div></div>
 {html}
 </body>
 </html>"""
