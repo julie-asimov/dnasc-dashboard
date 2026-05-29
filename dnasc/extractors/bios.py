@@ -144,6 +144,7 @@ class BIOSExtractor:
             lp.anti_kan  AS lims_anti_kan,
             lp.anti_spec AS lims_anti_spec,
             lp.anti_carb AS lims_anti_carb,
+            lp.alias     AS lims_plasmid_alias,
             NULL AS attempt_anchor_id,
             NULL AS attempt_number,
             NULL AS attempt_total,
@@ -223,6 +224,7 @@ class BIOSExtractor:
             lp.anti_kan  AS lims_anti_kan,
             lp.anti_spec AS lims_anti_spec,
             lp.anti_carb AS lims_anti_carb,
+            lp.alias     AS lims_plasmid_alias,
             NULL AS attempt_anchor_id, NULL AS attempt_number, NULL AS attempt_total,
             'BIOS_DRAFT' AS data_source
         FROM `{proj}.bios__src.workorder` wo
@@ -296,7 +298,7 @@ class BIOSExtractor:
             NULL AS product_json, NULL AS backbone_json, NULL AS parts_json,
             NULL AS cloning_strain, NULL AS antibiotic,
             NULL AS expected_color, NULL AS background_color,
-            NULL AS lims_anti_kan, NULL AS lims_anti_spec, NULL AS lims_anti_carb,
+            NULL AS lims_anti_kan, NULL AS lims_anti_spec, NULL AS lims_anti_carb, NULL AS lims_plasmid_alias,
             NULL AS attempt_anchor_id, NULL AS attempt_number, NULL AS attempt_total,
             'BIOS_REQUEST' AS data_source
         FROM `{proj}.bios__src.request` req

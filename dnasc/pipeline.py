@@ -7,6 +7,7 @@ This is the only file that knows the full execution sequence.
 """
 
 from __future__ import annotations
+import re
 import time
 import concurrent.futures
 
@@ -36,6 +37,32 @@ from dnasc.transformers.repair import (
     resolve_optracker_streakouts,
     _fetch_well_mapping,
 )
+
+# ── Antibiotic normalisation (module-level so tests can import) ───────────────
+_AB_NORM = {
+    'kan': 'Kan', 'kanamycin': 'Kan',
+    'spec': 'Spec', 'spectinomycin': 'Spec',
+    'carb': 'Carb', 'carbenicillin': 'Carb', 'amp': 'Carb', 'ampicillin': 'Carb',
+}
+
+def _norm_bios_ab(val):
+    """Normalise a BIOS antibiotic string to Kan/Spec/Carb, or None if unrecognised."""
+    if val is None or (isinstance(val, float) and pd.isna(val)): return None
+    v = str(val).strip().lower()
+    for k, canon in _AB_NORM.items():
+        if re.search(r'\b' + re.escape(k) + r'\b', v): return canon
+    return None
+
+def _lims_ab(r):
+    """Derive canonical antibiotic label from LIMS plasmid boolean flags on a row.
+    Skips anti_kan when the plasmid alias contains the word 'Neo' — those plasmids
+    carry neomycin as a mammalian selection marker; the bacterial resistance is Spec/Carb."""
+    _alias = str(r.get('lims_plasmid_alias') or '')
+    _has_neo = bool(re.search(r'\bNeo\b', _alias))
+    if r.get('lims_anti_kan') is True and not _has_neo: return 'Kan'
+    if r.get('lims_anti_spec') is True: return 'Spec'
+    if r.get('lims_anti_carb') is True: return 'Carb'
+    return None
 
 log = get_logger(__name__)
 
@@ -218,24 +245,6 @@ def run_pipeline() -> pd.DataFrame:
 
     # ── Antibiotic mismatch detection ────────────────────────────────────────
     # lims_anti_kan/spec/carb come directly from the BIOS BQ query (lims__src.plasmid JOIN).
-    _AB_NORM = {
-        'kan': 'Kan', 'kanamycin': 'Kan',
-        'spec': 'Spec', 'spectinomycin': 'Spec',
-        'carb': 'Carb', 'carbenicillin': 'Carb', 'amp': 'Carb', 'ampicillin': 'Carb',
-    }
-    def _norm_bios_ab(val):
-        if val is None or (isinstance(val, float) and pd.isna(val)): return None
-        v = str(val).strip().lower()
-        for k, canon in _AB_NORM.items():
-            if k in v: return canon
-        return None
-
-    def _lims_ab(r):
-        if r.get('lims_anti_kan') is True: return 'Kan'
-        if r.get('lims_anti_spec') is True: return 'Spec'
-        if r.get('lims_anti_carb') is True: return 'Carb'
-        return None
-
     final_df['lims_antibiotic'] = final_df.apply(_lims_ab, axis=1)
     _bios_norm = final_df['antibiotic'].apply(_norm_bios_ab)
     final_df['antibiotic_mismatch'] = (
