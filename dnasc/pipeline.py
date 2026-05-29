@@ -216,6 +216,34 @@ def run_pipeline() -> pd.DataFrame:
     if not well_comments.empty:
         final_df = final_df.merge(well_comments, on="workorder_id", how="left")
 
+    # ── Antibiotic mismatch detection ────────────────────────────────────────
+    # lims_anti_kan/spec/carb come directly from the BIOS BQ query (lims__src.plasmid JOIN).
+    _AB_NORM = {
+        'kan': 'Kan', 'kanamycin': 'Kan',
+        'spec': 'Spec', 'spectinomycin': 'Spec',
+        'carb': 'Carb', 'carbenicillin': 'Carb', 'amp': 'Carb', 'ampicillin': 'Carb',
+    }
+    def _norm_bios_ab(val):
+        if val is None or (isinstance(val, float) and pd.isna(val)): return None
+        v = str(val).strip().lower()
+        for k, canon in _AB_NORM.items():
+            if k in v: return canon
+        return None
+
+    def _lims_ab(r):
+        if r.get('lims_anti_kan') is True: return 'Kan'
+        if r.get('lims_anti_spec') is True: return 'Spec'
+        if r.get('lims_anti_carb') is True: return 'Carb'
+        return None
+
+    final_df['lims_antibiotic'] = final_df.apply(_lims_ab, axis=1)
+    _bios_norm = final_df['antibiotic'].apply(_norm_bios_ab)
+    final_df['antibiotic_mismatch'] = (
+        final_df['lims_antibiotic'].notna()
+        & _bios_norm.notna()
+        & (_bios_norm != final_df['lims_antibiotic'])
+    )
+
     final_df["join_key"] = (
         final_df["workorder_id"].astype(str)
         .str.replace("STBL3_", "", case=False, regex=False)

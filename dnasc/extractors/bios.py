@@ -141,6 +141,9 @@ class BIOSExtractor:
             COALESCE(tw.antibiotic, gw.antibiotic, ggw.antibiotic) AS antibiotic,
             COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
             COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
+            lp.anti_kan  AS lims_anti_kan,
+            lp.anti_spec AS lims_anti_spec,
+            lp.anti_carb AS lims_anti_carb,
             NULL AS attempt_anchor_id,
             NULL AS attempt_number,
             NULL AS attempt_total,
@@ -159,6 +162,8 @@ class BIOSExtractor:
         LEFT JOIN `{proj}.bios__src.transformationworkorder` tw ON wo.id = tw.id
         LEFT JOIN `{proj}.lims__src.well` AS tw_well
             ON tw_well.id = CAST(JSON_VALUE(tw.input_well_key, '$.id') AS INT64)
+        LEFT JOIN `{proj}.lims__src.plasmid` lp
+            ON lp.id = SAFE_CAST(JSON_VALUE(COALESCE(ggw.product, gw.product, tw.product), '$.id') AS INT64)
         LEFT JOIN `{proj}.bios__src.request` req
             ON req.id = COALESCE(wo.request_id, ad_root.root_request_id)
         LEFT JOIN `{proj}.bios__src.plasmidrequest` pr
@@ -215,6 +220,9 @@ class BIOSExtractor:
             COALESCE(tw.antibiotic, gw.antibiotic, ggw.antibiotic) AS antibiotic,
             COALESCE(tw.expected_color, ggw.expected_color, gw.expected_color) AS expected_color,
             COALESCE(tw.background_color, ggw.background_color, gw.background_color) AS background_color,
+            lp.anti_kan  AS lims_anti_kan,
+            lp.anti_spec AS lims_anti_spec,
+            lp.anti_carb AS lims_anti_carb,
             NULL AS attempt_anchor_id, NULL AS attempt_number, NULL AS attempt_total,
             'BIOS_DRAFT' AS data_source
         FROM `{proj}.bios__src.workorder` wo
@@ -230,6 +238,8 @@ class BIOSExtractor:
         LEFT JOIN `{proj}.bios__src.transformationworkorder` tw ON wo.id = tw.id
         LEFT JOIN `{proj}.lims__src.well` AS tw_well
             ON tw_well.id = CAST(JSON_VALUE(tw.input_well_key, '$.id') AS INT64)
+        LEFT JOIN `{proj}.lims__src.plasmid` lp
+            ON lp.id = SAFE_CAST(JSON_VALUE(COALESCE(ggw.product, gw.product, tw.product), '$.id') AS INT64)
         LEFT JOIN `{proj}.bios__src.request` req ON req.id = wo.request_id
         LEFT JOIN `{proj}.bios__src.plasmidrequest` pr ON pr.id = wo.request_id
         WHERE wo.status = 'DRAFT'
@@ -286,6 +296,7 @@ class BIOSExtractor:
             NULL AS product_json, NULL AS backbone_json, NULL AS parts_json,
             NULL AS cloning_strain, NULL AS antibiotic,
             NULL AS expected_color, NULL AS background_color,
+            NULL AS lims_anti_kan, NULL AS lims_anti_spec, NULL AS lims_anti_carb,
             NULL AS attempt_anchor_id, NULL AS attempt_number, NULL AS attempt_total,
             'BIOS_REQUEST' AS data_source
         FROM `{proj}.bios__src.request` req

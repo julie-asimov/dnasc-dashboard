@@ -180,6 +180,28 @@ class LIMSExtractor:
         return colony_summary
 
     @staticmethod
+    def get_plasmid_antibiotics(plasmid_ids: list) -> pd.DataFrame:
+        """
+        Query anti_kan/spec/carb from lims__src.plasmid by numeric ID.
+        Returns DataFrame with (plasmid_id, anti_kan, anti_spec, anti_carb).
+        Used to detect antibiotic mismatches against BIOS workorder antibiotic field.
+        """
+        if not plasmid_ids:
+            return pd.DataFrame()
+        proj = PipelineConfig.PROJECT_ID
+        client = bigquery.Client(project=proj)
+        clean_ids = list({int(x) for x in plasmid_ids if x is not None})
+        if not clean_ids:
+            return pd.DataFrame()
+        ids_str = ", ".join(str(x) for x in clean_ids)
+        query = f"""
+        SELECT id AS plasmid_id, anti_kan, anti_spec, anti_carb
+        FROM `{proj}.lims__src.plasmid`
+        WHERE id IN ({ids_str})
+        """
+        return client.query(query).to_dataframe()
+
+    @staticmethod
     def get_colony_picking_counts(workorder_ids: list) -> pd.DataFrame:
         """
         Pull QPix colony picking counts from bios__src.colonypickingcounts,

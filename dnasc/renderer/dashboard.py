@@ -1104,7 +1104,7 @@ def render_all_projects_dashboard(
     # =========================================================================
     # 3. HELPER: RENDER SINGLE REQUEST
     # =========================================================================
-    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False, has_seq_winner=False, has_order_pending=False):
+    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False, has_seq_winner=False, has_order_pending=False, has_antibiotic_mismatch=False):
         html = []
         construct = req_df['construct_name'].iloc[0] or "Unknown Construct"
         req_status = req_df['request_status'].iloc[0] if 'request_status' in req_df.columns else "Unknown"
@@ -1319,6 +1319,7 @@ def render_all_projects_dashboard(
         asm_review_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span><div class="badge-tip">Assembly needs review before proceeding</div></div>' if is_asm_review else ""
         seq_winner_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span><div class="badge-tip">A sequencing winner has been identified — ready for LSP</div></div>' if has_seq_winner else ""
         order_pending_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span><div class="badge-tip">Parts order submitted to synthesis vendor — waiting on delivery</div></div>' if has_order_pending else ""
+        antibiotic_mismatch_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#dc2626; color:white; border:2px solid #b91c1c; font-size:12px; padding:4px 12px; font-weight:800;">🚨 ANTIBIOTIC MISMATCH</span><div class="badge-tip">A Gibson or Golden Gate workorder has an antibiotic that does not match LIMS — check and correct before proceeding</div></div>' if has_antibiotic_mismatch else ""
 
         ready_to_ship_time = None
         final_release_time = None
@@ -1399,6 +1400,7 @@ def render_all_projects_dashboard(
                     {asm_review_badge}
                     {seq_winner_badge}
                     {order_pending_badge}
+                    {antibiotic_mismatch_badge}
                 </div>
             </div>
         """)
@@ -1917,6 +1919,14 @@ def render_all_projects_dashboard(
                     header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:3px; color:{_ei_color}; text-align:center;'>{active_info}</div>"
                 s_class = f"status-{status}"
             badges_html += f'<div style="text-align:right"><span class="badge {s_class}"><b>{f_type}: {status}</b></span>{header_extra_info}</div>'
+            if 'antibiotic_mismatch' in root_df.columns:
+                _ab_mis = root_df[
+                    root_df['type'].isin(['golden_gate_workorder', 'gibson_workorder'])
+                    & root_df['antibiotic_mismatch'].eq(True)
+                    & ~root_df['visual_status'].isin(['SUCCEEDED', 'FAILED', 'CANCELED'])
+                ]
+                if not _ab_mis.empty:
+                    badges_html += '<div style="text-align:right;margin-top:2px;"><span style="font-size:10px;font-weight:800;color:#b91c1c;background:#fee2e2;border:1px solid #fca5a5;border-radius:3px;padding:1px 6px;">🚨 ANTIBIOTIC MISMATCH</span></div>'
             root_workorder_row = root_df[root_df['workorder_id'] == root_id]
             if not root_workorder_row.empty: root_stock = root_workorder_row['STOCK_ID'].iloc[0]
             else: root_stock = root_df['STOCK_ID'].iloc[0]
@@ -2560,17 +2570,21 @@ def render_all_projects_dashboard(
                     strain = row.get('cloning_strain')
                     if pd.notna(strain): details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Strain: {strain}</div>")
                     _ab = row.get('antibiotic')
-                    if _ab is not None and not (isinstance(_ab, float) and pd.isna(_ab)) and str(_ab).strip() not in ('', 'nan', 'None'):
-                        details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Antibiotic: {str(_ab).strip()}</div>")
-                    if row.get('antibiotic_mismatch') is True or row.get('antibiotic_mismatch') == True:
-                        _lims_ab = str(row.get('lims_antibiotic') or '')
-                        _bios_ab = str(row.get('antibiotic') or '')
-                        details_info.append(
-                            f"<div style='font-size:10px;color:#b45309;background:#fffbeb;"
-                            f"border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;"
-                            f"margin-top:3px;'>&#9888; Antibiotic mismatch: "
-                            f"BIOS={_bios_ab}, LIMS={_lims_ab}</div>"
-                        )
+                    _ab_str = str(_ab).strip() if (_ab is not None and not (isinstance(_ab, float) and pd.isna(_ab)) and str(_ab).strip() not in ('', 'nan', 'None')) else ''
+                    if _ab_str:
+                        _is_mismatch = row.get('antibiotic_mismatch') is True or row.get('antibiotic_mismatch') == True
+                        if _is_mismatch:
+                            _lims_ab = str(row.get('lims_antibiotic') or '')
+                            details_info.append(
+                                f"<div style='font-size:10px;margin-top:2px;'>"
+                                f"Antibiotic: <span style='color:#b91c1c;font-weight:600;"
+                                f"background:#fee2e2;border-radius:3px;padding:0 4px;'>"
+                                f"{_ab_str} &#10007;</span>"
+                                f"<span style='font-size:9px;color:#9ca3af;margin-left:4px;'>"
+                                f"(LIMS: {_lims_ab})</span></div>"
+                            )
+                        else:
+                            details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Antibiotic: {_ab_str}</div>")
                     _imaged   = row.get('imaged_colonies')
                     _pickable = row.get('pickable_colonies')
                     _picked   = row.get('picked_colonies')
@@ -2677,6 +2691,8 @@ def render_all_projects_dashboard(
                 _status_cell = f'<span class="badge {badge_class}">{effective_status}</span>'
                 if _bios_override and _bios_raw and _bios_raw not in ('NAN', 'NONE', ''):
                     _status_cell += f'<div class="bios-override-label">BIOS: {_bios_raw}</div>'
+                if row.get('antibiotic_mismatch') is True or row.get('antibiotic_mismatch') == True:
+                    _status_cell += '<div style="font-size:9px;font-weight:700;color:#b91c1c;margin-top:2px;">🚨 ANTIBIOTIC</div>'
                 _fulfills_attr = "1" if row.get('fulfills_request') else "0"
                 _partner_attr = "1" if str(row.get('for_partner', '')).lower() == 'true' else "0"
                 html.append(f"""<tr class="{row_class}"{_row_order_style} data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{"".join(details_info)}</td><td>{"".join(pipeline_html)}</td></tr>""")
@@ -2882,7 +2898,8 @@ def render_all_projects_dashboard(
         count_blocked = 0; count_stalled = 0; count_in_lsp = 0; count_asm_review = 0; count_seq_winner = 0; count_order_pending = 0
         count_in_assembly = 0; count_active_waiting = 0; count_ship_ready = 0
         new_req_list = []; active_req_list = []; fulfilled_req_list = []; canceled_req_list = []
-        stalled_reqs = set(); asm_review_reqs = set(); seq_winner_reqs = set(); order_pending_reqs = set(); production_tats = []; total_tats = []
+        stalled_reqs = set(); asm_review_reqs = set(); seq_winner_reqs = set(); order_pending_reqs = set(); antibiotic_mismatch_reqs = set(); production_tats = []; total_tats = []
+        count_antibiotic_mismatch = 0
         _root_only = project_df[project_df['workorder_id'] == project_df['root_work_order_id']]
         _ptr_source = _root_only if not _root_only.empty else project_df
         has_ptr = _ptr_source['for_partner'].astype(str).str.lower().str.contains('true').any()
@@ -2976,6 +2993,14 @@ def render_all_projects_dashboard(
             is_blocked         = bool(r_df['is_blocked'].iloc[0])      if 'is_blocked'       in r_df.columns else False
             has_seq_winner     = bool(r_df['has_seq_winner'].iloc[0])     if 'has_seq_winner'    in r_df.columns else False
             has_order_pending  = bool(r_df['has_order_pending'].iloc[0]) if 'has_order_pending' in r_df.columns else False
+            has_antibiotic_mismatch = False
+            if 'antibiotic_mismatch' in r_df.columns:
+                _ab_active = r_df[
+                    r_df['type'].isin(['golden_gate_workorder', 'gibson_workorder'])
+                    & r_df['antibiotic_mismatch'].eq(True)
+                    & ~r_df['visual_status'].isin(['SUCCEEDED', 'FAILED', 'CANCELED'])
+                ]
+                has_antibiotic_mismatch = not _ab_active.empty
             _draft_mask        = r_df['data_source'].eq('BIOS_DRAFT') if 'data_source' in r_df.columns else pd.Series(False, index=r_df.index)
             has_real_workorders = not r_df[
                 r_df['workorder_id'].notna()
@@ -3007,6 +3032,7 @@ def render_all_projects_dashboard(
                 if is_asm_review: count_asm_review += 1; asm_review_reqs.add(rid)
                 if has_seq_winner: count_seq_winner += 1; seq_winner_reqs.add(rid)
                 if has_order_pending: count_order_pending += 1; order_pending_reqs.add(rid)
+                if has_antibiotic_mismatch: count_antibiotic_mismatch += 1; antibiotic_mismatch_reqs.add(rid)
                 elif is_blocked: count_blocked += 1
                 else:
                     is_ship_ready = False
@@ -3468,6 +3494,7 @@ def render_all_projects_dashboard(
                         {f'<span class="stat-item" title="Assembly needs review before proceeding" style="background:rgba(217,119,6,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🔬 {count_asm_review}</span> <span style="font-size:10px;">ASM Review</span></span>' if count_asm_review > 0 else ''}
                         {f'<span class="stat-item" title="A sequencing winner has been identified — ready for LSP" style="background:rgba(5,150,105,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🏆 {count_seq_winner}</span> <span style="font-size:10px;">Seq Winner</span></span>' if count_seq_winner > 0 else ''}
                         {f'<span class="stat-item" title="Parts order submitted to synthesis vendor — waiting on delivery" style="background:rgba(124,58,237,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">⏳ {count_order_pending}</span> <span style="font-size:10px;">Order Pending</span></span>' if count_order_pending > 0 else ''}
+                        {f'<span class="stat-item" title="A Gibson or Golden Gate workorder has an antibiotic that does not match LIMS" style="background:rgba(220,38,38,0.6); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🚨 {count_antibiotic_mismatch}</span> <span style="font-size:10px;">Antibiotic Mismatch</span></span>' if count_antibiotic_mismatch > 0 else ''}
                         {f'<span class="stat-item" title="Assembly is blocked — upstream dependency unresolved" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_blocked}</span> <span style="font-size:10px;">Blocked</span></span>' if count_blocked > 0 else ''}
                         {f'<span class="stat-item" title="Requests canceled" style="background:rgba(100,116,139,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_canceled}</span> <span style="font-size:10px;">Canceled</span></span>' if count_canceled > 0 else ''}
                     </div>
@@ -3477,7 +3504,7 @@ def render_all_projects_dashboard(
             html += f"""
                 <details>
                     <summary class="group-header in-progress">
-                        <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''}{f' - 🔬 {count_asm_review} ASM Review' if count_asm_review > 0 else ''}{f' - 🏆 {count_seq_winner} Seq Winner' if count_seq_winner > 0 else ''}{f' - ⏳ {count_order_pending} Order Pending' if count_order_pending > 0 else ''})
+                        <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''}{f' - 🔬 {count_asm_review} ASM Review' if count_asm_review > 0 else ''}{f' - 🏆 {count_seq_winner} Seq Winner' if count_seq_winner > 0 else ''}{f' - ⏳ {count_order_pending} Order Pending' if count_order_pending > 0 else ''}{f' - 🚨 {count_antibiotic_mismatch} Antibiotic Mismatch' if count_antibiotic_mismatch > 0 else ''})
                     </summary>"""
             _active_parts = []
             for rid, r_df in active_req_list:
@@ -3485,7 +3512,8 @@ def render_all_projects_dashboard(
                 is_asm_review_req = rid in asm_review_reqs
                 is_seq_winner_req    = rid in seq_winner_reqs
                 is_order_pending_req = bool(r_df['has_order_pending'].iloc[0]) if 'has_order_pending' in r_df.columns else False
-                _active_parts.append(render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req, is_seq_winner_req, is_order_pending_req))
+                is_antibiotic_mismatch_req = rid in antibiotic_mismatch_reqs
+                _active_parts.append(render_single_request_html(rid, r_df, is_stalled_req, is_asm_review_req, is_seq_winner_req, is_order_pending_req, is_antibiotic_mismatch_req))
             html += "".join(_active_parts)
             html += "</details>"
         if new_req_list:
