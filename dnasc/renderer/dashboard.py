@@ -1322,7 +1322,7 @@ def render_all_projects_dashboard(
         asm_review_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span><div class="badge-tip">Assembly needs review before proceeding</div></div>' if is_asm_review else ""
         seq_winner_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span><div class="badge-tip">A sequencing winner has been identified — ready for LSP</div></div>' if has_seq_winner else ""
         order_pending_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span><div class="badge-tip">Parts order submitted to synthesis vendor — waiting on delivery</div></div>' if has_order_pending else ""
-        antibiotic_mismatch_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#dc2626; color:white; border:2px solid #b91c1c; font-size:12px; padding:4px 12px; font-weight:800;">🚨 ANTIBIOTIC MISMATCH</span><div class="badge-tip">A Gibson or Golden Gate workorder has an antibiotic that does not match LIMS — check and correct before proceeding</div></div>' if has_antibiotic_mismatch else ""
+        antibiotic_mismatch_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#dc2626; color:white; border:2px solid #b91c1c; font-size:12px; padding:4px 12px; font-weight:800;">🚨 ANTIBIOTIC MISMATCH</span><div class="badge-tip">An active workorder has an antibiotic that does not match LIMS — check and correct before proceeding</div></div>' if has_antibiotic_mismatch else ""
 
         ready_to_ship_time = None
         final_release_time = None
@@ -1924,7 +1924,7 @@ def render_all_projects_dashboard(
             badges_html += f'<div style="text-align:right"><span class="badge {s_class}"><b>{f_type}: {status}</b></span>{header_extra_info}</div>'
             if 'antibiotic_mismatch' in root_df.columns:
                 _ab_mis = root_df[
-                    root_df['type'].isin(['golden_gate_workorder', 'gibson_workorder'])
+                    root_df['type'].isin(['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder'])
                     & root_df['antibiotic_mismatch'].eq(True)
                     & ~root_df['visual_status'].isin(['SUCCEEDED', 'FAILED', 'CANCELED'])
                 ]
@@ -2999,7 +2999,7 @@ def render_all_projects_dashboard(
             has_antibiotic_mismatch = False
             if 'antibiotic_mismatch' in r_df.columns:
                 _ab_active = r_df[
-                    r_df['type'].isin(['golden_gate_workorder', 'gibson_workorder'])
+                    r_df['type'].isin(['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder'])
                     & r_df['antibiotic_mismatch'].eq(True)
                     & ~r_df['visual_status'].isin(['SUCCEEDED', 'FAILED', 'CANCELED'])
                 ]
