@@ -745,6 +745,7 @@ def render_all_projects_dashboard(
         var activeOnly = document.getElementById('active_toggle').checked;
         // Don't search on a single character — too many matches causes DOM freeze
         if (searchTerm.length === 1) { return; }
+        try { localStorage.setItem('dash_activeOnly', activeOnly ? '1' : '0'); } catch(e) {}
         document.querySelectorAll('.search-match').forEach(function(el) { el.classList.remove('search-match'); });
         document.querySelectorAll('.search-match-section').forEach(function(el) { el.classList.remove('search-match-section'); });
         document.querySelectorAll('.req-card').forEach(function(el) { el.style.display = ''; });
@@ -1000,8 +1001,10 @@ def render_all_projects_dashboard(
         }
         try {
             var savedTab = localStorage.getItem('dash_activeTab');
+            var savedActive = localStorage.getItem('dash_activeOnly');
             var eh = document.getElementById('_earlyhide'); if (eh) eh.remove();
             if (savedTab && savedTab !== 'tracking' && document.querySelector('[data-tab="' + savedTab + '"]')) { switchTab(savedTab); }
+            if (savedActive === '1') { document.getElementById('active_toggle').checked = true; filterDashboard(); }
         } catch(e) {}
         var firstExp = document.querySelector('.exp-content');
         var firstExpIcon = document.querySelector('.exp-toggle-icon');
