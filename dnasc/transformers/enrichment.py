@@ -246,12 +246,13 @@ class EnrichmentTransformer:
         for _, row in df[active_mask].iterrows():
             sid = str(row['STOCK_ID'])
             if sid not in ('nan', 'None', 'N/A') and sid not in stock_to_req:
-                stock_to_req[sid] = {'req_id': row.get('req_id'), 'wo_type': row.get('type')}
+                stock_to_req[sid] = {'req_id': row.get('req_id'), 'wo_type': row.get('type'), 'exp_name': str(row.get('experiment_name') or '')}
 
         # ── Per-request computation ───────────────────────────────────
         req_stage             : dict[str, str]  = {}
         req_phase             : dict[str, str]  = {}
         req_operation         : dict[str, str]  = {}
+        req_op_status         : dict[str, str]  = {}
         req_is_stalled        : dict[str, bool] = {}
         req_is_asm_review     : dict[str, bool] = {}
         req_is_finished       : dict[str, bool] = {}
@@ -372,7 +373,7 @@ class EnrichmentTransformer:
                 (_nc['type'] == 'lsp_workorder') |
                 (_nc['type'].isin(_PARTS_TYPES))
             ] if _root_stocks else _nc
-            _best_pri, _best_label = -1, ''
+            _best_pri, _best_label, _best_state = -1, '', ''
             for _, _row in _op_rows.iterrows():
                 for _p, _s in zip(
                     (_row['protocol_name'] if isinstance(_row.get('protocol_name'), (list, np.ndarray)) else []),
@@ -382,8 +383,15 @@ class EnrichmentTransformer:
                     if _key in _PROTO_MAP:
                         _pri, _lbl = _PROTO_MAP[_key]
                         if _pri > _best_pri:
-                            _best_pri, _best_label = _pri, _lbl
+                            _best_pri, _best_label, _best_state = _pri, _lbl, _s
             req_operation[req_id] = _best_label
+            _phase = req_phase.get(req_id, '')
+            if _best_state == 'RD':
+                req_op_status[req_id] = 'READY'
+            elif _best_state == 'RU':
+                req_op_status[req_id] = 'LSP_RUNNING' if _phase == 'LSP' else 'RUNNING'
+            else:
+                req_op_status[req_id] = 'WAITING' if _phase == 'PARTS' else _phase or ''
 
             # seq winner: deliverable constructs have ≥1 seq-confirmed colony,
             # no LSP workorder exists yet — winner in hand, not yet acted on.
@@ -427,10 +435,33 @@ class EnrichmentTransformer:
                 status, is_finished, global_parts_by_stock, stock_to_req,
             )
 
+        # ── PARTS-phase: fill blank req_operation with BB source info ────
+        _asm_types_set = {'golden_gate_workorder', 'gibson_workorder'}
+        for _rid, _rph in req_phase.items():
+            if _rph != 'PARTS' or req_operation.get(_rid):
+                continue
+            _rdf = df[df['req_id'] == _rid]
+            _asm_waiting = _rdf[
+                _rdf['type'].isin(_asm_types_set) &
+                (_rdf['visual_status'] == 'WAITING')
+            ]
+            if _asm_waiting.empty:
+                continue
+            _bb_raw = str(_asm_waiting.iloc[0].get('backbone', '') or '').split(':')[0].strip()
+            if not _bb_raw or _bb_raw in ('nan', 'None', ''):
+                continue
+            _inf = stock_to_req.get(_bb_raw)
+            if _inf and _inf.get('req_id') and _inf['req_id'] != _rid:
+                _exp = _inf.get('exp_name', '')
+                _exp_s = (_exp[:22] + '…') if len(_exp) > 22 else _exp
+                req_operation[_rid] = f"BB: {_bb_raw} · {_exp_s}"
+                req_op_status[_rid] = 'WAITING'
+
         # ── Broadcast back to all rows ────────────────────────────────
         df['stage']               = df['req_id'].map(req_stage)
         df['req_phase']           = df['req_id'].map(req_phase).fillna('')
         df['req_operation']       = df['req_id'].map(req_operation).fillna('')
+        df['req_op_status']       = df['req_id'].map(req_op_status).fillna('')
         df['is_stalled']          = df['req_id'].map(req_is_stalled).fillna(False)
         df['is_asm_review']       = df['req_id'].map(req_is_asm_review).fillna(False)
         df['is_finished']         = df['req_id'].map(req_is_finished).fillna(False)

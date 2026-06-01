@@ -1167,159 +1167,49 @@ def render_all_projects_dashboard(
         # (e.g. streakout with colonies but no seq → RUNNING) are reflected in phase
         # detection, not just in the per-row display.
         req_df = req_df.copy()
-        req_df['_eff_status'] = req_df['visual_status']
-        active_rows = req_df[req_df['_eff_status'].isin(['RUNNING', 'READY', 'WAITING', 'BLOCKED', 'IN_PROGRESS'])]
-        target_row = None
         status_badge_html = ""
 
-        if not active_rows.empty:
-            # Phase detection is stock-ID-based: root stocks = ASM, non-root stocks = PARTS
-            lsp_active  = active_rows[active_rows['type'] == 'lsp_workorder']
-            asm_active  = active_rows[
-                (active_rows['type'] != 'lsp_workorder') &
-                active_rows['STOCK_ID'].astype(str).isin(all_root_stocks)
-            ]
-            parts_active = active_rows[
-                (active_rows['type'] != 'lsp_workorder') &
-                ~active_rows['STOCK_ID'].astype(str).isin(all_root_stocks)
-            ]
-            _parts_priority = {'BLOCKED': 0, 'RUNNING': 1, 'READY': 2, 'IN_PROGRESS': 3, 'WAITING': 4}
-            _parts_type_priority = {
-                'syn_part_synthesis_workorder': 0,
-                'oligo_synthesis_workorder': 1,
-                'pcr_workorder': 2,
-                'plasmid_synthesis_workorder': 3,
+        phase_label  = str(req_df['req_phase'].iloc[0]     or '') if 'req_phase'     in req_df.columns else ''
+        display_text = str(req_df['req_operation'].iloc[0]  or '') if 'req_operation'  in req_df.columns else ''
+        op_status    = str(req_df['req_op_status'].iloc[0]  or '') if 'req_op_status'  in req_df.columns else ''
+
+        if phase_label:
+            # PARTS light variant: no WAITING GG → only synthesis workorders exist yet
+            _asm_types_set = {'golden_gate_workorder', 'gibson_workorder'}
+            _has_waiting_gg = not req_df[
+                req_df['type'].isin(_asm_types_set) & (req_df['visual_status'] == 'WAITING')
+            ].empty
+
+            _phase_styles = {
+                'LSP':   ('#059669', 'white',    '#047857'),
+                'ASM':   ('#2563eb', 'white',    '#1d4ed8'),
+                'PARTS': ('#ea580c', 'white',    '#c2410c') if _has_waiting_gg else ('#ffedd5', '#c2410c', '#fed7aa'),
             }
+            phase_bg, phase_color, phase_border = _phase_styles.get(phase_label, ('#f5f5f7', '#6b7280', '#d1d5db'))
 
-            phase_label = ""
-            phase_bg = "#f5f5f7"
-            phase_color = "#6b7280"
-            phase_border = "#d1d5db"
+            phase_html = f'''
+                <span style="
+                    background: {phase_bg}; color: {phase_color};
+                    border: 1px solid {phase_border};
+                    padding: 2px 10px; border-radius: 4px;
+                    margin-left: 6px; font-weight: 800; font-size: 13px;
+                    display: inline-flex; align-items: center; height: 22px;
+                ">{phase_label}</span>
+            '''
 
-            if not lsp_active.empty:
-                target_row = lsp_active.iloc[0]
-                phase_label = "LSP"
-                phase_bg = "#059669"
-                phase_color = "white"
-                phase_border = "#047857"
-            elif not asm_active.empty:
-                _progressing = {'RUNNING', 'READY', 'IN_PROGRESS', 'BLOCKED'}
-                asm_progressing = asm_active[asm_active['_eff_status'].isin(_progressing)]
-                if not asm_progressing.empty:
-                    asm_priority = {'RUNNING': 0, 'READY': 1, 'IN_PROGRESS': 2, 'WAITING': 3, 'BLOCKED': 4}
-                    asm_active = asm_active.copy()
-                    asm_active['_rank'] = asm_active['_eff_status'].map(asm_priority).fillna(99)
-                    target_row = asm_active.sort_values('_rank').iloc[0]
-                    phase_label = "ASM"
-                    phase_bg = "#2563eb"
-                    phase_color = "white"
-                    phase_border = "#1d4ed8"
-                else:
-                    # All ASM WAITING — show most urgent part, fall back to waiting ASM
-                    if not parts_active.empty:
-                        parts_active = parts_active.copy()
-                        parts_active['_rank'] = parts_active['_eff_status'].map(_parts_priority).fillna(99)
-                        parts_active['_type_rank'] = parts_active['type'].map(_parts_type_priority).fillna(99)
-                        target_row = parts_active.sort_values(['_rank', '_type_rank']).iloc[0]
-                    else:
-                        # parts_active empty — check cross-request fanned-in parts via
-                        # global lookup (parts belonging to other req_ids but referenced
-                        # in this GG's backbone/parts_json).
-                        _xreq_candidates = []
-                        for _aw in asm_active.itertuples():
-                            for _fld in ('backbone', 'parts'):
-                                _raw = getattr(_aw, _fld, None) or ''
-                                if pd.isna(_raw): continue
-                                for _tok in str(_raw).split(','):
-                                    _sname = _tok.split(':')[0].strip()
-                                    for _gpr in _global_parts_rows_by_stock.get(_sname, []):
-                                        _xreq_candidates.append(_gpr)
-                        if _xreq_candidates:
-                            _xdf = pd.DataFrame(_xreq_candidates)
-                            _xdf['_eff_status'] = _xdf['visual_status']
-                            _xdf_active = _xdf[_xdf['_eff_status'].isin(_parts_priority)]
-                            if not _xdf_active.empty:
-                                _xdf_active = _xdf_active.copy()
-                                _xdf_active['_rank'] = _xdf_active['_eff_status'].map(_parts_priority).fillna(99)
-                                target_row = _xdf_active.sort_values('_rank').iloc[0].to_dict()
-                        if target_row is None:
-                            target_row = asm_active.iloc[0]
-                    phase_label = "PARTS"
-                    phase_bg = "#ea580c"
-                    phase_color = "white"
-                    phase_border = "#c2410c"
-            elif not parts_active.empty:
-                parts_active = parts_active.copy()
-                parts_active['_rank'] = parts_active['_eff_status'].map(_parts_priority).fillna(99)
-                parts_active['_type_rank'] = parts_active['type'].map(_parts_type_priority).fillna(99)
-                target_row = parts_active.sort_values(['_rank', '_type_rank']).iloc[0]
-                phase_label = "PARTS"
-                phase_bg = "#ffedd5"
-                phase_color = "#c2410c"
-                phase_border = "#fed7aa"
-            else:
-                target_row = active_rows.iloc[0]
-
-            if target_row is not None:
-                status = target_row['_eff_status']
-                active_info = get_active_step_info(target_row)
-
-                if active_info and 'Ready' in active_info:
-                    status = 'READY'
-
-                phase_html = f'''
-                    <span style="
-                        background: {phase_bg}; color: {phase_color};
-                        border: 1px solid {phase_border};
-                        padding: 2px 10px; border-radius: 4px;
-                        margin-left: 6px; font-weight: 800; font-size: 13px;
-                        display: inline-flex; align-items: center; height: 22px;
-                    ">{phase_label}</span>
-                '''
-
-                # Build display text: use active queue step if available, else status
-                if active_info:
-                    display_text = active_info.upper()
-                else:
-                    # Fallback: find the most recent running/ready protocol name
-                    p_names = target_row.get('protocol_name', [])
-                    p_states = target_row.get('operation_state', [])
-                    running_step = None
-                    if isinstance(p_names, list) and isinstance(p_states, list):
-                        for pname, pstate in zip(reversed(p_names), reversed(p_states)):
-                            if pstate in ('RU', 'RD', 'SC'):
-                                running_step = pname
-                                break
-                    if running_step:
-                        display_text = f"{running_step}: {status}".upper()
-                    else:
-                        _type = str(target_row.get('type', '')).lower()
-                        if 'streak' in _type:
-                            display_text = f"STREAKOUT: {status}"
-                        else:
-                            display_text = status.upper()
-
-                # For PARTS phase: override display_text if GG is waiting on a backbone from another request
-                if phase_label == 'PARTS' and not asm_active.empty:
-                    _asm_bb = str(asm_active.iloc[0].get('backbone', '') or '').split(':')[0].strip()
-                    if _asm_bb and _asm_bb not in ('nan', 'None', ''):
-                        _inf = _stock_to_req.get(_asm_bb)
-                        if _inf and _inf.get('req_id') and _inf['req_id'] != req_id:
-                            _exp_s = (_inf['exp_name'][:22] + '…') if len(_inf['exp_name']) > 22 else _inf['exp_name']
-                            display_text = f"BB: {_asm_bb} · {_exp_s}"
-
-                badge_class = f"status-{status}"
-                if target_row['type'] == 'lsp_workorder' and status == 'RUNNING':
-                    badge_class = "status-LSP_RUNNING"
-
+            if display_text:
+                if not op_status:
+                    op_status = 'READY' if display_text.endswith('READY') else ('RUNNING' if display_text.endswith('RUNNING') else 'WAITING')
                 status_badge_html = f'''
-                    <span class="badge {badge_class}" style="
+                    <span class="badge status-{op_status}" style="
                         font-size: 9px; padding: 0 7px; height: 17px;
                         display: inline-flex; align-items: center; line-height: 1;
                         box-sizing: border-box; vertical-align: middle;
                         white-space: nowrap; font-weight: 700; border-radius: 4px;
                     ">{display_text}</span>{phase_html}
                 '''
+            else:
+                status_badge_html = phase_html
         req_created = to_est(req_df['request_created_at'].iloc[0])
         submitted_str = req_created.strftime('%Y-%m-%d') if req_created else "N/A"
         _req_email_raw = req_df['submitter_email'].dropna().iloc[0] if 'submitter_email' in req_df.columns and not req_df['submitter_email'].dropna().empty else ''
