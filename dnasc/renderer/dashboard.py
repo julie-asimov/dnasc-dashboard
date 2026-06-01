@@ -1296,27 +1296,17 @@ def render_all_projects_dashboard(
                         _type = str(target_row.get('type', '')).lower()
                         if 'streak' in _type:
                             display_text = f"STREAKOUT: {status}"
-                        elif phase_label == 'PARTS' and status == 'WAITING':
-                            _bb_stock = None
-                            _bb_exp = None
-                            _tr_sid = str(target_row.get('STOCK_ID', '') or '').strip()
-                            if _tr_sid and _tr_sid not in ('nan', 'None') and _tr_sid not in all_root_stocks:
-                                _inf = _stock_to_req.get(_tr_sid)
-                                if _inf and _inf.get('req_id') and _inf['req_id'] != req_id:
-                                    _bb_stock, _bb_exp = _tr_sid, _inf['exp_name']
-                            if not _bb_stock and not asm_active.empty:
-                                _asm_bb = str(asm_active.iloc[0].get('backbone', '') or '').split(':')[0].strip()
-                                if _asm_bb and _asm_bb not in ('nan', 'None'):
-                                    _inf = _stock_to_req.get(_asm_bb)
-                                    if _inf and _inf.get('req_id') and _inf['req_id'] != req_id:
-                                        _bb_stock, _bb_exp = _asm_bb, _inf['exp_name']
-                            if _bb_stock and _bb_exp:
-                                _exp_s = (_bb_exp[:22] + '…') if len(_bb_exp) > 22 else _bb_exp
-                                display_text = f"BB: {_bb_stock} · {_exp_s}"
-                            else:
-                                display_text = status.upper()
                         else:
                             display_text = status.upper()
+
+                # For PARTS phase: override display_text if GG is waiting on a backbone from another request
+                if phase_label == 'PARTS' and not asm_active.empty:
+                    _asm_bb = str(asm_active.iloc[0].get('backbone', '') or '').split(':')[0].strip()
+                    if _asm_bb and _asm_bb not in ('nan', 'None', ''):
+                        _inf = _stock_to_req.get(_asm_bb)
+                        if _inf and _inf.get('req_id') and _inf['req_id'] != req_id:
+                            _exp_s = (_inf['exp_name'][:22] + '…') if len(_inf['exp_name']) > 22 else _inf['exp_name']
+                            display_text = f"BB: {_asm_bb} · {_exp_s}"
 
                 badge_class = f"status-{status}"
                 if target_row['type'] == 'lsp_workorder' and status == 'RUNNING':
