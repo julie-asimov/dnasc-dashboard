@@ -1851,7 +1851,21 @@ def render_all_projects_dashboard(
             type_counts = _countable_df['type'].value_counts()
             count_str = ", ".join([f"{count} {format_type_label(k).split()[0].upper()}" for k, count in type_counts.items()])
 
-            html.append(f"""<div class="{section_class}"><button id="{div_id}_btn" class="dropdown-btn" onclick="toggleSection('{div_id}')"><span id="{div_id}_icon" class="dropdown-icon">▶</span><div class="assembly-info"><span class="assembly-type">{assembly_label}</span><span class="stock-tag" style="font-size:9px; padding:3px 8px; background:#ede9fe; color:#6d28d9; border: 1px solid #c4b5fd;">{root_stock}</span><span class="assembly-counts" style="font-weight: 600;">{count_str}</span><span class="wo-id-tag">Root: {root_id}</span></div><div class="status-badges">{badges_html}</div></button><div id="{div_id}" class="content-pane"><table class="wo-table"><thead><tr><th>Type</th><th>Workorder ID</th><th>Status</th><th>Stock ID</th><th>Created</th><th>TAT</th><th>Details</th><th style="width: 350px;">Queue</th></tr></thead><tbody>""")
+            # Extra deliverable stocks from LSP workorders in this section (e.g. pAI-21929 from a child LSP)
+            _lsp_del = set(
+                root_df[
+                    (root_df['type'] == 'lsp_workorder') &
+                    (root_df['fulfills_request'] == True) &
+                    root_df['STOCK_ID'].notna() &
+                    ~root_df['STOCK_ID'].fillna('').str.startswith('#')
+                ]['STOCK_ID'].astype(str)
+            ) - {'nan', 'None', 'N/A', '', str(root_stock)}
+            _extra_stock_tags = "".join(
+                f'<span class="stock-tag" style="font-size:9px; padding:3px 8px; background:#ddd6fe; color:#4c1d95; border: 1px solid #7c3aed;">{s}</span>'
+                for s in sorted(_lsp_del)
+            )
+
+            html.append(f"""<div class="{section_class}"><button id="{div_id}_btn" class="dropdown-btn" onclick="toggleSection('{div_id}')"><span id="{div_id}_icon" class="dropdown-icon">▶</span><div class="assembly-info"><span class="assembly-type">{assembly_label}</span><span class="stock-tag" style="font-size:9px; padding:3px 8px; background:#ede9fe; color:#6d28d9; border: 1px solid #c4b5fd;">{root_stock}</span>{_extra_stock_tags}<span class="assembly-counts" style="font-weight: 600;">{count_str}</span><span class="wo-id-tag">Root: {root_id}</span></div><div class="status-badges">{badges_html}</div></button><div id="{div_id}" class="content-pane"><table class="wo-table"><thead><tr><th>Type</th><th>Workorder ID</th><th>Status</th><th>Stock ID</th><th>Created</th><th>TAT</th><th>Details</th><th style="width: 350px;">Queue</th></tr></thead><tbody>""")
 
             _emitted_parts_header = False
             _emitted_retry_header = False
