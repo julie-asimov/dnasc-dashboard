@@ -1129,6 +1129,16 @@ def render_all_projects_dashboard(
             if _rstock not in ('nan', 'None', 'N/A'):
                 _root_stock_map[_rid] = _rstock
         all_root_stocks = set(_root_stock_map.values())
+        # Also include fulfills_request=True stocks (catches LSP STOCK_IDs distinct from the GG root)
+        if 'fulfills_request' in req_df.columns:
+            _fr_stocks = set(
+                req_df[
+                    (req_df['fulfills_request'] == True) &
+                    req_df['STOCK_ID'].notna() &
+                    ~req_df['STOCK_ID'].fillna('').str.startswith('#')
+                ]['STOCK_ID'].astype(str)
+            ) - {'nan', 'None', 'N/A', ''}
+            all_root_stocks = all_root_stocks | _fr_stocks
         target_pais = all_root_stocks
         pai_pattern = re.compile(r'pAI-\d+', re.IGNORECASE)
         final_list = []
