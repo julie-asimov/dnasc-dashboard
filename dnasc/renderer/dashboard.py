@@ -2440,8 +2440,13 @@ def render_all_projects_dashboard(
                             rows2.append(("ND/QB", f"{_fold:.2f}×"))
                         except: pass
                     _etoh = row.get('etoh_precipitation')
+                    _prep = row.get('prep_method')
+                    if _ok(_prep):
+                        rows2.append(("Prep", str(_prep)))
                     if _etoh is True or _etoh == True:
-                        rows2.append(("EtOH", "Yes"))
+                        rows2.append(("EtOH Precip", "Yes"))
+                    elif _etoh is False or _etoh == False:
+                        rows2.append(("EtOH Precip", "No"))
                     if _ok(loc): rows2.append(("Aliquot", str(loc)))
                     if _ok(qc_tube): rows2.append(("QC Tube", str(qc_tube)))
                     if rows2:
