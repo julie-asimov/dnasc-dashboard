@@ -11,6 +11,7 @@ Public API:
 
 from __future__ import annotations
 import base64
+import io
 import time
 import warnings
 from pathlib import Path
@@ -115,11 +116,22 @@ log = get_logger(__name__)
 _SCRIPTS_DIR = Path(__file__).parent.parent.parent.resolve()
 
 _ASSET_FILES = {
+    # Full-res source images — drop in any resolution; _load_b64 downsizes to
+    # _ASSET_MAX_PX at build time (icons display at 24-36px, logo at 32px).
     "logo":     "dnasc_logo.png",
     "tracking": "tracking_icon.png",
     "metrics":  "metrics_icon.png",
     "cost":     "cost_icon.png",
 }
+
+# Tab icons display at 24-36px and the logo at 32px; ~128px covers 3-4x retina.
+# Source art can be any size — it's downsized here so we never embed oversized PNGs.
+_ASSET_MAX_PX = 128
+
+try:
+    from PIL import Image as _PILImage
+except ImportError:
+    _PILImage = None
 
 
 def _load_b64(filename: str) -> str:
@@ -129,6 +141,17 @@ def _load_b64(filename: str) -> str:
             f"Asset not found: {path}\n"
             f"Place '{filename}' in: {_SCRIPTS_DIR}"
         )
+    # Downsize to display resolution and emit PNG (with alpha). Falls back to the
+    # raw bytes if Pillow is unavailable or the image can't be processed.
+    if _PILImage is not None:
+        try:
+            im = _PILImage.open(path).convert("RGBA")
+            im.thumbnail((_ASSET_MAX_PX, _ASSET_MAX_PX), _PILImage.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, format="PNG", optimize=True)
+            return base64.b64encode(buf.getvalue()).decode("utf-8")
+        except Exception as e:  # pragma: no cover - defensive fallback
+            warnings.warn(f"Could not downsize asset {filename}: {e}; embedding raw bytes")
     return base64.b64encode(path.read_bytes()).decode("utf-8")
 
 
@@ -597,6 +620,22 @@ def render_all_projects_dashboard(
     .tree-row-2 { border-left: 3px solid #d1d1d6 !important; background: #f4f4f6 !important; }
     .tree-line-icon { color: #d1d1d6; margin-right: 2px; font-family: monospace; font-size: 9px; }
     .source-badge { font-size: 7px; padding: 0px 2px; border-radius: 2px; background: #f0f0f2; color: #86868b; margin-left: 2px; }
+
+    /* Hoisted high-frequency styles (was ~16MB of repeated inline style="" attrs) */
+    .u1 { color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6; }
+    .u2 { margin-left: 8px; }
+    .u3 { color:#6b7280;font-size:9px;font-weight:700;text-transform:uppercase; }
+    .u4 { font-size:11px;color:#1f2937;padding:4px 0;border-bottom:1px solid #f3f4f6; }
+    .u5 { display: flex; align-items: center; background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 4px; border-radius: 2px; gap: 3px; height: 16px; }
+    .u6 { border-bottom: 1px solid #e5e7eb; margin-bottom: 10px; padding-bottom: 5px; font-weight: 800; color: #4b5563; text-transform: uppercase; font-size: 11px; }
+    .u7 { font-size:10px;color:#1e293b; }
+    .u8 { font-family: monospace; font-size: 11px; color: #4b5563; background: #f3f4f6; padding: 2px 6px; border-radius: 3px; text-decoration: underline; border: 1px solid #d1d5db; }
+    .u9 { font-size: 9px; color: #6b7280; font-weight: 700; text-transform: uppercase; }
+    .u10 { font-size: 10px; font-weight: 700; color: #4b5563; font-family: monospace; }
+    .u11 { color:#16a34a;font-size:11px;margin-right:4px; }
+    .u12 { color:#7c3aed;text-decoration:underline;font-weight:700; }
+    .u13 { font-weight:600;color:#7c3aed; }
+    .u14 { padding:5px 10px 4px; background:#f8fafc; border-top:2px solid #e2e8f0; border-bottom:1px solid #e2e8f0; }
 
     /* TIMELINE */
     .timeline-container { position: relative; padding-left: 2px; }
@@ -1067,7 +1106,7 @@ def render_all_projects_dashboard(
     <div class="dashboard-container">
         <!-- HEADER WITH LOGO -->
         <div class="dashboard-header">
-            <img src="data:image/jpeg;base64,{logo_b64}" class="dashboard-logo" alt="DNASC">
+            <img src="data:image/png;base64,{logo_b64}" class="dashboard-logo" alt="DNASC">
             <span class="dashboard-title">DNA Strain & Construction</span>
             <span class="dashboard-updated">Data pulled: {generated_at}</span>
         </div>
@@ -1282,12 +1321,12 @@ def render_all_projects_dashboard(
                 time_badges_html = f"""
                   <div style="display: flex; gap: 8px; align-items: center;">
                       <div style="{shared_time_style}">
-                          <span style="font-size: 9px; color: #6b7280; font-weight: 700; text-transform: uppercase;">Production:</span>
-                          <span style="font-size: 10px; font-weight: 700; color: #4b5563; font-family: monospace;">{production_str}</span>
+                          <span class="u9">Production:</span>
+                          <span class="u10">{production_str}</span>
                       </div>
                       <div style="{shared_time_style}">
-                          <span style="font-size: 9px; color: #6b7280; font-weight: 700; text-transform: uppercase;">Total:</span>
-                          <span style="font-size: 10px; font-weight: 700; color: #4b5563; font-family: monospace;">{total_str}</span>
+                          <span class="u9">Total:</span>
+                          <span class="u10">{total_str}</span>
                       </div>
                   </div>"""
             else:
@@ -1310,7 +1349,7 @@ def render_all_projects_dashboard(
                         <span class="req-name">{construct}</span>
                         <div style="display: flex; align-items: center; gap: 8px;">
 
-                            <div style="display: flex; align-items: center; background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 4px; border-radius: 2px; gap: 3px; height: 16px;">
+                            <div class="u5">
                                 <span style="font-size: 8px; color: #6b7280; font-weight: 700;">CREATED:</span>
                                 <span style="font-size: 9px; font-weight: 700; color: #4b5563; font-family: monospace;">{submitted_str}</span>
                             </div>
@@ -1924,7 +1963,7 @@ def render_all_projects_dashboard(
                 # "Parts / Inputs" section header — emitted once before the first single-attempt parts row
                 if _is_parts_row and not _emitted_parts_header:
                     _emitted_parts_header = True
-                    html.append(f"""<tr><td colspan="8" style="padding:5px 10px 4px; background:#f8fafc; border-top:2px solid #e2e8f0; border-bottom:1px solid #e2e8f0;"><span style="font-size:10px; font-weight:700; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">Parts / Inputs</span></td></tr>""")
+                    html.append(f"""<tr><td colspan="8" class="u14"><span style="font-size:10px; font-weight:700; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">Parts / Inputs</span></td></tr>""")
 
                 if _is_parts_row and _has_attempt and row.get('tree_depth', 0) == 0:
                     # "Retried Parts" divider — emitted once before the first retry attempt group
@@ -2094,7 +2133,7 @@ def render_all_projects_dashboard(
                             tooltip_html = ""
                             for proto_name, p_set in tooltip_groups.items():
                                 if not p_set: continue
-                                tooltip_html += f'<div class="popover-group"><div class="popover-title">{proto_name}</div><div style="margin-left: 8px;">'
+                                tooltip_html += f'<div class="popover-group"><div class="popover-title">{proto_name}</div><div class="u2">'
                                 sorted_plates = sorted(list(p_set), key=lambda x: int(x) if x.isdigit() else 0)
                                 for i, pid in enumerate(sorted_plates):
                                     tooltip_html += f'<a href="https://bios.asimov.io/inventory/plates/{pid}" target="_blank" class="popover-link">Plate {pid}</a>'
@@ -2112,7 +2151,7 @@ def render_all_projects_dashboard(
                         for proto_name, pids in lims_plate_map.items():
                             pids_sorted = sorted(pids, key=lambda x: int(x) if x.isdigit() else 0)
                             all_pids.update(pids_sorted)
-                            tooltip_html += f'<div class="popover-group"><div class="popover-title">{proto_name}</div><div style="margin-left: 8px;">'
+                            tooltip_html += f'<div class="popover-group"><div class="popover-title">{proto_name}</div><div class="u2">'
                             for i, pid in enumerate(pids_sorted):
                                 tooltip_html += f'<a href="https://bios.asimov.io/inventory/plates/{pid}" target="_blank" class="popover-link">Plate {pid}</a>'
                                 if (i + 1) % 3 == 0 and i < len(pids_sorted) - 1: tooltip_html += '<br>'
@@ -2236,7 +2275,7 @@ def render_all_projects_dashboard(
                     _batch_num = str(display_lsp_id).replace("LSP-", "").strip()
                     if _batch_num.isdigit():
                         _batch_href = f"https://bios.asimov.io/inventory/lsp-batches/{_batch_num}"
-                        _batch_label = f'<a href="{_batch_href}" target="_blank" style="color:#7c3aed;text-decoration:underline;font-weight:700;">{display_lsp_id}</a>'
+                        _batch_label = f'<a href="{_batch_href}" target="_blank" class="u12">{display_lsp_id}</a>'
                     else:
                         _batch_label = f'<span style="color:#4b5563;font-weight:700;">{display_lsp_id}</span>'
                     lsp_parts = [f'<div style="font-size: 10px; font-weight: 700; margin-bottom: 4px;">{_batch_label}</div>']
@@ -2332,8 +2371,8 @@ def render_all_projects_dashboard(
                         _wm = re.search(r'"id":\s*(\d+)', str(_input_well_raw))
                         _fid = _wm.group(1) if _wm else str(_input_well_raw)
                         _input_well_html = f"""
-                                    <span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">Input:</span>
-                                    <span style="font-size:11px;padding:4px 0;border-bottom:1px solid #f3f4f6;"><a href="https://bios.asimov.io/inventory/wells/{_fid}" target="_blank" style="color:#7c3aed;text-decoration:underline;font-weight:700;">well{_fid}</a></span>"""
+                                    <span class="u1">Input:</span>
+                                    <span style="font-size:11px;padding:4px 0;border-bottom:1px solid #f3f4f6;"><a href="https://bios.asimov.io/inventory/wells/{_fid}" target="_blank" class="u12">well{_fid}</a></span>"""
 
                     lsp_parts.append(f"""
                         <div class="plate-hover-container" style="display: inline-block; margin-bottom: 6px;">
@@ -2341,18 +2380,18 @@ def render_all_projects_dashboard(
                                 Source Info
                             </span>
                             <div class="plate-popover" style="width: 460px; white-space: normal; padding: 15px; border-top: 4px solid #6b7280; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
-                                <div style="border-bottom: 1px solid #e5e7eb; margin-bottom: 10px; padding-bottom: 5px; font-weight: 800; color: #4b5563; text-transform: uppercase; font-size: 11px;">
+                                <div class="u6">
                                     Source Material Context
                                 </div>
                                 <div style="display: grid; grid-template-columns: 115px 1fr; gap: 0; font-size: 12px; line-height: 1.5; color: #1f2937;">
-                                    <span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">Experiment:</span>
+                                    <span class="u1">Experiment:</span>
                                     <span style="padding:4px 0;border-bottom:1px solid #f3f4f6;">{src_exp_name}</span>
-                                    <span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">Process ID:</span>
+                                    <span class="u1">Process ID:</span>
                                     <div style="padding:4px 0;border-bottom:1px solid #f3f4f6;">
-                                        <a href="{proc_href}" target="_blank" style="font-family: monospace; font-size: 11px; color: #4b5563; background: #f3f4f6; padding: 2px 6px; border-radius: 3px; text-decoration: underline; border: 1px solid #d1d5db;">{proc_label}</a>
+                                        <a href="{proc_href}" target="_blank" class="u8">{proc_label}</a>
                                         <div style="font-size: 9px; color: #9ca3af; margin-top: 4px; padding-left: 2px;">{construct_name} &nbsp;·&nbsp; <span style="font-family: monospace; color: #6b7280;">{pai_val}</span></div>
                                     </div>
-                                    <span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">Request ID:</span>
+                                    <span class="u1">Request ID:</span>
                                     <span style="font-family: monospace; font-size: 11px; color: #4b5563; padding:4px 0;border-bottom:1px solid #f3f4f6;">{src_req_id}{src_badge}</span>
                                     {_input_well_html}
                                 </div>
@@ -2384,7 +2423,7 @@ def render_all_projects_dashboard(
                     def _qc_dot(val):
                         v = str(val).lower()
                         if v == "pass" or v == "yes":
-                            return '<span style="color:#16a34a;font-size:11px;margin-right:4px;">●</span>'
+                            return '<span class="u11">●</span>'
                         elif v == "fail" or v == "no":
                             return '<span style="color:#dc2626;font-size:11px;margin-right:4px;">●</span>'
                         else:
@@ -2392,8 +2431,8 @@ def render_all_projects_dashboard(
 
                     if _qc_rows:
                         _qc_grid = "".join(
-                            f'<span style="color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6;">{lbl}:</span>'
-                            f'<span style="font-size:11px;color:#1f2937;padding:4px 0;border-bottom:1px solid #f3f4f6;">{"" if lbl == "Comment" else _qc_dot(val)}{val}</span>'
+                            f'<span class="u1">{lbl}:</span>'
+                            f'<span class="u4">{"" if lbl == "Comment" else _qc_dot(val)}{val}</span>'
                             for lbl, val in _qc_rows
                         )
                         lsp_parts.append(f"""
@@ -2402,7 +2441,7 @@ def render_all_projects_dashboard(
                                 QC Details
                             </span>
                             <div class="plate-popover" style="width: 340px; white-space: normal; padding: 15px; border-top: 4px solid #6b7280; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
-                                <div style="border-bottom: 1px solid #e5e7eb; margin-bottom: 10px; padding-bottom: 5px; font-weight: 800; color: #4b5563; text-transform: uppercase; font-size: 11px;">
+                                <div class="u6">
                                     QC Details
                                 </div>
                                 <div style="display: grid; grid-template-columns: 160px 1fr; gap: 0; line-height: 1.6;">
@@ -2415,8 +2454,6 @@ def render_all_projects_dashboard(
                     def _fv(v):
                         try: return f"{float(v):.1f}"
                         except: return str(v)
-                    _lbl = 'color:#6b7280;font-size:9px;font-weight:700;text-transform:uppercase;'
-                    _val = 'font-size:10px;color:#1e293b;'
                     def _ok(v): return pd.notna(v) and str(v) not in ('nan', 'None', '')
                     strain    = row.get('comp_cell') or row.get('cloning_strain')
                     dl_fmt    = row.get('delivery_format')
@@ -2493,7 +2530,7 @@ def render_all_projects_dashboard(
                     if _ok(qc_tube): rows2.append(("QC Tube", str(qc_tube)))
                     if rows2:
                         grid_cells = "".join(
-                            f'<span style="{_lbl}">{lbl}</span><span style="{_val}">{val}</span>'
+                            f'<span class="u3">{lbl}</span><span class="u7">{val}</span>'
                             for lbl, val in rows2
                         )
                         lsp_parts.append(
@@ -2507,7 +2544,7 @@ def render_all_projects_dashboard(
                     _vorder_clean = str(_vorder).strip() if _vorder is not None and not (isinstance(_vorder, float) and pd.isna(_vorder)) and str(_vorder).strip() not in ('', 'nan', 'None') else ''
                     if pd.notna(_vendor) and str(_vendor).strip() not in ('', 'nan', 'None'):
                         _vendor_str = str(_vendor).strip()
-                        _order_tag = f' <span style="font-weight:600;color:#7c3aed">{_vorder_clean}</span>' if _vorder_clean else ''
+                        _order_tag = f' <span class="u13">{_vorder_clean}</span>' if _vorder_clean else ''
                         details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Vendor: {_vendor_str}{_order_tag}</div>")
                     if row['type'] == 'pcr_workorder':
                         _wc = row.get('well_comments')
