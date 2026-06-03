@@ -504,8 +504,13 @@ def render_all_projects_dashboard(
     .tab-btn:last-child { border-right: none; }
     .tab-btn:hover { background: rgba(255,255,255,0.1); }
     .tab-btn.active { background: rgba(255,255,255,0.2); border-bottom: 3px solid #fff; }
-    .tab-content { display: none; }
-    .tab-content.active { display: block; }
+    /* Hide inactive tabs with visibility (not display:none) so their render tree
+       and computed layout are retained. Switching back to a large tab (Tracking)
+       becomes a repaint instead of a full render-tree rebuild + style recalc +
+       reflow of ~1.37M nodes. position:absolute keeps hidden tabs out of flow so
+       the active tab isn't pushed down. */
+    .tab-content { position: absolute; visibility: hidden; }
+    .tab-content.active { position: static; visibility: visible; }
     .tab-icon-img { height: 24px; width: 24px; border-radius: 4px; }
     .tab-btn .tab-text { display: none; }
     .tab-btn:hover .tab-text { display: inline; }
@@ -689,8 +694,8 @@ def render_all_projects_dashboard(
         if (tabName === 'capacity' && typeof window.lspInitChart === 'function') {
             setTimeout(window.lspInitChart, 0);
         }
-        if (tabName === 'inflight') {
-            if (typeof window.ifBuildHead === 'function') { window.ifBuildHead(); window.ifRender(); }
+        if (tabName === 'inflight' && !window._ifBuilt) {
+            if (typeof window.ifBuildHead === 'function') { window.ifBuildHead(); window.ifRender(); window._ifBuilt = true; }
         }
     }
     function toggleBucketView(expId) {
