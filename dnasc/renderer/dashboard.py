@@ -709,10 +709,23 @@ def render_all_projects_dashboard(
             bk.style.display = 'none'; tl.style.display = 'block'; btn.textContent = 'Stage View';
         }
     }
+    // Lazily build the heavy Queue/timeline cells the first time an assembly
+    // content-pane is opened. Until then they live in inert <template>s (out of
+    // the render tree), so the initial DOM is ~60% smaller.
+    function _buildQueues(el) {
+        if (!el || !el.classList || !el.classList.contains('content-pane')) return;
+        var cells = el.querySelectorAll('td.queue-cell:not([data-built])');
+        for (var i = 0; i < cells.length; i++) {
+            var td = cells[i];
+            var tpl = td.querySelector('template.qtpl');
+            if (tpl) { td.appendChild(tpl.content.cloneNode(true)); }
+            td.setAttribute('data-built', '1');
+        }
+    }
     function toggleSection(id) {
         var el = document.getElementById(id); var icon = document.getElementById(id + '_icon'); var btn = document.getElementById(id + '_btn');
         if (el.style.display === "block") { el.style.display = "none"; if(icon) icon.classList.remove('open'); if(btn) btn.classList.remove('active-header'); }
-        else { el.style.display = "block"; if(icon) icon.classList.add('open'); if(btn) btn.classList.add('active-header'); }
+        else { _buildQueues(el); el.style.display = "block"; if(icon) icon.classList.add('open'); if(btn) btn.classList.add('active-header'); }
     }
     var _sortedByDue = false;
     function sortByDueDate() {
@@ -2631,7 +2644,12 @@ def render_all_projects_dashboard(
                     _status_cell += '<div style="font-size:9px;font-weight:700;color:#b91c1c;margin-top:2px;">🚨 ANTIBIOTIC</div>'
                 _fulfills_attr = "1" if row.get('fulfills_request') else "0"
                 _partner_attr = "1" if str(row.get('for_partner', '')).lower() == 'true' else "0"
-                html.append(f"""<tr class="{row_class}"{_row_order_style} data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{"".join(details_info)}</td><td>{"".join(pipeline_html)}</td></tr>""")
+                # Defer the heavy Queue/timeline cell: park its HTML in an inert
+                # <template> (built on pane-open by _buildQueues) so it stays out of
+                # the render tree until needed. Queue content is not full-text
+                # searchable while collapsed (stock/workorder IDs live in other cells).
+                _queue_cell = f'<td class="queue-cell"><template class="qtpl">{"".join(pipeline_html)}</template></td>'
+                html.append(f"""<tr class="{row_class}"{_row_order_style} data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{"".join(details_info)}</td>{_queue_cell}</tr>""")
             html.append("</tbody></table></div></div>")
         html.append("</div></div>")
         return "".join(html)
