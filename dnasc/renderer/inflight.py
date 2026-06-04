@@ -113,20 +113,21 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
             'pinned':    str(row.get('experiment_name', '') or '') in _PINNED_EXPS,
         })
 
-    # Sort: pinned last; flagged experiments first; within experiment flagged rows
-    # first; then by assembly date. exp_min and exp come BEFORE per-row flags so
-    # all rows of an experiment stay contiguous (ifRender relies on this).
-    _exp_min = {}
+    # Sort: pinned last; then by due date (soonest first). Experiments are ordered
+    # by their earliest due date and within an experiment rows are ordered by due
+    # date. exp-level due date and exp come BEFORE the per-row due date so all rows
+    # of an experiment stay contiguous (ifRender relies on this). Blank due dates
+    # sort last via the '9999-99-99' sentinel.
+    _DUE_LAST = '9999-99-99'
+    _exp_due = {}
     for r in records:
-        if r['assembly']:
-            _exp_min[r['exp']] = min(_exp_min.get(r['exp'], '9999'), r['assembly'])
-    _exp_has_flags = {r['exp'] for r in records if r['flags']}
+        due = r['due_date'] or _DUE_LAST
+        _exp_due[r['exp']] = min(_exp_due.get(r['exp'], _DUE_LAST), due)
     records.sort(key=lambda r: (
         1 if r['pinned'] else 0,
-        0 if r['exp'] in _exp_has_flags else 1,
-        _exp_min.get(r['exp'], '9999'),
+        _exp_due.get(r['exp'], _DUE_LAST),
         r['exp'],
-        0 if r['flags'] else 1,
+        r['due_date'] or _DUE_LAST,
         r['assembly'],
     ))
 
