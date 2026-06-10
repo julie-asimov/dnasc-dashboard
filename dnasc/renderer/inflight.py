@@ -15,6 +15,7 @@ import pandas as pd
 
 from dnasc.config import PipelineConfig
 from dnasc import protocols as proto
+from dnasc.renderer import tokens as tok
 
 
 # ── Colony Tracking rollup ─────────────────────────────────────────────────────
@@ -530,6 +531,43 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
 
     btn_s = 'font-size:9px;padding:2px 8px;border-radius:4px;border:1px solid #d1d5db;background:#fff;cursor:pointer;'
 
+    # ── Design tokens → JS maps (single source of truth: renderer/tokens.py) ──
+    def _tint(triple):
+        bg, txt, bd = triple
+        return f"background:{bg};color:{txt};border:1px solid {bd};"
+
+    def _solid(pair):
+        return f"background:{pair[0]};color:{pair[1]};"
+
+    def _geo(key):
+        g = tok.GEOM[key]
+        s = (f"display:inline-block;padding:{g['pad']};border-radius:{g['radius']};"
+             f"font-size:{g['size']};font-weight:{g['weight']};white-space:nowrap;margin:1px 1px;")
+        if g["upper"]:
+            s += "text-transform:uppercase;"
+        return s
+
+    _status_map = dict(tok.STATUS)
+    _status_map["PLANNED"] = tok.STATUS["RUNNING"]   # legacy state -> brand purple
+    JS_S_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in _status_map.items()) + "}"
+    JS_S_ICON  = "{" + ",".join(f"'{k}':'{ic}'" for k, ic in tok.STATUS_ICON.items()) + "}"
+    JS_ST_GRAY = _tint(tok.STATUS["CANCELED"])
+    JS_P_ST    = "{" + ",".join(f"'{k}':'{_solid(v)}'" for k, v in tok.PHASE.items()) + "}"
+    JS_F_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in tok.FLAG.items()) + "}"
+    _cf_keys   = ["LOW_PICKABLE", "SEQ_STALLED", "PAST_DUE", "AT_RISK"]
+    JS_CF_ST   = "{" + ",".join(f"'{k}':'{_tint(tok.FLAG[k])}'" for k in _cf_keys) + "}"
+    JS_CUST    = "{" + ",".join(f"'{k}':['{lbl}','{bg}','{txt}']"
+                                for k, (lbl, bg, txt) in tok.CUSTOMER.items()) + "}"
+    GEO_STATUS = _geo("status")
+    GEO_PHASE  = _geo("phase")
+    GEO_CUST   = _geo("customer")
+    _pg = tok.GEOM["pai"]
+    PAI_STYLE = (f"display:inline-block;background:{tok.PURPLE_BG_2};color:{tok.PURPLE};"
+                 f"border:1px solid {tok.PURPLE_BORDER_2};padding:{_pg['pad']};"
+                 f"border-radius:{_pg['radius']};font-family:monospace;font-weight:{_pg['weight']};"
+                 f"font-size:{_pg['size']};white-space:nowrap;margin:1px 1px;")
+    CUST_DOT = tok.CUSTOMER_DOT
+
     return f"""<style>
 .iff-active{{outline:2px solid #374151;}}
 .if-vbtn.if-vactive{{background:#374151 !important;color:#fff !important;border-color:#374151 !important;}}
@@ -616,48 +654,32 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     construct: '', pAI: '', customer: '', submitter: '', operation: '', req_id: '',
   }};
 
-  // ── Color maps ────────────────────────────────────────────────────────────
-  // Reverted to the old Requests-tab palette (matches dashboard.py .status-*).
-  var _ST_GRAY  ='background:#f5f5f7;color:#6b7280;border:1px solid #d1d5db;';  // fallback / canceled / unknown
-  var S_ST = {{
-    'IN_PROGRESS':'background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;',
-    'RUNNING':    'background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;',
-    'LSP_RUNNING':'background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;',
-    'READY':      'background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;',
-    'SUCCEEDED':  'background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;',
-    'FULFILLED':  'background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;',
-    'FAILED':     'background:#fff1f5;color:#be185d;border:1px solid #fecdd3;',
-    'BLOCKED':    'background:#be185d;color:white;border:none;',
-    'CANCELED':   'background:#f5f5f7;color:#6b7280;border:1px solid #d1d5db;',
-    'DRAFT':      'background:#f1f5f9;color:#64748b;border:1px solid #cbd5e1;',
-    'WAITING':    'background:#fffbeb;color:#d97706;border:1px solid #fde68a;',
-    'PLANNED':    'background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;',
-    'UNKNOWN':    'background:#f5f5f7;color:#6b7280;border:1px solid #d1d5db;',
-  }};
-  var P_ST = {{
-    'LSP':  'background:#059669;color:#fff;border:1px solid #047857;',
-    'ASM':  'background:#2563eb;color:#fff;border:1px solid #1d4ed8;',
-    'PARTS':'background:#ea580c;color:#fff;border:1px solid #c2410c;',
-  }};
-  var F_ST = {{
-    'PAST_DUE':'background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;',
-    'AT_RISK': 'background:#ffedd5;color:#7c2d12;border:1px solid #fdba74;',
-    'STALLED': 'background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;',
-  }};
+  // ── Color maps — generated from renderer/tokens.py (single source of truth) ─
+  var _ST_GRAY  ='{JS_ST_GRAY}';        // fallback (CANCELED gray)
+  var S_ST   = {JS_S_ST};               // status tint fragments
+  var S_ICON = {JS_S_ICON};             // colorblind icon per status
+  var P_ST   = {JS_P_ST};               // phase solid fragments (brand sweep)
+  var F_ST   = {JS_F_ST};               // flag tint fragments
   var F_BG = {{}};
   var BDG  = 'display:inline-block;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;white-space:nowrap;margin:1px 1px;';
-  var PILL = BDG;
+  var GEO_STATUS = '{GEO_STATUS}';
+  var GEO_PHASE  = '{GEO_PHASE}';
+  var GEO_CUST   = '{GEO_CUST}';
+  var PILL = GEO_STATUS;
   var TD   = 'padding:6px 14px;border-bottom:0.5px solid #eeecf6;vertical-align:top;font-size:10px;';
 
   function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}}
   function bdg(t,st){{return '<span style="'+BDG+st+'">'+esc(t)+'</span>';}}
-  // status pill (12px, rounded) — shared by both views so they match.
-  function statusBdg(s){{return '<span style="'+PILL+(S_ST[s]||_ST_GRAY)+'">'+esc(String(s).replace(/_/g,' '))+'</span>';}}
-  var PAI_STY   ='display:inline-block;background:#ede9fe;color:#6d28d9;border:1px solid #c4b5fd;padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;font-size:9px;white-space:nowrap;margin:1px 1px;';
-  var PAI_STY_RD='display:inline-block;background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;padding:1px 4px;border-radius:2px;font-family:monospace;font-weight:700;font-size:9px;white-space:nowrap;margin:1px 1px;';
+  // status badge: icon (colorblind cue) + label + tint color.
+  function statusBdg(s){{var ic=S_ICON[s]?S_ICON[s]+' ':'';return '<span style="'+PILL+(S_ST[s]||_ST_GRAY)+'">'+ic+esc(String(s).replace(/_/g,' '))+'</span>';}}
+  // phase pill: solid brand-sweep fill, own geometry.
+  function phaseBdg(p){{return P_ST[p]?'<span style="'+GEO_PHASE+P_ST[p]+'">'+esc(p)+'</span>':'';}}
+  var PAI_STY   ='{PAI_STYLE}';
+  var PAI_STY_RD=PAI_STY;
   function paiBadges(s,cust){{if(!s)return'';var st=cust==='R_D'?PAI_STY_RD:PAI_STY;return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+st+'">'+esc(p)+'</span>':'';}}).join('');}}
-  var CUST_MAP={{'R_D':['R&D','#f0fdf4','#166534'],'INTERNAL_CLD':['CLD','#dbeafe','#1d4ed8'],'TECH_OUT':['Tech Out','#ffedd5','#c2410c'],'EXTERNAL_TECH_OUT':['Ext TechOut','#fce7f3','#be185d']}};
-  function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];return'<span style="padding:2px 6px;border-radius:3px;font-size:10px;background:'+m[1]+';color:'+m[2]+';">'+m[0]+'</span>';}}
+  var CUST_MAP={JS_CUST};
+  // customer badge: leading dot (shape cue) + label + tint, so green-R&D != green-SUCCEEDED.
+  function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];return'<span style="'+GEO_CUST+'background:'+m[1]+';color:'+m[2]+';">{CUST_DOT} '+m[0]+'</span>';}}
   var _DPILL='display:inline-block;padding:0px 5px;border-radius:3px;font-size:9px;font-weight:600;white-space:nowrap;margin-top:2px;';
   function fmtDate(s){{if(!s)return'';var diff=Math.round((new Date(s)-new Date(_TODAY))/(864e5));var bg,clr,lbl;if(diff<0){{bg='#fee2e2';clr='#991b1b';lbl=Math.abs(diff)+'d ago';}}else if(diff===0){{bg='#fef3c7';clr='#92400e';lbl='today';}}else if(diff<=7){{bg='#fef9c3';clr='#713f12';lbl='in '+diff+'d';}}else{{bg='#f3f4f6';clr='#6b7280';lbl='in '+diff+'d';}}return'<span style="color:#374151;">'+esc(s)+'</span><br><span style="background:'+bg+';color:'+clr+';'+_DPILL+'">'+lbl+'</span>';}}
   function fmtSubmitter(s){{if(!s||s.indexOf('@')===-1)return esc(s);var parts=s.split('@');var local=parts[0];var domain=parts[1];var org=domain.split('.')[0];org=org.charAt(0).toUpperCase()+org.slice(1);var name=local.split('.').map(function(p){{return p.charAt(0).toUpperCase()+p.slice(1);}}).join(' ');var ext=!domain.toLowerCase().startsWith('asimov.');var orgSty=ext?'display:inline-block;font-size:9px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:1px 5px;margin-top:1px;':'display:block;color:#9ca3af;font-size:9px;';return'<span style="display:block;">'+esc(name)+'</span><span style="'+orgSty+'">'+esc(org)+'</span>';}}
@@ -678,12 +700,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   var STRAIN_CHIP='display:inline-block;font-size:11px;padding:2px 7px;border-radius:5px;font-weight:500;white-space:nowrap;margin:1px 1px;';
   function strainBdg(s){{var st=STRAIN_STY[s]||'background:#F1EFE8;color:#5F5E5A;border:0.5px solid #D3D1C7;';return '<span style="'+STRAIN_CHIP+st+'">'+esc(s)+'</span>';}}
   // Flag chips (item 8) — muted, thin border.
-  var CF_ST = {{
-    'LOW_PICKABLE':'background:#FAEEDA;color:#633806;border:0.5px solid #EF9F27;',
-    'SEQ_STALLED': 'background:#FAEEDA;color:#633806;border:0.5px solid #EF9F27;',
-    'PAST_DUE':    'background:#FCEBEB;color:#A32D2D;border:0.5px solid #E24B4A;',
-    'AT_RISK':     'background:#FAEEDA;color:#633806;border:0.5px solid #EF9F27;',
-  }};
+  var CF_ST = {JS_CF_ST};
   var CF_LBL = {{'LOW_PICKABLE':'LOW COLONIES','SEQ_STALLED':'SEQ STALLED','PAST_DUE':'PAST DUE'}};
   // L1 colony flags = colony flags + PAST_DUE inherited from the request flags
   function colFlags(r){{var f=(r.col.cflags||[]).slice();if(r.flags.indexOf('PAST_DUE')!==-1)f.push('PAST_DUE');return f;}}
@@ -742,7 +759,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     for(var fi=0;fi<r.flags.length;fi++){{if(F_BG[r.flags[fi]]){{bg='background:'+F_BG[r.flags[fi]]+';';break;}}}}
     var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
     var st  = statusBdg(r.status);
-    var ph  = (r.phase && P_ST[r.phase]) ? bdg(r.phase, P_ST[r.phase]) : '';
+    var ph  = phaseBdg(r.phase);
     var fl  = r.flags.map(function(f){{return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);}}).join('');
     return '<tr style="'+bg+'">'
           + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
@@ -775,7 +792,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function _colReqRow(r) {{
     var open = !!_expR[r.req_id], c = r.col;
     var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
-    var ph  = (r.phase && P_ST[r.phase]) ? bdg(r.phase, P_ST[r.phase]) : '';
+    var ph  = phaseBdg(r.phase);
     return '<tr class="if-cardtop" style="cursor:pointer;font-weight:600;" onclick="ifToggleReq(\\''+r.req_id+'\\')">'
       + '<td style="'+TD+'"><span class="if-caret'+(open?' open':'')+'">&#9654;</span></td>'
       + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
