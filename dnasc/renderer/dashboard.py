@@ -617,8 +617,8 @@ def render_all_projects_dashboard(
     /* TABLE */
     .content-pane { display: none; padding: 0; background: #fff; }
     .wo-table { width: 100%; border-collapse: collapse; font-size: 9px !important; }
-    .wo-table th { text-align: left; color: #86868b; padding: 3px 5px; border-bottom: 1px solid #e5e5e7; font-size: 8px; font-weight: 700; background: #fafafa; text-transform: uppercase; white-space: nowrap; }
-    .wo-table td { padding: 3px 5px; border-bottom: 1px solid #f5f5f7; vertical-align: top; font-weight: 600; color: #1d1d1f; }
+    .wo-table th { text-align: left; color: #86868b; padding: 2px 5px; border-bottom: 1px solid #e5e5e7; font-size: 8px; font-weight: 700; background: #fafafa; text-transform: uppercase; white-space: nowrap; }
+    .wo-table td { padding: 2px 4px; border-bottom: 1px solid #f5f5f7; vertical-align: top; font-weight: 600; color: #1d1d1f; }
     .wo-table .stock-tag { font-size: 8px; padding: 1px 3px; }
 
     /* TREE ROWS */
@@ -646,9 +646,9 @@ def render_all_projects_dashboard(
 
     /* TIMELINE */
     .timeline-container { position: relative; padding-left: 2px; }
-    .timeline-row { display: flex; align-items: flex-start; margin-bottom: 2px; position: relative; min-height: 14px; }
-    .timeline-row:not(:last-child):after { content: ''; position: absolute; left: 2px; top: 8px; bottom: -4px; width: 1px; background: #e5e5e7; z-index: 1; }
-    .t-dot { width: 5px; height: 5px; border-radius: 50%; margin-top: 3px; margin-right: 4px; flex-shrink: 0; z-index: 2; }
+    .timeline-row { display: flex; align-items: flex-start; margin-bottom: 1px; position: relative; min-height: 11px; }
+    .timeline-row:not(:last-child):after { content: ''; position: absolute; left: 2px; top: 6px; bottom: -3px; width: 1px; background: #e5e5e7; z-index: 1; }
+    .t-dot { width: 5px; height: 5px; border-radius: 50%; margin-top: 2px; margin-right: 4px; flex-shrink: 0; z-index: 2; }
     /*__TDOT_CSS__*/
     .t-content { flex-grow: 1; font-size: 8px; }
     .t-header { display: flex; justify-content: space-between; align-items: center; }
@@ -1227,7 +1227,7 @@ def render_all_projects_dashboard(
         _cust_raw = str(req_df['customer'].iloc[0]) if 'customer' in req_df.columns and pd.notna(req_df['customer'].iloc[0]) else None
         if _cust_raw and _cust_raw not in ('nan', 'None', ''):
             _clabel, _cbg, _cfg = tok.CUSTOMER.get(_cust_raw, (_cust_raw.replace('_', ' '),) + tok.CUSTOMER_FALLBACK[1:])
-            customer_badge = f'<span style="{_cust_geom}background:{_cbg};color:{_cfg};">{tok.CUSTOMER_DOT} {_clabel}</span>'
+            customer_badge = f'<span style="{_cust_geom}background:{_cbg};color:{_cfg};">{tok.CUSTOMER_DOT}{_clabel}</span>'
         else:
             customer_badge = ""
 
@@ -2603,7 +2603,7 @@ def render_all_projects_dashboard(
                     if any(pd.notna(v) for v in [_imaged, _pickable, _picked]):
                         # Colony counts (plain, no link wrapping)
                         _grid = (
-                            f"<div style='display:grid;grid-template-columns:58px 1fr;gap:1px 4px;margin-top:3px;'>"
+                            f"<div style='display:grid;grid-template-columns:58px 1fr;gap:0 4px;margin-top:2px;'>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Imaged</span><span style='font-size:10px;color:#1e293b;'>{int(_imaged)}</span>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Pickable</span><span style='font-size:10px;color:#1e293b;'>{int(_pickable) if pd.notna(_pickable) else 0}</span>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Picked</span><span style='font-size:10px;color:#1e293b;'>{int(_picked) if pd.notna(_picked) else 0}</span>"
@@ -2636,7 +2636,7 @@ def render_all_projects_dashboard(
                                 pass
                             _well_label = f' · {_well_alpha}' if _well_alpha else ''
                             details_info.append(
-                                f"<div style='margin-top:4px;margin-bottom:4px;'>"
+                                f"<div style='margin-top:2px;margin-bottom:2px;'>"
                                 f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-right:4px;'>Agar</span>"
                                 f"<a href='{_plate_url}' target='_blank' "
                                 f"style='font-size:9px;font-family:monospace;"
@@ -2934,7 +2934,7 @@ def render_all_projects_dashboard(
                     _cl, _cbg, _cfg = tok.CUSTOMER.get(_cv, (_cv.replace('_', ' '),) + tok.CUSTOMER_FALLBACK[1:])
                     _exp_customers.append((_cv, _cl, _cbg, _cfg))
         exp_customer_tags = " ".join(
-            f'<span style="{_ec_geom}background:{bg};color:{fg};">{tok.CUSTOMER_DOT} {lbl}</span>'
+            f'<span style="{_ec_geom}background:{bg};color:{fg};">{tok.CUSTOMER_DOT}{lbl}</span>'
             for _, lbl, bg, fg in _exp_customers
         )
         dots_html = ""; stage_counts = {}; stage_items = {}; fulfilled_week_counts = {}

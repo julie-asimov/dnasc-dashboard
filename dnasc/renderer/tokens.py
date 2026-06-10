@@ -81,9 +81,9 @@ STATUS = {
 }
 STATUS_ICON = {
     "SUCCEEDED": "✓", "FULFILLED": "★", "RUNNING": "⟳",
-    "LSP_RUNNING": "⟳", "REPICK": "↺", "IN_PROGRESS": "▸",
+    "LSP_RUNNING": "⟳", "REPICK": "↺", "IN_PROGRESS": "▶︎",
     "READY": "◷", "WAITING": "⌛", "BLOCKED": "⊘",
-    "FAILED": "✕", "CANCELED": "⊗", "DRAFT": "✎", "UNKNOWN": "?",
+    "FAILED": "✕", "CANCELED": "⊗", "DRAFT": "✎", "UNKNOWN": "",
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -97,7 +97,9 @@ CUSTOMER = {
     "EXTERNAL_TECH_OUT": ("Ext TechOut", "#fce7f3", "#9d174d"),   # AA; distinct from FAILED
 }
 CUSTOMER_FALLBACK = ("—", "#f3f4f6", "#6b7280")
-CUSTOMER_DOT = "•"   # leading dot so green-R&D != green-SUCCEEDED at a glance
+CUSTOMER_DOT = ""    # leading marker before customer label (empty = none). Single
+                     # source of truth — consumers render {CUSTOMER_DOT}{label} with no
+                     # manual space, so set e.g. "• " (with trailing space) to re-add.
 
 # ───────────────────────────────────────────────────────────────────────────
 # 5. PHASE pills — brand sweep blue->purple->magenta · SOLID fill + white text

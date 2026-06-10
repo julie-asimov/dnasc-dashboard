@@ -9,7 +9,7 @@ so filtering and sorting work without round-trips.
 
 from __future__ import annotations
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -406,14 +406,50 @@ def _milestones(created_at, for_partner: bool) -> dict:
     # Find the last NGS run (Mon or Thu) that falls within the delivery window
     deadline = cd + timedelta(weeks=weeks)
     ngs = _last_ngs_before(deadline - timedelta(days=1))
+    return _milestones_from_ngs(ngs, ngs + timedelta(days=1))
+
+
+def _milestones_from_ngs(ngs: date, due: date) -> dict:
+    """Build the milestone chain off a known LSP-NGS date and due date."""
     return {
         'assembly':     ngs - timedelta(days=13),
         'asm_ngs':      ngs - timedelta(days=6),
         'lsp_scaleup':  ngs - timedelta(days=5),
         'lsp_received': ngs - timedelta(days=3),
         'lsp_ngs':      ngs,
-        'due_date':     ngs + timedelta(days=1),  # LFC release = day after LSP NGS
+        'due_date':     due,
     }
+
+
+def _milestones_from_due(due: date) -> dict:
+    """
+    Milestone chain anchored on a curated override due date (mirrors the tracking
+    tab): NGS = last Mon/Thu before the due date, assembly = NGS − 13 days. The
+    override due date is authoritative — not re-derived as NGS + 1.
+    """
+    ngs = _last_ngs_before(due - timedelta(days=1))
+    return _milestones_from_ngs(ngs, due)
+
+
+def _parse_override_due(raw) -> date | None:
+    """Normalize a due_dates.json entry (str | dict | list) to a date, or None."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        s = raw
+    elif isinstance(raw, dict):
+        s = raw.get('due_date', '')
+    elif isinstance(raw, list):
+        s = raw[0].get('due_date', '') if raw and isinstance(raw[0], dict) else ''
+    else:
+        s = ''
+    s = str(s or '').strip()
+    if not s or s in ('nan', 'None'):
+        return None
+    try:
+        return datetime.strptime(s, '%Y-%m-%d').date()
+    except Exception:
+        return None
 
 
 _DEFAULT_EXCLUDED_EXP  = frozenset()
@@ -424,6 +460,15 @@ _PINNED_EXPS           = frozenset(['LSP Refill Requests', 'A469-Build DNASC CHO
 
 def render_inflight_tab(df: pd.DataFrame) -> str:
     today = date.today()
+
+    # Curated due-date overrides (experiment_name → {due_date, ...}), same source
+    # the tracking tab uses. When present, the due date and the assembly milestone
+    # are taken from the override instead of the created_at + N-weeks formula.
+    try:
+        from dnasc.extractors.sheets import load_due_dates
+        _due_date_map = load_due_dates()
+    except Exception:
+        _due_date_map = {}
 
     pai_map: dict = {}
     if 'fulfills_request' in df.columns:
@@ -454,7 +499,11 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     records = []
     for _, row in req_rows.iterrows():
         fp     = str(row.get('for_partner', '')).lower() == 'true'
-        ms     = _milestones(row.get('request_created_at'), fp)
+        exp_name = str(row.get('experiment_name', '') or '')
+        # Override due date (if curated) re-anchors due + assembly; created_at is
+        # left untouched and still drives the fallback when there's no override.
+        _ov_due = _parse_override_due(_due_date_map.get(exp_name))
+        ms     = _milestones_from_due(_ov_due) if _ov_due else _milestones(row.get('request_created_at'), fp)
         req_id = str(row.get('req_id', ''))
         phase  = str(row.get('req_phase', '') or '')
         op     = str(row.get('req_operation', '') or '')
@@ -566,37 +615,58 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
                  f"border:1px solid {tok.PURPLE_BORDER_2};padding:{_pg['pad']};"
                  f"border-radius:{_pg['radius']};font-family:monospace;font-weight:{_pg['weight']};"
                  f"font-size:{_pg['size']};white-space:nowrap;margin:1px 1px;")
+    # R&D pAI badge = blue (master convention), so R&D reads distinct from the
+    # purple Partner/other badges. Same geometry as PAI_STYLE.
+    PAI_STYLE_RD = (f"display:inline-block;background:#dbeafe;color:#1d4ed8;"
+                    f"border:1px solid #93c5fd;padding:{_pg['pad']};"
+                    f"border-radius:{_pg['radius']};font-family:monospace;font-weight:{_pg['weight']};"
+                    f"font-size:{_pg['size']};white-space:nowrap;margin:1px 1px;")
     CUST_DOT = tok.CUSTOMER_DOT
 
     return f"""<style>
 .iff-active{{outline:2px solid #374151;}}
 .if-vbtn.if-vactive{{background:#374151 !important;color:#fff !important;border-color:#374151 !important;}}
-.if-caret{{display:inline-block;width:11px;color:#9ca3af;font-size:9px;transition:transform .1s;cursor:pointer;}}
+.if-caret{{display:inline-block;width:13px;color:#7F77DD;font-size:11px;transition:transform .1s;cursor:pointer;}}
 .if-caret.open{{transform:rotate(90deg);color:#534AB7;}}
 .if-att-row{{background:#fafafa;font-size:11px;}}
 .if-att-row:hover{{background:#f3f2fb;}}
-.if-strain-row{{background:#fafafa;font-size:11px;}}
+/* Attempt header: tinted band + divider line on top so each attempt reads as a
+   distinct group rather than blurring into the strain rows beneath it. */
+.if-attempt{{background:#eceef5;font-size:11px;border-top:2px solid #c7cbe0;}}
+.if-attempt:hover{{background:#e4e7f1;}}
+.if-attempt .if-cnum{{font-weight:700;color:#111;}}
+/* Strain rows recede to white so they nest visually under their attempt header. */
+.if-strain-row{{background:#fff;font-size:11px;}}
 .if-strain-row:hover{{background:#f3f2fb;}}
-.if-cnum{{font-variant-numeric:tabular-nums;text-align:right;font-size:11px;color:#1a1a1a;font-weight:500;}}
+.if-cnum{{display:block;font-variant-numeric:tabular-nums;text-align:right;font-size:11px;color:#1a1a1a;font-weight:500;}}
+.if-cnum.if-cz{{color:#c8c6bf;font-weight:500;}}
 .if-cz{{color:#cbd5e1;}}
 #inflight-table td:first-child{{padding-left:14px;}}
 .if-plate-link{{color:#185FA5;text-decoration:none;}}
 .if-plate-link:hover{{text-decoration:underline;}}
 /* construct "cards": light gap between constructs + top border on each card */
 .if-cardgap td{{height:8px;padding:0 !important;background:#f1f0f7;border:none !important;}}
-.if-cardtop td{{border-top:1px solid #e0e0e0;background:#fff;}}
-.if-cardtop td:first-child{{border-left:1px solid #e0e0e0;}}
+/* pAI anchor row: neutral grey rail (purple is reserved for the project/experiment
+   header) + faint tint so the construct stays in focus without looking like a project. */
+.if-cardtop td{{border-top:1px solid #e0e0e0;background:#fbfbfd;}}
+.if-cardtop td:first-child{{border-left:4px solid #b9bdc9;}}
 .if-cardtop td:last-child{{border-right:1px solid #e0e0e0;}}
+/* Left rail: nested rows share a faint grey spine that ties them back to the
+   pAI anchor above, so you don't lose track of which construct you're inside. */
+.if-att-row td:first-child,
+.if-attempt td:first-child,
+.if-strain-row td:first-child{{border-left:4px solid #e3e5ea;}}
 </style>
 <div style="padding:12px 16px;background:#fff;min-height:100%;">
 
   <!-- Summary bar -->
   <div style="display:flex;gap:14px;align-items:center;margin-bottom:10px;flex-wrap:wrap;font-size:10px;color:#6b7280;">
     <span style="font-weight:700;color:#374151;">IN PROGRESS: <span style="color:#1d4ed8;">{in_prog}</span></span>
-    <span>Flagged: <b style="color:#b45309;">{flagged}</b></span>
+    <span>Flagged: <b id="if-flagged-ct" style="color:#b45309;">{flagged}</b></span>
     <span>Past Due: <b style="color:#991b1b;">{past_due}</b></span>
     <span>At Risk: <b style="color:#713f12;">{at_risk}</b></span>
     <span>Stalled: <b style="color:#dc2626;">{stalled}</b></span>
+    <span>Colony Risk: <b id="if-colrisk-ct" style="color:#991b1b;">0</b></span>
   </div>
 
   <!-- View toggle -->
@@ -605,6 +675,12 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     <button onclick="ifSetView('standard')" id="if-v-standard" class="if-vbtn if-vactive" style="{btn_s}">Standard View</button>
     <button onclick="ifSetView('colony')"   id="if-v-colony"   class="if-vbtn"            style="{btn_s}">Colony Tracking View</button>
     <span id="if-colony-hint" style="display:none;font-size:9px;color:#9ca3af;">Click a request to expand designs → workorders</span>
+    <span id="if-band-legend" style="display:none;align-items:center;gap:6px;font-size:9px;color:#9ca3af;margin-left:6px;border-left:1px solid #e5e7eb;padding-left:8px;">
+      <span style="font-weight:600;color:#6b7280;">Pickable band:</span>
+      <span title="0–7 pickable — below the median; bottom half of all workorders" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;background:#FDE2E2;color:#B42318;border:0.5px solid #F5A3A3;">LOW 0–7</span>
+      <span title="8–22 pickable — median up to the 75th percentile; typical / healthy" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;background:#FEF3C7;color:#92400E;border:0.5px solid #FCD34D;">MED 8–22</span>
+      <span title="23+ pickable — top quartile (38+ is top 10%)" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;background:#DCFCE7;color:#15803D;border:0.5px solid #86EFAC;">HIGH 23+</span>
+    </span>
   </div>
 
   <!-- Flag filter bar -->
@@ -616,6 +692,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     <button onclick="ifFlagFilter('PAST_DUE')" id="iff-PAST_DUE" class="iff-fbtn"            style="{btn_s}background:#fee2e2;color:#991b1b;border-color:#fca5a5;">Past Due</button>
     <button onclick="ifFlagFilter('AT_RISK')"  id="iff-AT_RISK"  class="iff-fbtn"            style="{btn_s}background:#fef9c3;color:#713f12;border-color:#fde047;">At Risk</button>
     <button onclick="ifFlagFilter('STALLED')"  id="iff-STALLED"  class="iff-fbtn"            style="{btn_s}background:#fef2f2;color:#dc2626;border-color:#fca5a5;">Stalled</button>
+    <button onclick="ifFlagFilter('COLONY_RISK')" id="iff-COLONY_RISK" class="iff-fbtn"      style="{btn_s}background:#fee2e2;color:#991b1b;border-color:#fca5a5;">Colony Risk</button>
   </div>
 
   <!-- Table -->
@@ -675,11 +752,11 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   // phase pill: solid brand-sweep fill, own geometry.
   function phaseBdg(p){{return P_ST[p]?'<span style="'+GEO_PHASE+P_ST[p]+'">'+esc(p)+'</span>':'';}}
   var PAI_STY   ='{PAI_STYLE}';
-  var PAI_STY_RD=PAI_STY;
+  var PAI_STY_RD='{PAI_STYLE_RD}';
   function paiBadges(s,cust){{if(!s)return'';var st=cust==='R_D'?PAI_STY_RD:PAI_STY;return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+st+'">'+esc(p)+'</span>':'';}}).join('');}}
   var CUST_MAP={JS_CUST};
-  // customer badge: leading dot (shape cue) + label + tint, so green-R&D != green-SUCCEEDED.
-  function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];return'<span style="'+GEO_CUST+'background:'+m[1]+';color:'+m[2]+';">{CUST_DOT} '+m[0]+'</span>';}}
+  // customer badge: optional leading marker (CUST_DOT, from tokens) + label + tint.
+  function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];return'<span style="'+GEO_CUST+'background:'+m[1]+';color:'+m[2]+';">{CUST_DOT}'+m[0]+'</span>';}}
   var _DPILL='display:inline-block;padding:0px 5px;border-radius:3px;font-size:9px;font-weight:600;white-space:nowrap;margin-top:2px;';
   function fmtDate(s){{if(!s)return'';var diff=Math.round((new Date(s)-new Date(_TODAY))/(864e5));var bg,clr,lbl;if(diff<0){{bg='#fee2e2';clr='#991b1b';lbl=Math.abs(diff)+'d ago';}}else if(diff===0){{bg='#fef3c7';clr='#92400e';lbl='today';}}else if(diff<=7){{bg='#fef9c3';clr='#713f12';lbl='in '+diff+'d';}}else{{bg='#f3f4f6';clr='#6b7280';lbl='in '+diff+'d';}}return'<span style="color:#374151;">'+esc(s)+'</span><br><span style="background:'+bg+';color:'+clr+';'+_DPILL+'">'+lbl+'</span>';}}
   function fmtSubmitter(s){{if(!s||s.indexOf('@')===-1)return esc(s);var parts=s.split('@');var local=parts[0];var domain=parts[1];var org=domain.split('.')[0];org=org.charAt(0).toUpperCase()+org.slice(1);var name=local.split('.').map(function(p){{return p.charAt(0).toUpperCase()+p.slice(1);}}).join(' ');var ext=!domain.toLowerCase().startsWith('asimov.');var orgSty=ext?'display:inline-block;font-size:9px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:1px 5px;margin-top:1px;':'display:block;color:#9ca3af;font-size:9px;';return'<span style="display:block;">'+esc(name)+'</span><span style="'+orgSty+'">'+esc(org)+'</span>';}}
@@ -690,14 +767,15 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   var _expA = {{}};                        // expanded attempts      {{req_id|n: true}}
   try {{ if (localStorage.getItem('if_view') === 'colony') _view = 'colony'; }} catch(e) {{}}
 
-  // Competent-cell / strain chips (item 7) — muted outlined.
+  // Competent-cell / strain chips (item 7) — distinct, saturated hues so NEB vs EPI
+  // are separable at a glance (were both pale pastels that read alike).
   var STRAIN_STY = {{
-    'NEBV':    'background:#EAF3DE;color:#3B6D11;border:0.5px solid #97C459;',
-    'NEB_STBL':'background:#EAF3DE;color:#3B6D11;border:0.5px solid #97C459;',
-    'EPI400':  'background:#E6F1FB;color:#185FA5;border:0.5px solid #85B7EB;',
-    'STBL3':   'background:#FAEEDA;color:#633806;border:0.5px solid #EF9F27;',
+    'NEBV':    'background:#FBE0EB;color:#A82A5E;border:0.5px solid #ED90B5;',
+    'NEB_STBL':'background:#FBE0EB;color:#A82A5E;border:0.5px solid #ED90B5;',
+    'EPI400':  'background:#D6F0F2;color:#0E6E7A;border:0.5px solid #57BFCB;',
+    'STBL3':   'background:#FAE6C8;color:#8A4B05;border:0.5px solid #E8961B;',
   }};
-  var STRAIN_CHIP='display:inline-block;font-size:11px;padding:2px 7px;border-radius:5px;font-weight:500;white-space:nowrap;margin:1px 1px;';
+  var STRAIN_CHIP='display:inline-block;font-size:9px;padding:1px 5px;border-radius:4px;font-weight:600;white-space:nowrap;margin:0 1px;';
   function strainBdg(s){{var st=STRAIN_STY[s]||'background:#F1EFE8;color:#5F5E5A;border:0.5px solid #D3D1C7;';return '<span style="'+STRAIN_CHIP+st+'">'+esc(s)+'</span>';}}
   // Flag chips (item 8) — muted, thin border.
   var CF_ST = {JS_CF_ST};
@@ -705,9 +783,85 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   // L1 colony flags = colony flags + PAST_DUE inherited from the request flags
   function colFlags(r){{var f=(r.col.cflags||[]).slice();if(r.flags.indexOf('PAST_DUE')!==-1)f.push('PAST_DUE');return f;}}
   // Numeric cell — neutral dark, right-aligned, no conditional red (item 9).
-  function num(n,low){{n=n||0;var c=(n===0)?'#c8c6bf':'#1a1a1a';return '<span style="display:block;text-align:right;font-variant-numeric:tabular-nums;font-size:11px;font-weight:500;color:'+c+';">'+n+'</span>';}}
-  // Passing-ratio pill (item 4) — colored by seq performance.
-  var SEQPILL='display:inline-block;font-size:11px;padding:3px 8px;border-radius:20px;font-weight:500;white-space:nowrap;';
+  function num(n,low){{n=n||0;return '<span class="if-cnum'+(n===0?' if-cz':'')+'">'+n+'</span>';}}
+  // Pickable risk band for an attempt's pickable count (see legend in the toolbar):
+  //   Low 0–7 (below median), Medium 8–22 (median→75th pct), High 23+ (top quartile).
+  var PICK_LOW_MAX=7, PICK_MED_MAX=22;
+  function pickBand(n){{
+    n=n||0;
+    var lbl, st;
+    if(n<=PICK_LOW_MAX){{lbl='LOW'; st='background:#FDE2E2;color:#B42318;border:0.5px solid #F5A3A3;';}}
+    else if(n<=PICK_MED_MAX){{lbl='MED'; st='background:#FEF3C7;color:#92400E;border:0.5px solid #FCD34D;';}}
+    else{{lbl='HIGH'; st='background:#DCFCE7;color:#15803D;border:0.5px solid #86EFAC;';}}
+    return '<span title="'+n+' pickable — '+lbl+' band" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">'+lbl+'</span>';
+  }}
+  // Risk level for a design, by the BEST attempt available (its pickable ceiling):
+  //   best still LOW (0–PICK_LOW_MAX)      → HIGH RISK (only low options)
+  //   best MED (PICK_LOW_MAX–PICK_MED_MAX) → MED RISK  (no strong attempt yet)
+  //   best HIGH (>PICK_MED_MAX)            → healthy, no badge
+  // Designs with a sequence-confirmed winner / already succeeded are never flagged.
+  function designRisk(d){{
+    var atts=d.attempts||[];
+    if(!atts.length) return '';
+    if(d.has_winner || d.status==='SUCCEEDED' || d.status==='FULFILLED') return '';
+    var best=0; atts.forEach(function(a){{var p=a.pickable||0; if(p>best) best=p;}});
+    if(best<=PICK_LOW_MAX) return 'HIGH';
+    if(best<=PICK_MED_MAX) return 'MED';
+    return '';
+  }}
+  function riskBadge(level){{
+    if(level!=='HIGH' && level!=='MED') return '';
+    var st = level==='HIGH'
+      ? 'background:#FEE2E2;color:#991B1B;border:0.5px solid #FCA5A5;'
+      : 'background:#FEF3C7;color:#92400E;border:0.5px solid #FCD34D;';
+    var tip = level==='HIGH'
+      ? 'Every attempt is in the LOW pickable band (0–'+PICK_LOW_MAX+') with no sequence-confirmed colony — at risk of running out of viable picks.'
+      : 'Best attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one.';
+    return '<span title="'+tip+'" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">&#9888; '+level+' RISK</span>';
+  }}
+  // Worst colony risk across a request's designs + the pickable count driving it.
+  function reqColRisk(r){{
+    var lv='', pk=0;
+    (r.designs||[]).forEach(function(d){{
+      var rk=designRisk(d);
+      if(rk==='HIGH' && lv!=='HIGH'){{ lv='HIGH'; pk=d.pickable||0; }}
+      else if(rk==='MED' && lv===''){{ lv='MED'; pk=d.pickable||0; }}
+    }});
+    return {{level:lv, pick:pk}};
+  }}
+  // Colony-risk flag badge (for the standard-view Flags column) — shows severity AND
+  // the pickable colony count so the standard view carries the colony info too.
+  function colRiskFlag(level,pick){{
+    if(level!=='HIGH' && level!=='MED') return '';
+    var st = level==='HIGH' ? 'background:#FEE2E2;color:#991B1B;border:1px solid #FCA5A5;'
+                            : 'background:#FEF3C7;color:#92400E;border:1px solid #FCD34D;';
+    var tip = level==='HIGH'
+      ? 'Colony at risk: every attempt LOW (0–'+PICK_LOW_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable.'
+      : 'Colony watch: best attempt only MEDIUM (≤'+PICK_MED_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable.';
+    return '<span title="'+tip+'" style="'+BDG+st+'">'+level+' RISK &middot; '+pick+'pk</span>';
+  }}
+  // One-time: fold colony risk into each record's flags so it filters/sorts like the
+  // other flags (and "All Flags" includes it). Idempotent via the indexOf guard.
+  (function(){{
+    var _crCt = 0;
+    _IFD.forEach(function(r){{
+      r.flags = r.flags || [];
+      // Colony risk only applies while the request is in assembly (ASM). Past that
+      // (LSP/PARTS/etc.) the colony picture is no longer the actionable signal.
+      var cr = (r.phase === 'ASM') ? reqColRisk(r) : {{level:'', pick:0}};
+      r._colRisk = cr.level; r._colPick = cr.pick;
+      if(cr.level && r.flags.indexOf('COLONY_RISK')===-1) {{ r.flags.push('COLONY_RISK'); _crCt++; }}
+    }});
+    var _el = document.getElementById('if-colrisk-ct');
+    if(_el) _el.textContent = _crCt;
+    // "Flagged" total now includes colony risk — recompute as any-flag count.
+    var _fl = document.getElementById('if-flagged-ct');
+    if(_fl) _fl.textContent = _IFD.filter(function(r){{return r.flags.length;}}).length;
+  }})();
+  // Passing-ratio pill (item 4) — colored by seq performance. Shares the status
+  // badge geometry (GEO_STATUS) so it sits in scale beside the Status column
+  // instead of being an oversized rounded pill.
+  var SEQPILL=GEO_STATUS;
   function seqBdg(seq,tot,winner,status,picked){{
     seq=seq||0;tot=tot||0;picked=picked||0;
     // Sequencing not done yet: 0 confirmations while the design/attempt is still
@@ -760,12 +914,14 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
     var st  = statusBdg(r.status);
     var ph  = phaseBdg(r.phase);
-    var fl  = r.flags.map(function(f){{return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);}}).join('');
+    var fl  = r.flags.map(function(f){{
+      if(f==='COLONY_RISK') return colRiskFlag(r._colRisk, r._colPick);
+      return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);
+    }}).join('');
     return '<tr style="'+bg+'">'
           + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
-          + '<td style="'+TD+'max-width:160px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.exp)+'</td>'
-          + '<td style="'+TD+'max-width:180px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.construct)+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
+          + '<td style="'+TD+'max-width:180px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.construct)+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
           + '<td style="'+TD+'max-width:110px;">'+fmtSubmitter(r.submitter)+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+st+'</td>'
@@ -780,30 +936,24 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   }}
   // ── Colony Tracking row builders (L1 request → L2 design → L3 attempt → L4 wo) ──
   function _dash(){{ return '<span style="display:block;text-align:right;color:#cbd5e1;font-size:11px;">&mdash;</span>'; }}
-  // Per-strain breakdown line (so the summed totals can be split by strain at a glance).
-  function strainSummary(bs) {{
-    if (!bs || !bs.length) return '';
-    return '<div style="margin-top:3px;">' + bs.map(function(s) {{
-      return '<span style="display:inline-block;margin-right:12px;font-size:9px;white-space:nowrap;">'
-        + strainBdg(s.strain)
-        + ' <span style="color:#475569;font-variant-numeric:tabular-nums;">'+s.pickable+'pk &middot; '+s.picked+'pkd &middot; '+s.seq+'/'+s.tot+'</span></span>';
-    }}).join('') + '</div>';
-  }}
   function _colReqRow(r) {{
     var open = !!_expR[r.req_id], c = r.col;
     var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
     var ph  = phaseBdg(r.phase);
+    var _lv = (r.designs||[]).map(designRisk);
+    var rwarn = riskBadge(_lv.indexOf('HIGH')!==-1 ? 'HIGH' : (_lv.indexOf('MED')!==-1 ? 'MED' : ''));
     return '<tr class="if-cardtop" style="cursor:pointer;font-weight:600;" onclick="ifToggleReq(\\''+r.req_id+'\\')">'
       + '<td style="'+TD+'"><span class="if-caret'+(open?' open':'')+'">&#9654;</span></td>'
       + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
       + '<td style="'+TD+'max-width:180px;overflow-wrap:break-word;word-break:break-word;">'+esc(r.construct)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(r.status)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+rwarn+'</td>'
       + '<td style="'+TD+'">'+num(c.pickable)+'</td>'
       + '<td style="'+TD+'">'+num(c.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(c.seq,c.tot,c.has_winner,r.status,c.picked)+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(r.status)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;font-size:9px;color:#64748b;">'+fmtMDY(r.assembly)+'</td>'
       + '</tr>';
   }}
@@ -811,7 +961,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function _colDesignRow(r, d) {{
     var hasAtt = (d.attempts||[]).length > 0;
     var open  = hasAtt && !!_expA[r.req_id+'|'+d.anchor];
-    var natt  = d.n_attempts>1 ? ' <span style="font-size:9px;color:#64748b;">&times;'+d.n_attempts+' attempts</span>' : '';
+    var natt  = ' <span style="font-size:9px;color:#64748b;font-weight:600;">&middot; '+d.n_attempts+' attempt'+(d.n_attempts==1?'':'s')+'</span>';
     var bp    = [d.backbone, d.parts].filter(Boolean).join(', ');
     var parts = bp ? '<div style="font-size:8px;font-family:monospace;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px;">'+esc(bp)+'</div>' : '';
     // ✓ flags a seq-confirmed downstream clone — redundant when the design itself
@@ -819,27 +969,19 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var win   = (d.has_winner && d.status!=='SUCCEEDED' && d.status!=='FULFILLED') ? '<span style="'+BDG+'background:#dcfce7;color:#15803d;border:1px solid #86efac;">&#10003;</span>' : '';
     var caret = hasAtt ? '<span class="if-caret'+(open?' open':'')+'">&#9654;</span>' : '<span style="color:#e5e7eb;">&bull;</span>';
     var click = hasAtt ? ' style="cursor:pointer;" onclick="ifToggleDesign(\\''+r.req_id+'\\',\\''+d.anchor+'\\')"' : '';
+    // Single-attempt design: the design row IS that attempt, so band it here. Multi-
+    // attempt designs band each attempt row instead (the design total is a sum).
+    var band = ((d.attempts||[]).length <= 1) ? pickBand(d.pickable) : '';
+    var warn = riskBadge(designRisk(d));
     return '<tr class="if-att-row"'+click+'>'
       + '<td style="'+TD+'padding-left:20px;">'+caret+'</td>'
-      + '<td style="'+TD+'" colspan="4"><span style="font-size:10px;font-weight:700;color:#334155;">'+esc(d.dtype||'Design')+'</span>'+natt+parts+strainSummary(d.by_strain)+'</td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(d.status)+win+'</td>'
+      + '<td style="'+TD+'" colspan="4"><span style="font-size:10px;font-weight:700;color:#334155;">'+esc(d.dtype||'Design')+'</span>'+natt+parts+'</td>'
       + '<td style="'+TD+'"></td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+(warn||band)+'</td>'
       + '<td style="'+TD+'">'+num(d.pickable)+'</td>'
       + '<td style="'+TD+'">'+num(d.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(d.seq,d.tot,false,d.status,d.picked)+'</td>'
-      + '<td style="'+TD+'"></td>'
-      + '</tr>';
-  }}
-  // L3 — ATTEMPT banner ("Gibson — Attempt N of M" + verdict). Only when >1 attempt.
-  function _attBanner(a) {{
-    return '<tr class="if-strain-row" style="background:#f8fafc;">'
-      + '<td style="'+TD+'"></td>'
-      + '<td style="'+TD+'padding-left:38px;" colspan="4"><span style="font-size:9px;font-weight:700;color:#475569;">Gibson &mdash; Attempt '+a.n+' of '+a.tot_n+'</span></td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(a.status)+'</td>'
-      + '<td style="'+TD+'"></td>'
-      + '<td style="'+TD+'">'+num(a.pickable)+'</td>'
-      + '<td style="'+TD+'">'+num(a.picked)+'</td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(a.seq,a.tot,false,a.status,a.picked)+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(d.status)+win+'</td>'
       + '<td style="'+TD+'"></td>'
       + '</tr>';
   }}
@@ -850,66 +992,64 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var pre = w.is_child ? '<span style="color:#cbd5e1;">&#9492;&#9472; </span>' : '';
     var lbl = pre + (w.strain?strainBdg(w.strain)+' ':'') + '<span style="font-size:9px;color:#64748b;">'+esc(w.dtype)+'</span>'
             + ' <span style="font-size:8px;font-family:monospace;color:#cbd5e1;">'+esc(String(w.wid).slice(0,8))+'</span>';
-    var c8,c9,c10;
-    if (!w.hascol) {{ c8=_dash(); c9=_dash(); c10='<span style="color:#cbd5e1;">&mdash;</span>'; }}
-    else {{ c8=num(w.pickable); c9=num(w.picked); c10=seqBdg(w.seq,w.totc,false,w.status,w.picked); }}
+    var c8,c9,c10,rb;
+    if (!w.hascol) {{ c8=_dash(); c9=_dash(); c10='<span style="color:#cbd5e1;">&mdash;</span>'; rb=''; }}
+    else {{ c8=num(w.pickable); c9=num(w.picked); c10=seqBdg(w.seq,w.totc,false,w.status,w.picked); rb=pickBand(w.pickable); }}
     return '<tr class="if-strain-row">'
       + '<td style="'+TD+'"></td>'
       + '<td style="'+TD+'padding-left:'+pad+'px;" colspan="4">'+lbl+'</td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(w.status)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;font-size:9px;">'+agarLink(w.agar_url,w.agar_label)+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+rb+'</td>'
       + '<td style="'+TD+'">'+c8+'</td>'
       + '<td style="'+TD+'">'+c9+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+c10+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(w.status)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;font-size:9px;color:#64748b;">'+fmtMDY(w.star_date)+'</td>'
       + '</tr>';
   }}
-  // Strain cards for one attempt: one card per strain — tag, agar plate link, and
-  // Pkl/Pkd (always shown, including 0|0). The assembly (Gibson/GG) row carries a strain
-  // (e.g. NEB_STBL) + its own colonies, so include it alongside the transformation
-  // rows (EPI400/STBL3) — not just is_child.
-  function strainCards(a){{
-    var rows=(a.rows||[]).filter(function(w){{return w.strain;}});
-    if(!rows.length) rows=(a.rows||[]);
-    if(!rows.length) return '';
-    return '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:5px;">'+rows.map(function(w){{
-      var metrics = '<span style="font-size:10px;color:#64748b;">Pkl: <strong style="color:#1a1a1a;">'+(w.pickable||0)+'</strong> | Pkd: <strong style="color:#1a1a1a;">'+(w.picked||0)+'</strong></span>';
-      return '<div style="display:flex;flex-direction:column;gap:3px;min-width:130px;background:#fdfdfd;border:1px solid #f1f5f9;padding:6px;border-radius:4px;">'
-        + (w.strain?strainBdg(w.strain):'')
-        + (w.agar_label?agarLink(w.agar_url,w.agar_label):'<span style="font-size:10px;color:#cbd5e1;">&mdash;</span>')
-        + metrics
-        + '</div>';
-    }}).join('')+'</div>';
-  }}
-  // One row per attempt (mock layout): "<Method> — Attempt N of M" + strain cards,
-  // with attempt-level status / pickable / picked / seq / date in the columns.
+  // Attempt header row: "<Method> — Attempt N of M" + attempt-level totals in the
+  // right columns. The per-strain breakdown is emitted as aligned sub-rows below
+  // (see strainRows) rather than floated as cards, so the data lines up under the
+  // PICKABLE / PICKED / SEQ headers instead of leaving the middle of the row empty.
   function _colAttemptRow(a, dtype){{
     var lbl = '<span style="font-size:10px;font-weight:700;color:#334155;">'+esc(dtype||'Assembly')+' &mdash; Attempt '+a.n+' of '+a.tot_n+'</span>';
-    return '<tr class="if-att-row">'
+    return '<tr class="if-attempt">'
       + '<td style="'+TD+'"></td>'
-      + '<td style="'+TD+'padding-left:38px;" colspan="4">'+lbl+strainCards(a)+'</td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(a.status)+'</td>'
+      + '<td style="'+TD+'padding-left:38px;" colspan="4">'+lbl+'</td>'
       + '<td style="'+TD+'"></td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+pickBand(a.pickable)+'</td>'
       + '<td style="'+TD+'">'+num(a.pickable)+'</td>'
       + '<td style="'+TD+'">'+num(a.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(a.seq,a.tot,false,a.status,a.picked)+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(a.status)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;font-size:9px;color:#64748b;">'+fmtMDY(a.date)+'</td>'
       + '</tr>';
   }}
+  // Per-strain sub-rows for one attempt, rendered as aligned table rows via _colWoRow
+  // (strain tag + agar plate&middot;well in the Phase column + Pickable/Picked/Seq under
+  // their headers). Mirrors strainCards' row selection: strain rows, else all rows.
+  function strainRows(a){{
+    var rows=(a.rows||[]).filter(function(w){{return w.strain;}});
+    if(!rows.length) rows=(a.rows||[]);
+    return rows.map(_colWoRow).join('');
+  }}
   function _colonyRows(r) {{
-    var html = '<tr class="if-cardgap"><td colspan="11"></td></tr>' + _colReqRow(r);
+    var html = '<tr class="if-cardgap"><td colspan="12"></td></tr>' + _colReqRow(r);
     if (_expR[r.req_id]) {{
       (r.designs||[]).forEach(function(d) {{
         html += _colDesignRow(r, d);
         if (_expA[r.req_id+'|'+d.anchor]) {{
           var atts = d.attempts||[];
+          // Single attempt: the design row already carries the totals + "· 1 attempt",
+          // so skip the redundant "Attempt 1 of 1" header and show strain rows directly.
+          var multi = atts.length > 1;
           atts.forEach(function(a){{
-            html += _colAttemptRow(a, d.dtype);
+            html += (multi ? _colAttemptRow(a, d.dtype) : '') + strainRows(a);
           }});
         }}
       }});
       if (!(r.designs||[]).length)
-        html += '<tr class="if-att-row"><td style="'+TD+'"></td><td colspan="10" style="'+TD+'color:#9ca3af;font-style:italic;">No colony data yet.</td></tr>';
+        html += '<tr class="if-att-row"><td style="'+TD+'"></td><td colspan="11" style="'+TD+'color:#9ca3af;font-style:italic;">No colony data yet.</td></tr>';
     }}
     return html;
   }}
@@ -923,6 +1063,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     if (s) s.classList.toggle('if-vactive', v === 'standard');
     if (c) c.classList.toggle('if-vactive', v === 'colony');
     var h = document.getElementById('if-colony-hint'); if (h) h.style.display = v === 'colony' ? 'inline' : 'none';
+    var bl = document.getElementById('if-band-legend'); if (bl) bl.style.display = v === 'colony' ? 'inline-flex' : 'none';
     window.ifBuildHead();
     window.ifRender();
   }};
@@ -931,19 +1072,25 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     window.ifBuildHead();
     var tbody = document.getElementById('inflight-tbody');
     if (!tbody) return;
-    var COLONY = _view === 'colony', NCOL = COLONY ? 11 : 14;
+    var COLONY = _view === 'colony', NCOL = COLONY ? 12 : 13;
     var expOrder = [], buckets = {{}};
     _IFD.forEach(function(r) {{
       if (!_pass(r)) return;
-      if (!buckets.hasOwnProperty(r.exp)) {{ expOrder.push(r.exp); buckets[r.exp] = {{rows:[], fp:r.fp, pinned:r.pinned}}; }}
+      if (!buckets.hasOwnProperty(r.exp)) {{ expOrder.push(r.exp); buckets[r.exp] = {{rows:[], fp:r.fp, pinned:r.pinned, customer:r.customer}}; }}
+      buckets[r.exp].fp = buckets[r.exp].fp || r.fp;   // partner if ANY request is for_partner
       buckets[r.exp].rows.push(r);
     }});
     var html = '';
     expOrder.forEach(function(exp) {{
       var g = buckets[exp];
-      var grpSt = 'background:#F8F7FF;border-left:3px solid #7F77DD;font-weight:600;color:#3C3489;';
-      html += '<tr class="if-grp"><td colspan="'+NCOL+'" style="padding:10px 14px;font-size:11px;'+grpSt+'">'
-            + esc(exp) + (g.fp ? ' ★' : '') + '</td></tr>';
+      // Project (experiment) header — matches the tracking tab's banner gradients
+      // (dashboard.py): Partner → purple→magenta, non-partner (incl. R&D) → blue→cyan.
+      var grpGrad = g.fp
+        ? 'linear-gradient(135deg,#7c3aed 0%,#be185d 100%)'
+        : 'linear-gradient(135deg,#1e3a5f 0%,#0891b2 100%)';
+      var grpSt = 'background:'+grpGrad+';color:#fff;font-weight:700;letter-spacing:0.02em;';
+      html += '<tr class="if-grp"><td colspan="'+NCOL+'" style="padding:11px 14px;font-size:11px;border-top:8px solid #e8e8ed;'+grpSt+'">'
+            + esc(exp) + (g.fp ? ' &#9733;' : '') + '</td></tr>';
       g.rows.forEach(function(r) {{ html += COLONY ? _colonyRows(r) : _rowHtml(r); }});
     }});
     if (!html) html = '<tr><td colspan="'+NCOL+'" style="padding:20px;color:#6b7280;font-size:11px;text-align:center;">No matching requests.</td></tr>';
@@ -1100,9 +1247,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   var _headView = null;
   var _COLS_STD = [
       {{k:'fp',        lbl:'★',         filter:true}},
-      {{k:'exp',       lbl:'Experiment', filter:true}},
-      {{k:'construct', lbl:'Construct',  filter:true}},
       {{k:'pAI',       lbl:'pAI',        filter:true}},
+      {{k:'construct', lbl:'Construct',  filter:true}},
       {{k:'customer',  lbl:'Customer',   filter:true}},
       {{k:'submitter', lbl:'Submitter',  filter:true}},
       {{k:'status',    lbl:'Status',     filter:true}},
@@ -1120,11 +1266,12 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       {{k:'pAI',       lbl:'pAI',           filter:true}},
       {{k:'construct', lbl:'Construct',     filter:true}},
       {{k:'customer',  lbl:'Customer',      filter:true}},
-      {{k:'status',    lbl:'Status',        filter:true}},
       {{k:'phase',     lbl:'Phase / Agar',  filter:true}},
+      {{k:'risk',      lbl:'Risk',          filter:false}},
       {{k:'c_pickable',lbl:'Pickable',      filter:false}},
       {{k:'c_picked',  lbl:'Picked',        filter:false}},
       {{k:'c_seq',     lbl:'Seq Conf',      filter:false}},
+      {{k:'status',    lbl:'Status',        filter:true}},
       {{k:'assembly',  lbl:'Assembly',      filter:false}},
   ];
   window.ifBuildHead = function() {{
@@ -1177,6 +1324,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     if (s) s.classList.toggle('if-vactive', _view === 'standard');
     if (c) c.classList.toggle('if-vactive', _view === 'colony');
     var h = document.getElementById('if-colony-hint'); if (h && _view === 'colony') h.style.display = 'inline';
+    var bl = document.getElementById('if-band-legend'); if (bl && _view === 'colony') bl.style.display = 'inline-flex';
   }})();
 
 }})();
