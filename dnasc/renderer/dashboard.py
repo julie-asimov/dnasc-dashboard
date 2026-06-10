@@ -29,6 +29,7 @@ import pytz
 
 from dnasc.logger import get_logger
 from dnasc import protocols as proto
+from dnasc.renderer import tokens as tok
 
 # Omni plate maps: LIMS position is 0-indexed; add 1 to get the 1-indexed key.
 # All formats are column-major (positions fill down each column before moving right).
@@ -497,6 +498,24 @@ def render_all_projects_dashboard(
     # HTML CSS WITH TABS
     # =========================================================================
 
+    # ── Design tokens → CSS (single source of truth: renderer/tokens.py) ──────
+    _g = tok.GEOM["status"]
+    _status_css = (
+        f".badge {{ padding:{_g['pad']}; border-radius:{_g['radius']}; "
+        f"font-size:{_g['size']}; font-weight:{_g['weight']}; text-transform:uppercase; "
+        f"white-space:nowrap; }}\n"
+    )
+    for _k, (_bg, _txt, _bd) in tok.STATUS.items():
+        _border = "none" if _k == "BLOCKED" and _bd is None else f"1px solid {_bd}"
+        _status_css += f"    .status-{_k} {{ background:{_bg}; color:{_txt}; border:{_border}; }}\n"
+        _ic = tok.STATUS_ICON.get(_k)
+        if _ic:
+            _status_css += f"    .status-{_k}::before {{ content:'{_ic}\\00a0'; }}\n"
+    _tdot_css = ""
+    for _state, _color in tok.TIMELINE_DOT.items():
+        _anim = " animation: pulse 2s infinite;" if _state == "running" else ""
+        _tdot_css += f"    .t-dot.{_state} {{ background:{_color};{_anim} }}\n"
+
     # Part 1: CSS and JS (no f-string needed - no variables)
     html = """
     <style>
@@ -584,20 +603,8 @@ def render_all_projects_dashboard(
     .assembly-counts { font-weight: 600; color: #86868b; font-size: 9px; }
 
     /* BADGES */
-    .badge { padding: 1px 4px; border-radius: 2px; font-size: 8px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
     .bios-override-label { font-size: 7px; color: #86868b; margin-top: 3px; }
-    .status-SUCCEEDED, .status-FULFILLED { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; padding: 1px 7px; }
-    .status-FAILED    { background: #fff1f5; color: #be185d; border: 1px solid #fecdd3; }
-    .status-CANCELED  { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
-    .status-RUNNING   { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
-    .status-REPICK    { background: #ede9fe; color: #7c3aed; border: 1px solid #c4b5fd; }
-    .status-LSP_RUNNING { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
-    .status-IN_PROGRESS { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
-    .status-READY     { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
-    .status-WAITING   { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
-    .status-DRAFT     { background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; }
-    .status-UNKNOWN   { background: #f5f5f7; color: #6b7280; border: 1px solid #d1d5db; }
-    .status-BLOCKED   { background: #be185d; color: white; border: none; }
+    /*__STATUS_CSS__*/
 
     /* STOCK TAG */
     .stock-tag { background: #f3f4f6; color: #4b5563; border: 1px solid #d1d5db; padding: 1px 4px; border-radius: 2px; font-family: monospace; font-weight: 700; font-size: 9px; white-space: nowrap; }
@@ -642,14 +649,7 @@ def render_all_projects_dashboard(
     .timeline-row { display: flex; align-items: flex-start; margin-bottom: 2px; position: relative; min-height: 14px; }
     .timeline-row:not(:last-child):after { content: ''; position: absolute; left: 2px; top: 8px; bottom: -4px; width: 1px; background: #e5e5e7; z-index: 1; }
     .t-dot { width: 5px; height: 5px; border-radius: 50%; margin-top: 3px; margin-right: 4px; flex-shrink: 0; z-index: 2; }
-    .t-dot.succeeded { background: #10b981; }
-    .t-dot.failed { background: #be185d; }
-    .t-dot.running { background: #7c3aed; animation: pulse 2s infinite; }
-    .t-dot.ready { background: #f59e0b; }
-    .t-dot.pending { background: #e5e5e7; }
-    .t-dot.source { background: #6366f1; }
-    .t-dot.canceled { background: #9ca3af; }
-    .t-dot.repick   { background: #7c3aed; }
+    /*__TDOT_CSS__*/
     .t-content { flex-grow: 1; font-size: 8px; }
     .t-header { display: flex; justify-content: space-between; align-items: center; }
     .t-name { font-weight: 700; color: #1d1d1f; white-space: nowrap; font-size: 9px; }
@@ -1095,6 +1095,9 @@ def render_all_projects_dashboard(
     </script>
     """
 
+    # Splice token-generated status + timeline-dot CSS into the static block.
+    html = html.replace("/*__STATUS_CSS__*/", _status_css).replace("/*__TDOT_CSS__*/", _tdot_css)
+
     # LSP Capacity tab (generated once, injected into template)
     lsp_capacity_html = render_lsp_capacity_tab(df)
 
@@ -1216,16 +1219,15 @@ def render_all_projects_dashboard(
         pais_display = " ".join([_pai_tag(pid, i == 0) for i, pid in enumerate(final_list)])
         partner_badge = '<span class="badge" style="background:#ede9fe;color:#7c3aed;margin-right:8px;border:1px solid #c4b5fd;">PARTNER</span>' if is_partner_req else ""
 
-        _customer_styles = {
-            'R_D':             ('R&D',          '#cffafe', '#0e7490', '#a5f3fc'),
-            'INTERNAL_CLD':    ('CLD',          '#dbeafe', '#1d4ed8', '#93c5fd'),
-            'TECH_OUT':        ('TECH OUT',     '#ffedd5', '#c2410c', '#fdba74'),
-            'EXTERNAL_TECH_OUT':('EXT TECH OUT','#fce7f3', '#be185d', '#f9a8d4'),
-        }
+        # Customer badge — green R&D + leading dot (shape cue), canonical geometry
+        # (mixed-case, no .badge class). Sourced from renderer/tokens.py.
+        _cg = tok.GEOM['customer']
+        _cust_geom = (f"display:inline-block;font-size:{_cg['size']};font-weight:{_cg['weight']};"
+                      f"padding:{_cg['pad']};border-radius:{_cg['radius']};margin-right:4px;white-space:nowrap;")
         _cust_raw = str(req_df['customer'].iloc[0]) if 'customer' in req_df.columns and pd.notna(req_df['customer'].iloc[0]) else None
         if _cust_raw and _cust_raw not in ('nan', 'None', ''):
-            _clabel, _cbg, _cfg, _cborder = _customer_styles.get(_cust_raw, (_cust_raw.replace('_', ' '), '#f3f4f6', '#374151', '#d1d5db'))
-            customer_badge = f'<span class="badge" style="background:{_cbg};color:{_cfg};border:1px solid {_cborder};margin-right:4px;">{_clabel}</span>'
+            _clabel, _cbg, _cfg = tok.CUSTOMER.get(_cust_raw, (_cust_raw.replace('_', ' '),) + tok.CUSTOMER_FALLBACK[1:])
+            customer_badge = f'<span style="{_cust_geom}background:{_cbg};color:{_cfg};">{tok.CUSTOMER_DOT} {_clabel}</span>'
         else:
             customer_badge = ""
 
@@ -1247,20 +1249,18 @@ def render_all_projects_dashboard(
                 req_df['type'].isin(_asm_types_set) & (req_df['visual_status'] == 'WAITING')
             ].empty
 
-            _phase_styles = {
-                'LSP':   ('#059669', 'white',    '#047857'),
-                'ASM':   ('#2563eb', 'white',    '#1d4ed8'),
-                'PARTS': ('#ea580c', 'white',    '#c2410c') if _has_waiting_gg else ('#ffedd5', '#c2410c', '#fed7aa'),
-            }
-            phase_bg, phase_color, phase_border = _phase_styles.get(phase_label, ('#f5f5f7', '#6b7280', '#d1d5db'))
+            # Phase pills — brand sweep (LSP=blue, ASM=purple, PARTS=magenta),
+            # solid fill + white text, 9px. Sourced from renderer/tokens.py.
+            phase_bg, phase_color = tok.PHASE.get(phase_label, ('#f5f5f7', '#6b7280'))
+            _pg = tok.GEOM['phase']
 
             phase_html = f'''
                 <span style="
                     background: {phase_bg}; color: {phase_color};
-                    border: 1px solid {phase_border};
-                    padding: 2px 10px; border-radius: 4px;
-                    margin-left: 6px; font-weight: 800; font-size: 13px;
-                    display: inline-flex; align-items: center; height: 22px;
+                    padding: {_pg['pad']}; border-radius: {_pg['radius']};
+                    margin-left: 6px; font-weight: {_pg['weight']}; font-size: {_pg['size']};
+                    text-transform: uppercase;
+                    display: inline-flex; align-items: center;
                 ">{phase_label}</span>
             '''
 
@@ -1284,7 +1284,7 @@ def render_all_projects_dashboard(
         now = datetime.now(pytz.timezone('US/Eastern'))
         is_done = str(req_status).upper() in ['FULFILLED', 'SUCCEEDED', 'CANCELED']
 
-        stalled_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#be185d; color:white; border:2px solid #9f1239; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span><div class="badge-tip">No pipeline progress detected — may need intervention</div></div>' if is_stalled else ""
+        stalled_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#dc2626; color:white; border:2px solid #b91c1c; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span><div class="badge-tip">No pipeline progress detected — may need intervention</div></div>' if is_stalled else ""
         asm_review_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span><div class="badge-tip">Assembly needs review before proceeding</div></div>' if is_asm_review else ""
         seq_winner_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span><div class="badge-tip">A sequencing winner has been identified — ready for LSP</div></div>' if has_seq_winner else ""
         order_pending_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span><div class="badge-tip">Parts order submitted to synthesis vendor — waiting on delivery</div></div>' if has_order_pending else ""
@@ -2917,12 +2917,10 @@ def render_all_projects_dashboard(
         _root_only = project_df[project_df['workorder_id'] == project_df['root_work_order_id']]
         _ptr_source = _root_only if not _root_only.empty else project_df
         has_ptr = _ptr_source['for_partner'].astype(str).str.lower().str.contains('true').any()
-        _exp_customer_styles = {
-            'R_D':              ('R&D',           '#cffafe', '#0e7490', '#a5f3fc'),
-            'INTERNAL_CLD':     ('CLD',           '#dbeafe', '#1d4ed8', '#93c5fd'),
-            'TECH_OUT':         ('TECH OUT',      '#ffedd5', '#c2410c', '#fdba74'),
-            'EXTERNAL_TECH_OUT':('EXT TECH OUT',  '#fce7f3', '#be185d', '#f9a8d4'),
-        }
+        # Customer tags (experiment header) — token colors + leading dot, mixed-case.
+        _ecg = tok.GEOM['customer']
+        _ec_geom = (f"display:inline-block;font-size:{_ecg['size']};font-weight:{_ecg['weight']};"
+                    f"padding:{_ecg['pad']};border-radius:{_ecg['radius']};white-space:nowrap;")
         _exp_customers = []
         if 'customer' in project_df.columns:
             # Only look at request-fulfilling root workorders, not shared parts
@@ -2933,11 +2931,11 @@ def render_all_projects_dashboard(
             for _cv in _cust_source['customer'].dropna().unique():
                 _cv = str(_cv)
                 if _cv not in ('nan', 'None', '') and _cv not in [c for c, *_ in _exp_customers]:
-                    _cl, _cbg, _cfg, _cborder = _exp_customer_styles.get(_cv, (_cv.replace('_', ' '), 'rgba(255,255,255,0.15)', 'rgba(255,255,255,0.9)', 'rgba(255,255,255,0.3)'))
-                    _exp_customers.append((_cv, _cl, _cbg, _cfg, _cborder))
+                    _cl, _cbg, _cfg = tok.CUSTOMER.get(_cv, (_cv.replace('_', ' '),) + tok.CUSTOMER_FALLBACK[1:])
+                    _exp_customers.append((_cv, _cl, _cbg, _cfg))
         exp_customer_tags = " ".join(
-            f'<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px;background:{bg};color:{fg};border:1px solid {bd};">{lbl}</span>'
-            for _, lbl, bg, fg, bd in _exp_customers
+            f'<span style="{_ec_geom}background:{bg};color:{fg};">{tok.CUSTOMER_DOT} {lbl}</span>'
+            for _, lbl, bg, fg in _exp_customers
         )
         dots_html = ""; stage_counts = {}; stage_items = {}; fulfilled_week_counts = {}
         # Sort requests: newest first, but group base+variant construct names together.
