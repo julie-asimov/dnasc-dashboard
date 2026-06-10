@@ -1269,10 +1269,10 @@ def render_all_projects_dashboard(
                     op_status = 'READY' if display_text.endswith('READY') else ('RUNNING' if display_text.endswith('RUNNING') else 'WAITING')
                 status_badge_html = f'''
                     <span class="badge status-{op_status}" style="
-                        font-size: 9px; padding: 0 7px; height: 17px;
+                        font-size: 8px; padding: 1px 4px;
                         display: inline-flex; align-items: center; line-height: 1;
                         box-sizing: border-box; vertical-align: middle;
-                        white-space: nowrap; font-weight: 700; border-radius: 4px;
+                        white-space: nowrap; font-weight: 700; border-radius: 2px;
                     ">{display_text}</span>{phase_html}
                 '''
             else:
@@ -1363,7 +1363,7 @@ def render_all_projects_dashboard(
                 </div>
                 <div style="display: flex; gap: 8px; align-items: center;">
                     {customer_badge}{partner_badge}
-                    <span class="badge status-{str(req_status).replace(" ", "_")}" style="font-size: 10px; padding: 2px 8px;">{req_status}</span>
+                    <span class="badge status-{str(req_status).replace(" ", "_")}">{req_status}</span>
                     {status_badge_html}
                     {stalled_badge}
                     {asm_review_badge}
@@ -1731,9 +1731,16 @@ def render_all_projects_dashboard(
                                                     and not pd.isna(_ar_resubmit)
                                                     and int(_ar_resubmit) > 0)
                                     row_map[_ar]['_attempt_kind'] = 'RETRY' if _ar_is_retry else 'MANUAL'
-            # Always assign chain status for assembly roots (even single-attempt, used in banner)
+            # Always assign chain status for assembly roots (even single-attempt, used
+            # in banner). Prefer the pipeline-computed `chain_status` column (single
+            # source of truth shared with the colony tab); fall back to the render-time
+            # subtree walk for parquet snapshots predating that column.
             for _ar in visible_asm_roots:
-                row_map[_ar]['_attempt_chain_status'] = _subtree_best_status(_ar)
+                _cs = row_map[_ar].get('chain_status')
+                if _cs is not None and not (isinstance(_cs, float) and pd.isna(_cs)) and str(_cs):
+                    row_map[_ar]['_attempt_chain_status'] = str(_cs)
+                else:
+                    row_map[_ar]['_attempt_chain_status'] = _subtree_best_status(_ar)
             # Apply request-level attempt numbers to the section root (self-rooted GGs only).
             # Multiple GGs within one section are already handled by _sec_asm_by_stock above.
             if root_id in _req_asm_attempt_map and root_id in row_map:
@@ -1867,6 +1874,22 @@ def render_all_projects_dashboard(
                         status = target_row['visual_status']
                     elif (recovery_rows['visual_status'] == 'SUCCEEDED').any():
                         status = 'SUCCEEDED'
+            # An assembly attempt whose own workorder is FAILED/CANCELED can still
+            # have succeeded downstream — e.g. a child transformation produced a
+            # seq-confirmed colony (a1763876: Gibson CANCELED, transformation
+            # 0ba2439c SUCCEEDED). The attempt banners already reflect this via
+            # _attempt_chain_status; mirror it in the section-header badge so the
+            # roll-up shows SUCCEEDED when any attempt's chain succeeded, instead
+            # of the assembly root's own FAILED/CANCELED status.
+            if status in ('FAILED', 'CANCELED') and target_row['type'] != 'lsp_workorder':
+                _succ_root = next(
+                    (r for r in visible_asm_roots
+                     if row_map[r].get('_attempt_chain_status') == 'SUCCEEDED'),
+                    None,
+                )
+                if _succ_root is not None:
+                    target_row = row_map[_succ_root]
+                    status = 'SUCCEEDED'
             if str(status).upper() in ('NAN', 'NONE', '', 'UNKNOWN'):
                 active_info = get_active_step_info(target_row)
                 if active_info:

@@ -7,6 +7,7 @@ yield calculation, STOCK_ID resolution, and source material linking.
 
 from __future__ import annotations
 import json
+import re
 
 import pandas as pd
 
@@ -230,6 +231,102 @@ class ProcessingTransformer:
         df.loc[asm_idx, "attempt_anchor_id"] = wids.map(anchor_map)
         df.loc[asm_idx, "attempt_number"]    = wids.map(number_map)
         df.loc[asm_idx, "attempt_total"]     = wids.map(total_map)
+        return df
+
+    # Canonical assembly-chain status priority (lower = better outcome). Shared by
+    # both dashboard tabs via the `chain_status` column so they can never diverge.
+    _CHAIN_RANK = {
+        "SUCCEEDED": 0, "READY": 1, "RUNNING": 2, "IN_PROGRESS": 3,
+        "WAITING": 4, "BLOCKED": 5, "FAILED": 6, "CANCELED": 7,
+    }
+
+    @staticmethod
+    def _compute_chain_status(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Roll up each assembly workorder's best downstream status into `chain_status`.
+
+        An assembly attempt's verdict is NOT its own wo status: a Gibson/GG can be
+        CANCELED or FAILED while a child transformation produced a seq-confirmed
+        colony (= SUCCEEDED). Both the tracking tab (dashboard.py) and the colony
+        tab (inflight.py) need this rollup; computing it once here is the single
+        source of truth so the two views can never report different verdicts.
+
+        chain_status(asm) = best (lowest _CHAIN_RANK) visual_status across the
+        assembly row itself and every descendant transformation / offline-transform
+        / streakout / LSP reachable via source-process parentage.
+        """
+        df["chain_status"] = None
+        if "type" not in df.columns or "workorder_id" not in df.columns:
+            return df
+
+        _ASM = {"golden_gate_workorder", "gibson_workorder"}
+        rank = ProcessingTransformer._CHAIN_RANK
+        _uuid_re = re.compile(
+            r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", re.IGNORECASE
+        )
+
+        def _parent_id(row) -> str | None:
+            t = row.get("type")
+            if t in ("transformation_workorder", "transformation_offline_operation",
+                     "streakout_operation"):
+                p = row.get("source_asm_process_id")
+            elif t == "lsp_workorder":
+                p = None
+                for c in ("source_lsp_process_id", "source_workorder_id",
+                          "lsp_process_id", "middle_root"):
+                    v = row.get(c)
+                    if (pd.notna(v) and str(v).strip().lower() not in ("nan", "none", "")
+                            and not str(v).upper().startswith("LSP-")):
+                        p = v
+                        break
+            else:
+                return None
+            if p is None or (not isinstance(p, str) and pd.isna(p)):
+                return None
+            m = _uuid_re.search(str(p))
+            return m.group(0) if m else str(p).strip()
+
+        status_of: dict = {}
+        parent_of: dict = {}
+        asm_ids: set = set()
+        _cols = ["workorder_id", "type", "visual_status", "source_asm_process_id",
+                 "source_lsp_process_id", "source_workorder_id", "lsp_process_id",
+                 "middle_root"]
+        _avail = [c for c in _cols if c in df.columns]
+        for row in df[_avail].to_dict("records"):
+            wid = row.get("workorder_id")
+            if wid is None or (not isinstance(wid, str) and pd.isna(wid)):
+                continue
+            wid = str(wid)
+            status_of[wid] = str(row.get("visual_status") or "")
+            if row.get("type") in _ASM:
+                asm_ids.add(wid)
+            pp = _parent_id(row)
+            if pp:
+                parent_of[wid] = pp
+
+        if not asm_ids:
+            return df
+
+        best = {a: rank.get(status_of.get(a, ""), 99) for a in asm_ids}
+        for wid, st in status_of.items():
+            # Walk up to this row's assembly ancestor (cap traversal to avoid cycles).
+            anc = wid if wid in asm_ids else None
+            cur, seen = wid, set()
+            while anc is None and cur in parent_of and cur not in seen:
+                seen.add(cur)
+                cur = parent_of[cur]
+                if cur in asm_ids:
+                    anc = cur
+            if anc is None:
+                continue
+            r = rank.get(st, 99)
+            if r < best.get(anc, 99):
+                best[anc] = r
+
+        inv = {v: k for k, v in rank.items()}
+        chain = {a: inv[best[a]] for a in asm_ids if best.get(a, 99) in inv}
+        df["chain_status"] = df["workorder_id"].astype(str).map(chain)
         return df
 
     @staticmethod

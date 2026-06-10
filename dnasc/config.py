@@ -44,8 +44,12 @@ class PipelineConfig:
     LSP_BLACKLIST: list[str] = ["LSP-7602"]
     LSP_CUTOFF_DATE: str = "2025-11-01"      # Secondary-pass identity recovery cutoff
 
+    # ── Colony Tracking view (Requests In Flight tab) ─────────────────────────
+    MIN_PICKABLE_COLONIES: int = 3   # request-level pickable sum below this → red flag
+    SEQ_STALL_DAYS: int = 7          # picked>0 & seq_confirmed=0 & days-since-last-op>this → red flag
+
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.10.21"
+    PIPELINE_VERSION: str = "1.10.28"
 
     @classmethod
     def get_date_filter(cls) -> str:

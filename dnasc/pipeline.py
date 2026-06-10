@@ -473,6 +473,13 @@ def run_pipeline() -> pd.DataFrame:
     final_df = ProcessingTransformer._compute_attempt_anchors(final_df)
     _step_times["13-attempt-anchors"] = time.time() - t
 
+    # Roll up each assembly's downstream verdict into `chain_status` — the single
+    # source of truth both dashboard tabs read so the tracking and colony views
+    # can never disagree on whether an attempt succeeded.
+    t = time.time()
+    final_df = ProcessingTransformer._compute_chain_status(final_df)
+    _step_times["13b-chain-status"] = time.time() - t
+
     t = time.time()
     final_df = EnrichmentTransformer.compute_request_enrichment(final_df)
     _step_times["14-enrichment"] = time.time() - t
