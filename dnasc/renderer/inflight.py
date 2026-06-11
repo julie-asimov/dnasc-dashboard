@@ -762,10 +762,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function fmtSubmitter(s){{if(!s||s.indexOf('@')===-1)return esc(s);var parts=s.split('@');var local=parts[0];var domain=parts[1];var org=domain.split('.')[0];org=org.charAt(0).toUpperCase()+org.slice(1);var name=local.split('.').map(function(p){{return p.charAt(0).toUpperCase()+p.slice(1);}}).join(' ');var ext=!domain.toLowerCase().startsWith('asimov.');var orgSty=ext?'display:inline-block;font-size:9px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:1px 5px;margin-top:1px;':'display:block;color:#9ca3af;font-size:9px;';return'<span style="display:block;">'+esc(name)+'</span><span style="'+orgSty+'">'+esc(org)+'</span>';}}
 
   // ── Colony Tracking view state + helpers ──────────────────────────────────
-  var _view = 'standard';                 // 'standard' | 'colony'
+  var _view = 'standard';                 // 'standard' | 'colony' — always open in Standard View
   var _expR = {{}};                        // expanded request ids   {{req_id: true}}
   var _expA = {{}};                        // expanded attempts      {{req_id|n: true}}
-  try {{ if (localStorage.getItem('if_view') === 'colony') _view = 'colony'; }} catch(e) {{}}
 
   // Competent-cell / strain chips (item 7) — distinct, saturated hues so NEB vs EPI
   // are separable at a glance (were both pale pastels that read alike).
@@ -1058,7 +1057,6 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   window.ifToggleDesign = function(id, anchor) {{ var k = id+'|'+anchor; if (_expA[k]) delete _expA[k]; else _expA[k] = true; window.ifRender(); }};
   window.ifSetView = function(v) {{
     _view = v;
-    try {{ localStorage.setItem('if_view', v); }} catch(e) {{}}
     var s = document.getElementById('if-v-standard'), c = document.getElementById('if-v-colony');
     if (s) s.classList.toggle('if-vactive', v === 'standard');
     if (c) c.classList.toggle('if-vactive', v === 'colony');
