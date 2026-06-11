@@ -658,7 +658,7 @@ def render_all_projects_dashboard(
     /* TIMELINE */
     .timeline-container { position: relative; padding-left: 2px; }
     .timeline-row { display: flex; align-items: flex-start; margin-bottom: 1px; position: relative; min-height: 11px; }
-    .timeline-row:not(:last-child):after { content: ''; position: absolute; left: 2px; top: 6px; bottom: -3px; width: 1px; background: #ececf1; z-index: 1; }
+    .timeline-row:not(:last-child):after { content: ''; position: absolute; left: 2px; top: 6px; bottom: -3px; width: 1px; background: #e5e5e7; z-index: 1; }
     .t-dot { width: 5px; height: 5px; border-radius: 50%; margin-top: 2px; margin-right: 4px; flex-shrink: 0; z-index: 2; }
     /*__TDOT_CSS__*/
     .t-content { flex-grow: 1; font-size: 8px; }
