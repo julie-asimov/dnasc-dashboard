@@ -81,9 +81,9 @@ STATUS = {
 }
 STATUS_ICON = {
     "SUCCEEDED": "✓", "FULFILLED": "★", "RUNNING": "⟳",
-    "LSP_RUNNING": "⟳", "REPICK": "↺", "IN_PROGRESS": "▸",
+    "LSP_RUNNING": "⟳", "REPICK": "↺", "IN_PROGRESS": "▶︎",
     "READY": "◷", "WAITING": "⌛", "BLOCKED": "⊘",
-    "FAILED": "✕", "CANCELED": "⊗", "DRAFT": "✎", "UNKNOWN": "?",
+    "FAILED": "✕", "CANCELED": "⊗", "DRAFT": "✎", "UNKNOWN": "",
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -92,22 +92,36 @@ STATUS_ICON = {
 # ───────────────────────────────────────────────────────────────────────────
 CUSTOMER = {
     "R_D":               ("R&D",         "#f0fdf4", "#166534"),   # green (canonical)
-    "INTERNAL_CLD":      ("CLD",         "#dbeafe", "#1e40af"),   # AA-darkened
+    "INTERNAL_CLD":      ("CLD",         "#e0f2fe", "#0369a1"),   # Kernel sky-blue, explicit boundary
     "TECH_OUT":          ("Tech Out",    "#ffedd5", "#9a3412"),   # AA-darkened
     "EXTERNAL_TECH_OUT": ("Ext TechOut", "#fce7f3", "#9d174d"),   # AA; distinct from FAILED
 }
 CUSTOMER_FALLBACK = ("—", "#f3f4f6", "#6b7280")
-CUSTOMER_DOT = "•"   # leading dot so green-R&D != green-SUCCEEDED at a glance
+CUSTOMER_DOT = ""    # leading marker before customer label (empty = none). Single
+                     # source of truth — consumers render {CUSTOMER_DOT}{label} with no
+                     # manual space, so set e.g. "• " (with trailing space) to re-add.
 
 # ───────────────────────────────────────────────────────────────────────────
-# 5. PHASE pills — brand sweep blue->purple->magenta · SOLID fill + white text
-#    map: KEY -> (fill, text)
+# 5. KERNEL FUNCTIONAL PALETTE (approved 2026-06-11) — vibrant antibody-glyph hues,
+#    rendered AA-SAFE (Option A): colored/dark text on a light tint + accent border.
+#    Never solid white-on-vibrant (orange ~2.4:1, teal ~1.9:1 — both fail AA).
+#    Supersedes the old phase brand-sweep. The #6d28d9 brand purple value is NOT
+#    recolored — it simply moves to Partner/system tags; RUNNING status still uses it.
 # ───────────────────────────────────────────────────────────────────────────
+TECH_BLUE   = "#2563eb"   # active states / links / structural
+SKY_BLUE    = "#dbeafe"   # muted blue tint
+BIO_ORANGE  = "#f97316"   # specialized status (ASM)
+TEAL_CYAN   = "#06b6d4"   # specialized status / metrics / flags (PARTS)
+DEEP_PURPLE = "#7c3aed"   # group variants / system tags (Partner)
+
+# PHASE pills — Kernel palette, AA-safe tint badges.  KEY -> (bg, text, border)
 PHASE = {
-    "LSP":   ("#1d4ed8", WHITE),   # step 1 — blue
-    "ASM":   (PURPLE,    WHITE),   # step 2 — brand purple
-    "PARTS": ("#be185d", WHITE),   # step 3 — magenta (brand-gradient endpoint)
+    "LSP":   ("#dbeafe", "#1e40af", "#93c5fd"),   # Tech Blue — richer tint
+    "ASM":   ("#ffedd5", "#9a3412", "#fb923c"),   # Vibrant Orange — richer tint
+    "PARTS": ("#cffafe", "#0e7490", "#22d3ee"),   # Teal/Cyan — richer tint
 }
+# Partner / group-variant / system tag — Deep Purple, AA-safe tint.
+PARTNER = ("#f5f3ff", "#6d28d9", "#ddd6fe")
 
 # ───────────────────────────────────────────────────────────────────────────
 # 6. LSP STAGE chips — SOLID fill + white text (kept distinct from statuses by

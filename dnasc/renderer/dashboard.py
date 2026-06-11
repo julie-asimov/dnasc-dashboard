@@ -529,23 +529,28 @@ def render_all_projects_dashboard(
     }
     /* BASE */
     * { -webkit-font-smoothing: antialiased; box-sizing: border-box; }
-    body { background: #e8e8ed; padding: 6px; margin: 0; }
-    .dashboard-container { max-width: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 11px; }
+    body { background: #e9ecf2; padding: 10px; margin: 0; }
+    .dashboard-container { max-width: 100%; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 11px; line-height: 1.45; color: #1d1d1f; letter-spacing: 0.05px; }
 
     /* LOGO HEADER */
-    .dashboard-header { display: flex; align-items: center; padding: 8px 12px; background: white; border-bottom: 1px solid #e5e5e7; gap: 12px; border-radius: 5px 5px 0 0; }
+    .dashboard-header { display: flex; align-items: center; padding: 8px 12px; background: white; border-bottom: 1px solid #ececf1; gap: 12px; border-radius: 5px 5px 0 0; }
     .dashboard-logo { height: 32px; width: auto; }
     .dashboard-title { font-size: 13px; font-weight: 800; color: #1d1d1f; }
-    .dashboard-updated { font-size: 10px; color: #8e8e93; margin-left: auto; }
+    .dashboard-updated { margin-left: auto; display: inline-flex; align-items: baseline; gap: 5px;
+        background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 3px 10px;
+        font-size: 10px; font-weight: 600; color: #1e40af; letter-spacing: .02em; }
+    .dashboard-updated .du-label { color: #60a5fa; text-transform: uppercase; font-size: 9px; letter-spacing: .06em; }
+    .dashboard-updated .du-time { font-size: 12px; font-weight: 700; color: #1d4ed8; }
     .tab-icon-img { height: 36px; width: 36px; border-radius: 6px; }
 
     /* TABS */
     .tab-container { margin-bottom: 0; }
-    .tab-nav { display: flex; gap: 0; border-bottom: none; background: linear-gradient(135deg, #7c3aed 0%, #be185d 100%); border-radius: 0; overflow: hidden; }
-    .tab-btn { padding: 10px 16px; font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.9); background: transparent; border: none; cursor: pointer; border-right: 1px solid rgba(255,255,255,0.2); display: flex; align-items: center; gap: 6px; }
+    /* Kernel nav track: white, text tabs, blue active underline, hairline under it. */
+    .tab-nav { display: flex; gap: 4px; background: #fff; border-bottom: 1px solid #e5e7eb; border-radius: 0; padding: 0 8px; }
+    .tab-btn { padding: 11px 14px; font-size: 13px; font-weight: 600; color: #6b7280; background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer; display: flex; align-items: center; gap: 6px; margin-bottom: -1px; }
     .tab-btn:last-child { border-right: none; }
-    .tab-btn:hover { background: rgba(255,255,255,0.1); }
-    .tab-btn.active { background: rgba(255,255,255,0.2); border-bottom: 3px solid #fff; }
+    .tab-btn:hover { color: #374151; }
+    .tab-btn.active { color: #1d4ed8; border-bottom: 2px solid #2563eb; background: transparent; }
     /* Hide inactive tabs with visibility (not display:none) so their render tree
        and computed layout are retained. Switching back to a large tab (Tracking)
        becomes a repaint instead of a full render-tree rebuild + style recalc +
@@ -554,48 +559,53 @@ def render_all_projects_dashboard(
     .tab-content { position: absolute; visibility: hidden; }
     .tab-content.active { position: static; visibility: visible; }
     .tab-icon-img { height: 24px; width: 24px; border-radius: 4px; }
-    .tab-btn .tab-text { display: none; }
-    .tab-btn:hover .tab-text { display: inline; }
+    /* Kernel text tabs: hide the leading icon (img or emoji), show the text label. */
+    .tab-btn > :first-child { display: none; }
+    .tab-btn .tab-text { display: inline; }
 
     /* UNDER CONSTRUCTION */
     .under-construction { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 20px; text-align: center; }
     .uc-icon { font-size: 40px; margin-bottom: 10px; }
     .uc-title { font-size: 18px; font-weight: 800; color: #1d1d1f; margin-bottom: 5px; }
     .uc-subtitle { font-size: 11px; color: #86868b; max-width: 300px; line-height: 1.4; }
-    .uc-badge { background: linear-gradient(135deg, #7c3aed, #be185d); color: white; padding: 4px 10px; border-radius: 10px; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-top: 10px; }
+    .uc-badge { background: #eff4ff; color: #1d4ed8; border: 1px solid #bcd0fb; padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 600; margin-top: 10px; }
 
     /* CONTROLS */
-    .controls-container { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: #f5f5f7; border-bottom: 1px solid #d1d1d6; }
+    .controls-container { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: #f5f5f7; border-bottom: 1px solid #e4e4ea; }
     .toggle-wrapper { display: flex; align-items: center; gap: 5px; }
     .toggle-label { font-size: 10px; font-weight: 600; color: #86868b; white-space: nowrap; }
     .switch { position: relative; display: inline-block; width: 28px; height: 16px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #d1d1d6; border-radius: 16px; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #e4e4ea; border-radius: 16px; }
     .slider:before { position: absolute; content: ""; height: 12px; width: 12px; left: 2px; bottom: 2px; background-color: white; border-radius: 50%; }
-    input:checked + .slider { background: linear-gradient(135deg, #7c3aed, #be185d); }
+    input:checked + .slider { background: #2563eb; }
     input:checked + .slider:before { left: 14px; }
 
-    /* PROJECT WRAPPER */
-    .project-wrapper { margin-bottom: 6px; border-bottom: 1px solid #d1d1d6; padding-bottom: 6px; }
-    .header-banner { color: white; padding: 6px 8px; border-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.1); margin-bottom: 4px; cursor: pointer; }
-    .header-banner:hover { opacity: 0.95; }
-    .header-title { font-size: 12px; font-weight: 700; white-space: nowrap; }
-    .header-main-stat { font-size: 10px; font-weight: 700; background: rgba(255,255,255,0.2); padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
-    .stat-item { background: rgba(255,255,255,0.2); padding: 1px 4px; border-radius: 2px; font-size: 8px; font-weight: 600; white-space: nowrap; }
-    .stat-label { font-weight: 800; color: rgba(255,255,255,0.9); margin-right: 2px; font-size: 9px; }
+    /* PROJECT WRAPPER — rigid, bounded horizontal lanes (engineering grid). */
+    .project-wrapper { margin: 0 0 12px 0; padding: 12px 14px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 1px 3px rgba(15,23,42,0.06); }
+    .header-banner { color: #0f172a; border: none; border-radius: 8px; box-shadow: none; margin-bottom: 4px; cursor: pointer; }
+    .header-banner:hover { filter: brightness(0.98); }
+    .header-title { font-size: 14px; font-weight: 700; color: #0f172a; white-space: nowrap; padding-right: 16px; }
+    /* Kernel metadata pill (shared with inflight tab) */
+    .kpill { display:inline-flex; align-items:center; gap:5px; background:#f3f4f6; border:1px solid #e5e7eb; border-radius:6px; padding:3px 9px; font-size:11px; color:#1f2937; font-weight:500; white-space:nowrap; }
+    .kpill .kk { color:#6b7280; font-weight:500; }
+    .kpill b { font-weight:700; color:#1e2937; }
+    .header-main-stat { font-size: 10px; font-weight: 700; color: #374151; background: #f3f4f6; border: 1px solid #e5e7eb; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+    .stat-item { background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb; padding: 2px 7px; border-radius: 6px; font-size: 8px; font-weight: 600; white-space: nowrap; }
+    .stat-label { font-weight: 800; color: #111827; margin-right: 3px; font-size: 9px; }
 
     /* REQUEST CARDS */
-    .req-card { border: 1px solid #d1d1d6; background: white; margin-top: 3px; border-radius: 3px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-    .req-title-bar { padding: 3px 6px; border-bottom: 1px solid #e5e5e7; display: flex; justify-content: space-between; align-items: center; border-left-width: 3px; border-left-style: solid; gap: 4px; min-height: 20px; }
+    .req-card { border: 1px solid #e9e9ef; background: #fdfdfd; margin-top: 4px; border-radius: 7px; box-shadow: 0 1px 3px rgba(20,20,40,0.05); }
+    .req-title-bar { padding: 3px 6px; border-bottom: 1px solid #ececf1; display: flex; justify-content: space-between; align-items: center; border-left-width: 3px; border-left-style: solid; gap: 4px; min-height: 20px; }
     .req-name { font-size: 10px; font-weight: 700; color: #1d1d1f; white-space: nowrap; }
     .req-meta { font-size: 7px; color: #86868b; margin-top: 0px; }
 
     /* ASSEMBLY SECTIONS */
-    .assembly-section { margin: 3px 6px; border: 1px solid #e5e5e7; border-radius: 3px; }
+    .assembly-section { margin: 5px 6px; border: 1px solid #ececf1; border-radius: 6px; overflow: hidden; }
     .assembly-section.dimmed { opacity: 0.5; }
-    .dropdown-btn { width: 100%; background: #fafafa; border: none; padding: 3px 6px; text-align: left; cursor: pointer; display: flex; align-items: center; font-size: 9px; }
-    .dropdown-btn:hover { background: #f0f0f2; }
-    .dropdown-btn.active-header { background: #e5e5e7; }
+    .dropdown-btn { width: 100%; background: #f7f7fa; border: none; padding: 5px 8px; text-align: left; cursor: pointer; display: flex; align-items: center; font-size: 9px; }
+    .dropdown-btn:hover { background: #f0f0f5; }
+    .dropdown-btn.active-header { background: #ececf1; }
     .dropdown-icon { color: #86868b; margin-right: 5px; font-size: 8px; }
     .dropdown-icon.open { transform: rotate(90deg); }
     .assembly-info { flex-grow: 1; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
@@ -617,15 +627,16 @@ def render_all_projects_dashboard(
     /* TABLE */
     .content-pane { display: none; padding: 0; background: #fff; }
     .wo-table { width: 100%; border-collapse: collapse; font-size: 9px !important; }
-    .wo-table th { text-align: left; color: #86868b; padding: 3px 5px; border-bottom: 1px solid #e5e5e7; font-size: 8px; font-weight: 700; background: #fafafa; text-transform: uppercase; white-space: nowrap; }
-    .wo-table td { padding: 3px 5px; border-bottom: 1px solid #f5f5f7; vertical-align: top; font-weight: 600; color: #1d1d1f; }
+    .wo-table th { text-align: left; color: #0f172a; padding: 5px 8px; border-bottom: 1px solid #cbd5e1; font-size: 8px; font-weight: 700; background: #f3f4f6; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+    .wo-table td { padding: 4px 8px; border-bottom: 1px solid #f3f3f6; vertical-align: top; font-weight: 600; color: #1d1d1f; line-height: 1.4; }
+    .wo-table tbody tr:hover { background: #f5f3ff; box-shadow: inset 2px 0 0 #7c3aed; }
     .wo-table .stock-tag { font-size: 8px; padding: 1px 3px; }
 
     /* TREE ROWS */
-    .tree-row-0 { border-left: 3px solid #d1d1d6 !important; background: #ffffff !important; }
-    .tree-row-1 { border-left: 3px solid #d1d1d6 !important; background: #f9f9fb !important; }
-    .tree-row-2 { border-left: 3px solid #d1d1d6 !important; background: #f4f4f6 !important; }
-    .tree-line-icon { color: #d1d1d6; margin-right: 2px; font-family: monospace; font-size: 9px; }
+    .tree-row-0 { border-left: 3px solid #e4e4ea !important; background: #ffffff !important; }
+    .tree-row-1 { border-left: 3px solid #e4e4ea !important; background: #f9f9fb !important; }
+    .tree-row-2 { border-left: 3px solid #e4e4ea !important; background: #f4f4f6 !important; }
+    .tree-line-icon { color: #e4e4ea; margin-right: 2px; font-family: monospace; font-size: 9px; }
     .source-badge { font-size: 7px; padding: 0px 2px; border-radius: 2px; background: #f0f0f2; color: #86868b; margin-left: 2px; }
 
     /* Hoisted high-frequency styles (was ~16MB of repeated inline style="" attrs) */
@@ -646,30 +657,30 @@ def render_all_projects_dashboard(
 
     /* TIMELINE */
     .timeline-container { position: relative; padding-left: 2px; }
-    .timeline-row { display: flex; align-items: flex-start; margin-bottom: 2px; position: relative; min-height: 14px; }
-    .timeline-row:not(:last-child):after { content: ''; position: absolute; left: 2px; top: 8px; bottom: -4px; width: 1px; background: #e5e5e7; z-index: 1; }
-    .t-dot { width: 5px; height: 5px; border-radius: 50%; margin-top: 3px; margin-right: 4px; flex-shrink: 0; z-index: 2; }
+    .timeline-row { display: flex; align-items: flex-start; margin-bottom: 1px; position: relative; min-height: 11px; }
+    .timeline-row:not(:last-child):after { content: ''; position: absolute; left: 2px; top: 6px; bottom: -3px; width: 1px; background: #ececf1; z-index: 1; }
+    .t-dot { width: 5px; height: 5px; border-radius: 50%; margin-top: 2px; margin-right: 4px; flex-shrink: 0; z-index: 2; }
     /*__TDOT_CSS__*/
     .t-content { flex-grow: 1; font-size: 8px; }
     .t-header { display: flex; justify-content: space-between; align-items: center; }
     .t-name { font-weight: 700; color: #1d1d1f; white-space: nowrap; font-size: 9px; }
     .t-time { font-family: monospace; color: #86868b; font-size: 8px; white-space: nowrap; }
     .t-details { font-size: 7px; color: #86868b; margin-top: 0px; display: flex; flex-wrap: wrap; gap: 2px; }
-    .t-pill { background: #f0f0f2; color: #86868b; border: 1px solid #d1d1d6; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; text-decoration: none; }
-    .t-pill:hover { background: #e5e5e7; }
+    .t-pill { background: #f0f0f2; color: #86868b; border: 1px solid #e4e4ea; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; text-decoration: none; }
+    .t-pill:hover { background: #ececf1; }
 
     /* PLATE HOVER */
     .plate-hover-container { position: relative; display: inline-block; }
-    .plate-trigger { cursor: pointer; background: #f0f0f2; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 7px; border: 1px solid #d1d1d6; text-decoration: none; }
-    .plate-trigger:hover { background: #e5e5e7; }
-    .plate-popover { display: none; position: absolute; top: 100%; left: 0; background: white; border: 1px solid #d1d1d6; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 4px 6px; border-radius: 3px; z-index: 9999; min-width: 150px; margin-top: 2px; }
+    .plate-trigger { cursor: pointer; background: #f0f0f2; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 7px; border: 1px solid #e4e4ea; text-decoration: none; }
+    .plate-trigger:hover { background: #ececf1; }
+    .plate-popover { display: none; position: absolute; top: 100%; left: 0; background: white; border: 1px solid #e4e4ea; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 4px 6px; border-radius: 3px; z-index: 9999; min-width: 150px; margin-top: 2px; }
     .plate-hover-container:hover .plate-popover { display: block; }
     .popover-title { font-weight: 700; font-size: 7px; color: #86868b; text-transform: uppercase; margin-bottom: 2px; font-family: monospace; }
     .popover-link { font-size: 7px; color: #86868b; text-decoration: none; padding: 0px 2px; font-family: monospace; }
     .popover-link:hover { text-decoration: underline; }
 
     /* PART TAGS */
-    .part-tag { background: #f0f0f2; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; margin-right: 2px; border: 1px solid #e5e5e7; }
+    .part-tag { background: #f0f0f2; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; margin-right: 2px; border: 1px solid #ececf1; }
     .part-tag.in-production { background: #fffbeb; color: #d97706; border: 1px dashed #fcd34d; }
     .part-tag.missing { background: #fdf2f8; color: #be185d; border: 1px solid #f9a8d4; font-weight: 700; cursor: default; }
     .ci-wrap { position: relative; display: inline-block; cursor: pointer; }
@@ -702,12 +713,12 @@ def render_all_projects_dashboard(
     .tat-cell { font-family: monospace; color: #86868b; font-size: 8px; white-space: nowrap; }
 
     /* GROUP HEADERS */
-    .group-header { padding: 5px 8px; font-size: 10px; font-weight: 700; background: #f0f0f2; color: #1d1d1f; border: 1px solid #d1d1d6; cursor: pointer; display: flex; align-items: center; border-radius: 3px; margin: 6px 0 3px 0; }
-    .group-header:hover { background: #e5e5e7; }
-    .group-header.in-progress { background: linear-gradient(135deg, #fdf4ff, #fef3c7); border-color: #d946ef; color: #a21caf; }
-    .group-header.new { background: linear-gradient(135deg, #f5f3ff, #ede9fe); border-color: #7c3aed; color: #6d28d9; }
-    .group-header.fulfilled { background: linear-gradient(135deg, #ecfdf5, #d1fae5); border-color: #10b981; color: #059669; }
-    .group-header.canceled { background: linear-gradient(135deg, #f5f5f7, #e5e5e7); border-color: #9ca3af; color: #6b7280; }
+    .group-header { padding: 5px 8px; font-size: 10px; font-weight: 700; background: #f0f0f2; color: #1d1d1f; border: 1px solid #e4e4ea; cursor: pointer; display: flex; align-items: center; border-radius: 3px; margin: 6px 0 3px 0; }
+    .group-header:hover { background: #ececf1; }
+    .group-header.in-progress { background: #f9fafb; border-color: #e5e7eb; border-left: 3px solid #2563eb; color: #374151; }
+    .group-header.new { background: #f9fafb; border-color: #e5e7eb; border-left: 3px solid #7c3aed; color: #374151; }
+    .group-header.fulfilled { background: #f9fafb; border-color: #e5e7eb; border-left: 3px solid #16a34a; color: #374151; }
+    .group-header.canceled { background: #f9fafb; border-color: #e5e7eb; border-left: 3px solid #9ca3af; color: #374151; }
     .group-arrow { margin-right: 5px; font-size: 8px; }
     details[open] .group-arrow { transform: rotate(90deg); }
     details > summary { list-style: none; }
@@ -717,7 +728,7 @@ def render_all_projects_dashboard(
 
     /* WARNING & SEARCH */
     .warning-note { background: #fdf2f8; border: 1px solid #f9a8d4; color: #be185d; padding: 2px 5px; margin: 3px 6px; border-radius: 2px; font-weight: 600; font-size: 8px; }
-    #search_box { width: 280px; padding: 4px 8px; border: 1px solid #d1d1d6; border-radius: 4px; font-size: 10px; background: white; }
+    #search_box { width: 280px; padding: 4px 8px; border: 1px solid #e4e4ea; border-radius: 4px; font-size: 10px; background: white; }
     #search_box:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.1); }
     .search-match td { background: #fef9c3 !important; }
     .search-match-section { outline: 2px solid #f59e0b !important; outline-offset: 1px; border-radius: 3px; }
@@ -788,7 +799,7 @@ def render_all_projects_dashboard(
             _sortedByDue = false;
             document.getElementById('sort_due_btn').textContent = 'Sort: Due Date';
             document.getElementById('sort_due_btn').style.background = '#fff';
-            document.getElementById('sort_due_btn').style.borderColor = '#d1d1d6';
+            document.getElementById('sort_due_btn').style.borderColor = '#e4e4ea';
             document.getElementById('sort_due_btn').style.color = '#1d1d1f';
         }
     }
@@ -1020,7 +1031,7 @@ def render_all_projects_dashboard(
         var inp = _buildListSection('Input to', inpRows);
         var closeBtn = document.createElement('div');
         closeBtn.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;';
-        closeBtn.innerHTML = '<span style="font-size:11px;font-weight:700;color:#1e293b;">Search Results</span>';
+        closeBtn.innerHTML = '<span style="font-size:10px;font-weight:700;color:#1e293b;">Search Results</span>';
         var xBtn = document.createElement('button');
         xBtn.textContent = '×';
         xBtn.style.cssText = 'background:none;border:none;font-size:14px;cursor:pointer;color:#64748b;line-height:1;';
@@ -1111,7 +1122,7 @@ def render_all_projects_dashboard(
         <div class="dashboard-header">
             <img src="data:image/png;base64,{logo_b64}" class="dashboard-logo" alt="DNASC">
             <span class="dashboard-title">DNA Strain & Construction</span>
-            <span class="dashboard-updated">Data pulled: {generated_at}</span>
+            <span class="dashboard-updated"><span class="du-label">Data pulled</span><span class="du-time">{generated_at}</span></span>
         </div>
         <!-- TAB NAVIGATION -->
         <div class="tab-container">
@@ -1145,10 +1156,10 @@ def render_all_projects_dashboard(
                         <input type="text" id="search_box" placeholder="Search Stock ID, Experiment, or Construct..." oninput="filterDashboardDebounced()">
                         <span id="search_count" style="font-size:10px;color:#64748b;white-space:nowrap;display:none;padding-left:2px;"></span>
                         <div style="display:flex;gap:4px;align-items:center;">
-                            <button id="search_download" onclick="downloadSearchCSV()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #d1d1d6;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#8595; CSV</button>
-                            <button id="search_list_btn" onclick="toggleSearchList()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #d1d1d6;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#9776; List</button>
+                            <button id="search_download" onclick="downloadSearchCSV()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #e4e4ea;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#8595; CSV</button>
+                            <button id="search_list_btn" onclick="toggleSearchList()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #e4e4ea;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#9776; List</button>
                         </div>
-                        <div id="search_list_popup" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #d1d1d6;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:10px 12px;z-index:999;min-width:700px;max-width:90vw;max-height:60vh;overflow-y:auto;font-family:inherit;"></div>
+                        <div id="search_list_popup" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #e4e4ea;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:10px 12px;z-index:999;min-width:700px;max-width:90vw;max-height:60vh;overflow-y:auto;font-family:inherit;"></div>
                     </div>
                     <div class="toggle-wrapper">
                         <span class="toggle-label">Active Projects Only</span>
@@ -1158,10 +1169,11 @@ def render_all_projects_dashboard(
                         </label>
                     </div>
                     <div class="toggle-wrapper">
-                        <button id="sort_due_btn" onclick="sortByDueDate()" style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:4px;border:1px solid #d1d1d6;background:#fff;color:#1d1d1f;cursor:pointer;white-space:nowrap;">Sort: Due Date</button>
+                        <button id="sort_due_btn" onclick="sortByDueDate()" style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:4px;border:1px solid #e4e4ea;background:#fff;color:#1d1d1f;cursor:pointer;white-space:nowrap;">Sort: Due Date</button>
                     </div>
                 </div>
                 <div id="projects-container" style="padding: 10px; display: flex; flex-direction: column;">
+                  <div style="display:flex; gap:16px; align-items:center; justify-content:center; flex-wrap:wrap; padding:9px 14px; margin:0 0 12px 0; background:#fff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 1px 3px rgba(15,23,42,0.06); font-size:10px; font-weight:600; color:#374151;"><span style="color:#6b7280;">IN PROGRESS:</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#0891b2;border-radius:50%;"></span>On Track</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#f97316;border-radius:50%;"></span>Warning</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#be185d;border-radius:50%;"></span>Overdue</span><span style="width:1px;height:12px;background:#cbd5e1;"></span><span style="color:#6b7280;">FULFILLED:</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#0891b2;border-radius:2px;transform:rotate(45deg);"></span>On Time</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#be185d;border-radius:2px;transform:rotate(45deg);"></span>Late</span><span style="width:1px;height:12px;background:#cbd5e1;"></span><span style="display:flex;align-items:center;gap:5px;"><span style="width:16px;height:9px;border-radius:3px;background:linear-gradient(90deg,#7461b8,#a05f8a);"></span>Partner</span><span style="display:flex;align-items:center;gap:5px;"><span style="width:16px;height:9px;border-radius:3px;background:linear-gradient(90deg,#3a5c7a,#3d8aa2);"></span>R&amp;D</span></div>
     """
 
     # =========================================================================
@@ -1217,7 +1229,7 @@ def render_all_projects_dashboard(
                 return f"<span class='stock-tag' style='font-size:9px; padding:3px 8px; vertical-align:middle; background:#ede9fe; color:#6d28d9; border: 1px solid #c4b5fd;'>{pid}</span>"
             return f"<span class='stock-tag' style='font-size:9px; padding:3px 8px; vertical-align:middle; background:#ddd6fe; color:#4c1d95; border: 1px solid #7c3aed;'>{pid}</span>"
         pais_display = " ".join([_pai_tag(pid, i == 0) for i, pid in enumerate(final_list)])
-        partner_badge = '<span class="badge" style="background:#ede9fe;color:#7c3aed;margin-right:8px;border:1px solid #c4b5fd;">PARTNER</span>' if is_partner_req else ""
+        partner_badge = '<span class="badge" style="background:#ede9fe;color:#7c3aed;margin-left:12px;margin-right:8px;border:1px solid #c4b5fd;">PARTNER</span>' if is_partner_req else ""
 
         # Customer badge — green R&D + leading dot (shape cue), canonical geometry
         # (mixed-case, no .badge class). Sourced from renderer/tokens.py.
@@ -1227,7 +1239,7 @@ def render_all_projects_dashboard(
         _cust_raw = str(req_df['customer'].iloc[0]) if 'customer' in req_df.columns and pd.notna(req_df['customer'].iloc[0]) else None
         if _cust_raw and _cust_raw not in ('nan', 'None', ''):
             _clabel, _cbg, _cfg = tok.CUSTOMER.get(_cust_raw, (_cust_raw.replace('_', ' '),) + tok.CUSTOMER_FALLBACK[1:])
-            customer_badge = f'<span style="{_cust_geom}background:{_cbg};color:{_cfg};">{tok.CUSTOMER_DOT} {_clabel}</span>'
+            customer_badge = f'<span style="{_cust_geom}background:{_cbg};color:{_cfg};">{tok.CUSTOMER_DOT}{_clabel}</span>'
         else:
             customer_badge = ""
 
@@ -1249,14 +1261,14 @@ def render_all_projects_dashboard(
                 req_df['type'].isin(_asm_types_set) & (req_df['visual_status'] == 'WAITING')
             ].empty
 
-            # Phase pills — brand sweep (LSP=blue, ASM=purple, PARTS=magenta),
-            # solid fill + white text, 9px. Sourced from renderer/tokens.py.
-            phase_bg, phase_color = tok.PHASE.get(phase_label, ('#f5f5f7', '#6b7280'))
+            # Phase pills — Kernel palette (LSP=blue, ASM=orange, PARTS=teal),
+            # AA-safe tint + accent border, 9px. Sourced from renderer/tokens.py.
+            phase_bg, phase_color, phase_border = tok.PHASE.get(phase_label, ('#f5f5f7', '#6b7280', '#e5e7eb'))
             _pg = tok.GEOM['phase']
 
             phase_html = f'''
                 <span style="
-                    background: {phase_bg}; color: {phase_color};
+                    background: {phase_bg}; color: {phase_color}; border: 1px solid {phase_border};
                     padding: {_pg['pad']}; border-radius: {_pg['radius']};
                     margin-left: 6px; font-weight: {_pg['weight']}; font-size: {_pg['size']};
                     text-transform: uppercase;
@@ -1375,7 +1387,7 @@ def render_all_projects_dashboard(
         """)
 
         html.append(f"""
-        <div style="padding: 3px 6px; background: #fafafa; border-bottom: 1px solid #e5e5e7; cursor: pointer;" onclick="toggleSection('req_{req_id.replace("-", "_")}')">
+        <div style="padding: 3px 6px; background: #fafafa; border-bottom: 1px solid #ececf1; cursor: pointer;" onclick="toggleSection('req_{req_id.replace("-", "_")}')">
             <span id="req_{req_id.replace("-", "_")}_icon" class="dropdown-icon">▶</span>
             <span style="font-size: 9px; font-weight: 600; color: #86868b;">Workorder Details</span>
         </div>
@@ -1902,13 +1914,13 @@ def render_all_projects_dashboard(
             if target_row['type'] == 'lsp_workorder':
                 if active_info:
                     if 'Ready' in active_info and status == 'RUNNING': status = 'READY'
-                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:3px; color:#059669; text-align:center;'>{active_info}</div>"
+                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:50%; color:#059669; text-align:center;'>{active_info}</div>"
                 s_class = f"status-LSP_{status}" if status == 'RUNNING' else f"status-{status}"
             else:
                 if active_info:
                     if 'Ready' in active_info and status == 'RUNNING': status = 'READY'
                     _ei_color = '#ea580c' if target_row['type'] in _parts_types_set else '#2563eb'
-                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:3px; color:{_ei_color}; text-align:center;'>{active_info}</div>"
+                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:50%; color:{_ei_color}; text-align:center;'>{active_info}</div>"
                 s_class = f"status-{status}"
             badges_html += f'<div style="text-align:right"><span class="badge {s_class}"><b>{f_type}: {status}</b></span>{header_extra_info}</div>'
             if 'antibiotic_mismatch' in root_df.columns:
@@ -2573,7 +2585,7 @@ def render_all_projects_dashboard(
                         _wc = row.get('well_comments')
                         _wc_clean = str(_wc).strip().strip(';').strip() if _wc is not None and not (isinstance(_wc, float) and pd.isna(_wc)) else ''
                         if _wc_clean and _wc_clean not in ('nan', 'None', '{;}'):
-                            details_info.append(f"<div style='font-size:10px;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;margin-top:3px;'>&#9888; {_wc_clean}</div>")
+                            details_info.append(f"<div style='font-size:10px;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;margin-top:26px;'>&#9888; {_wc_clean}</div>")
 
                 elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation']:
                     strain = row.get('cloning_strain')
@@ -2603,7 +2615,7 @@ def render_all_projects_dashboard(
                     if any(pd.notna(v) for v in [_imaged, _pickable, _picked]):
                         # Colony counts (plain, no link wrapping)
                         _grid = (
-                            f"<div style='display:grid;grid-template-columns:58px 1fr;gap:1px 4px;margin-top:3px;'>"
+                            f"<div style='display:grid;grid-template-columns:58px 1fr;gap:0 4px;margin-top:2px;'>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Imaged</span><span style='font-size:10px;color:#1e293b;'>{int(_imaged)}</span>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Pickable</span><span style='font-size:10px;color:#1e293b;'>{int(_pickable) if pd.notna(_pickable) else 0}</span>"
                             f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;'>Picked</span><span style='font-size:10px;color:#1e293b;'>{int(_picked) if pd.notna(_picked) else 0}</span>"
@@ -2636,7 +2648,7 @@ def render_all_projects_dashboard(
                                 pass
                             _well_label = f' · {_well_alpha}' if _well_alpha else ''
                             details_info.append(
-                                f"<div style='margin-top:4px;margin-bottom:4px;'>"
+                                f"<div style='margin-top:2px;margin-bottom:2px;'>"
                                 f"<span style='font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-right:4px;'>Agar</span>"
                                 f"<a href='{_plate_url}' target='_blank' "
                                 f"style='font-size:9px;font-family:monospace;"
@@ -2786,9 +2798,9 @@ def render_all_projects_dashboard(
                     f'</div>'
                 )
             return f'''<div style="padding:10px 14px 8px 14px;">
-                <div style="font-size:9px;color:rgba(255,255,255,0.45);margin-bottom:8px;font-family:monospace;">{f_total} fulfilled — production TAT distribution</div>
+                <div style="font-size:9px;color:#9ca3af;margin-bottom:8px;font-family:monospace;">{f_total} fulfilled — production TAT distribution</div>
                 <div style="display:flex;border-radius:4px;overflow:hidden;gap:1px;">{segs}</div>
-                <div style="font-size:8px;color:rgba(255,255,255,0.35);margin-top:6px;">weeks from request creation to LSP ready-to-ship</div>
+                <div style="font-size:8px;color:#9ca3af;margin-top:6px;">weeks from request creation to LSP ready-to-ship</div>
             </div>'''
 
         max_c = max((sum(wc.values()) for wc in stage_counts.values()), default=1)
@@ -2796,9 +2808,9 @@ def render_all_projects_dashboard(
         for stage_key, _ in _BUCKET_STAGES:
             wc  = stage_counts.get(stage_key, {})
             cnt = sum(wc.values())
-            label_style = "color:rgba(255,255,255,0.8);font-weight:600;" if cnt > 0 else "color:rgba(255,255,255,0.3);font-weight:400;"
+            label_style = "color:#374151;font-weight:600;" if cnt > 0 else "color:#9ca3af;font-weight:400;"
             if cnt == 0:
-                bar_html = '<div style="flex:1;height:20px;background:rgba(255,255,255,0.07);border-radius:3px;border:1px dashed rgba(255,255,255,0.15);"></div>'
+                bar_html = '<div style="flex:1;height:20px;background:#f3f4f6;border-radius:3px;border:1px dashed #e5e7eb;"></div>'
             else:
                 bar_total_w = max(20, int((cnt / max_c) * 200))
                 segs = ''
@@ -2827,21 +2839,21 @@ def render_all_projects_dashboard(
                         f'</div>'
                     )
                 bar_html = f'<div style="display:flex;border-radius:3px;overflow:hidden;gap:1px;">{segs}</div>'
-            count_html = f'<span style="font-size:10px;color:white;font-weight:700;font-family:monospace;margin-left:4px;">{cnt}</span>' if cnt > 0 else ''
+            count_html = f'<span style="font-size:10px;color:#374151;font-weight:700;font-family:monospace;margin-left:4px;">{cnt}</span>' if cnt > 0 else ''
             rows += f'''<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
                 <div style="width:88px;font-size:9px;{label_style}text-align:right;white-space:nowrap;font-family:monospace;">{stage_key}</div>
                 <div style="flex:1;display:flex;align-items:center;">{bar_html}{count_html}</div>
             </div>'''
         total_str = f'{total} active request{"s" if total != 1 else ""}' if total > 0 else 'No active requests'
         _mid_blue = _BLUE_RAMP[len(_BLUE_RAMP) // 2]
-        legend = f'''<div style="display:flex;gap:12px;margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.1);">
-            <span style="font-size:8px;color:rgba(255,255,255,0.5);display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_BLUE_RAMP[0]};border:1px solid rgba(255,255,255,0.25);border-radius:2px;display:inline-block;"></span>Newer</span>
-            <span style="font-size:8px;color:rgba(255,255,255,0.5);display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_mid_blue};border-radius:2px;display:inline-block;"></span>On Track</span>
-            <span style="font-size:8px;color:rgba(255,255,255,0.5);display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_WARN_COLOR};border-radius:2px;display:inline-block;"></span>Warning</span>
-            <span style="font-size:8px;color:rgba(255,255,255,0.5);display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_OVER_COLOR};border-radius:2px;display:inline-block;"></span>Overdue</span>
+        legend = f'''<div style="display:flex;gap:12px;margin-top:8px;padding-top:6px;border-top:1px solid #e5e7eb;">
+            <span style="font-size:8px;color:#6b7280;display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_BLUE_RAMP[0]};border:1px solid rgba(255,255,255,0.25);border-radius:2px;display:inline-block;"></span>Newer</span>
+            <span style="font-size:8px;color:#6b7280;display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_mid_blue};border-radius:2px;display:inline-block;"></span>On Track</span>
+            <span style="font-size:8px;color:#6b7280;display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_WARN_COLOR};border-radius:2px;display:inline-block;"></span>Warning</span>
+            <span style="font-size:8px;color:#6b7280;display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;background:{_OVER_COLOR};border-radius:2px;display:inline-block;"></span>Overdue</span>
         </div>'''
         return f'''<div style="padding:10px 14px 8px 14px;">
-            <div style="font-size:9px;color:rgba(255,255,255,0.45);margin-bottom:8px;font-family:monospace;">{total_str}</div>
+            <div style="font-size:9px;color:#9ca3af;margin-bottom:8px;font-family:monospace;">{total_str}</div>
             {rows}{legend}
         </div>'''
 
@@ -2917,6 +2929,16 @@ def render_all_projects_dashboard(
         _root_only = project_df[project_df['workorder_id'] == project_df['root_work_order_id']]
         _ptr_source = _root_only if not _root_only.empty else project_df
         has_ptr = _ptr_source['for_partner'].astype(str).str.lower().str.contains('true').any()
+        _card_accent = "#7461b8" if has_ptr else "#3a5c7a"  # matches the muted gradient's start tone
+        # Partner vs R&D run badge — appended right after the design title.
+        if has_ptr:
+            _run_badge = ('<span style="margin-left:12px;background:#f5f3ff;color:#7c3aed;'
+                          'border:1px solid #ddd6fe;font-weight:600;font-size:10px;padding:2px 8px;'
+                          'border-radius:5px;white-space:nowrap;">Partner</span>')
+        else:
+            _run_badge = ('<span style="margin-left:12px;background:#eff6ff;color:#1e40af;'
+                          'border:1px solid #bfdbfe;font-weight:600;font-size:10px;padding:2px 8px;'
+                          'border-radius:5px;white-space:nowrap;">R&amp;D</span>')
         # Customer tags (experiment header) — token colors + leading dot, mixed-case.
         _ecg = tok.GEOM['customer']
         _ec_geom = (f"display:inline-block;font-size:{_ecg['size']};font-weight:{_ecg['weight']};"
@@ -2934,7 +2956,7 @@ def render_all_projects_dashboard(
                     _cl, _cbg, _cfg = tok.CUSTOMER.get(_cv, (_cv.replace('_', ' '),) + tok.CUSTOMER_FALLBACK[1:])
                     _exp_customers.append((_cv, _cl, _cbg, _cfg))
         exp_customer_tags = " ".join(
-            f'<span style="{_ec_geom}background:{bg};color:{fg};">{tok.CUSTOMER_DOT} {lbl}</span>'
+            f'<span style="{_ec_geom}background:{bg};color:{fg};border:1px solid {fg}55;">{tok.CUSTOMER_DOT}{lbl}</span>'
             for _, lbl, bg, fg in _exp_customers
         )
         dots_html = ""; stage_counts = {}; stage_items = {}; fulfilled_week_counts = {}
@@ -3081,10 +3103,10 @@ def render_all_projects_dashboard(
             tat_parts = []
             if production_tats:
                 avg_f = sum(production_tats) / len(production_tats); weeks, days = int(avg_f//7), int(avg_f%7)
-                tat_parts.append(f"<span style='background:rgba(255,255,255,0.2); color:white; padding:2px 6px; border-radius:3px; font-size:10px; white-space:nowrap;'>Avg Production: <span style='color:#67e8f9; font-weight:700;'>{weeks}w {days}d</span></span>")
+                tat_parts.append(f"<span class='kpill'><span class='kk'>Avg Production:</span><b style='color:#2563eb;'>{weeks}w {days}d</b></span>")
             if total_tats:
                 avg_t = sum(total_tats) / len(total_tats); weeks, days = int(avg_t//7), int(avg_t%7)
-                tat_parts.append(f"<span style='background:rgba(255,255,255,0.2); color:white; padding:2px 6px; border-radius:3px; font-size:10px; white-space:nowrap;'>Avg Total: <span style='color:#67e8f9; font-weight:700;'>{weeks}w {days}d</span></span>")
+                tat_parts.append(f"<span class='kpill'><span class='kk'>Avg Total:</span><b style='color:#2563eb;'>{weeks}w {days}d</b></span>")
             avg_tat_html = f'''<div style="display:flex; gap:10px; font-weight:700;">{" ".join(tat_parts)}</div>'''
 
         # ── Experiment creation date (needed for due date marker) ────────────
@@ -3176,25 +3198,25 @@ def render_all_projects_dashboard(
                                 # Range bar: ASM → due/gantt
                                 f'<div style="position:absolute;left:{_due_asm_pos:.2f}%;top:0;'
                                 f'width:{_range_width:.2f}%;height:100%;'
-                                f'background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.4);'
+                                f'background:rgba(124,58,237,0.07);border:1px solid #cbd5e1;'
                                 f'border-radius:3px;z-index:1;pointer-events:none;"></div>'
                                 # Vertical line
-                                f'<div style="position:absolute;left:{_due_pos:.2f}%;top:-3px;'
-                                f'width:4px;height:28px;background:white;border-radius:1px;'
-                                f'box-shadow:0 0 8px rgba(0,0,0,0.5);z-index:4;transform:translateX(-50%);pointer-events:none;"></div>'
+                                f'<div style="position:absolute;left:{_due_pos:.2f}%;top:0px;'
+                                f'width:4px;height:24px;background:#7c3aed;border-radius:1px;'
+                                f'box-shadow:0 0 6px rgba(124,58,237,0.45);z-index:4;transform:translateX(-50%);pointer-events:none;"></div>'
                                 # Hover wrapper + pill
-                                f'<div style="position:absolute;left:{_due_pos:.2f}%;top:25px;'
-                                f'width:90px;height:20px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
+                                f'<div style="position:absolute;left:{_due_pos:.2f}%;top:26px;'
+                                f'width:90px;height:16px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
                                 f' onmouseenter="document.getElementById(\'{_pop_id}\').style.display=\'block\'"'
                                 f' onmouseleave="document.getElementById(\'{_pop_id}\').style.display=\'none\'">'
                                 f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
-                                f'background:white;color:#1e1b4b;font-size:9px;font-weight:700;'
-                                f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
-                                f'box-shadow:0 1px 5px rgba(0,0,0,0.4);">{_pill_text}</div>'
+                                f'background:#f1f5f9;color:#6d28d9;font-size:10px;font-weight:700;'
+                                f'padding:2px 6px;border-radius:4px;white-space:nowrap;letter-spacing:0.02em;'
+                                f'line-height:1;box-shadow:0 1px 2px rgba(0,0,0,0.1);border:1px solid #7c3aed;">{_pill_text}</div>'
                                 # Popover
                                 f'<div id="{_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
                                 f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
-                                f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid rgba(255,255,255,0.3);">'
+                                f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #cbd5e1;">'
                                 f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Due Date</div>'
                                 f'<div style="display:grid;grid-template-columns:72px 1fr;gap:2px 8px;">'
                                 f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Last NGS</span>'
@@ -3244,23 +3266,23 @@ def render_all_projects_dashboard(
                     # White semi-transparent bracket: ASM → red threshold
                     f'<div style="position:absolute;left:{_def_asm_pos:.2f}%;top:0;'
                     f'width:{_def_width:.2f}%;height:100%;'
-                    f'background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.45);'
+                    f'background:rgba(124,58,237,0.07);border:1px solid #cbd5e1;'
                     f'border-radius:3px;z-index:1;pointer-events:none;"></div>'
                     + (
-                    # Light-purple vertical line at day-after-NGS
-                    f'<div style="position:absolute;left:{_def_due_pos:.2f}%;top:-3px;'
-                    f'width:4px;height:28px;background:#c4b5fd;border-radius:1px;'
-                    f'box-shadow:0 0 8px rgba(167,139,250,0.7);z-index:4;transform:translateX(-50%);pointer-events:none;"></div>'
+                    # Purple vertical line at day-after-NGS
+                    f'<div style="position:absolute;left:{_def_due_pos:.2f}%;top:0px;'
+                    f'width:4px;height:24px;background:#7c3aed;border-radius:1px;'
+                    f'box-shadow:0 0 6px rgba(124,58,237,0.45);z-index:4;transform:translateX(-50%);pointer-events:none;"></div>'
                     # Hover wrapper: pill + popover
-                    f'<div style="position:absolute;left:{_def_due_pos:.2f}%;top:25px;'
-                    f'width:80px;height:20px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
+                    f'<div style="position:absolute;left:{_def_due_pos:.2f}%;top:26px;'
+                    f'width:80px;height:16px;transform:translateX(-50%);z-index:25;cursor:pointer;"'
                     f' onmouseenter="document.getElementById(\'{_def_pop_id}\').style.display=\'block\'"'
                     f' onmouseleave="document.getElementById(\'{_def_pop_id}\').style.display=\'none\'">'
                     # Light-purple DUE pill
                     f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
-                    f'background:#7c3aed;color:white;font-size:9px;font-weight:700;'
-                    f'padding:2px 5px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
-                    f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid #c4b5fd;">'
+                    f'background:#f1f5f9;color:#6d28d9;font-size:10px;font-weight:700;'
+                    f'padding:2px 6px;border-radius:4px;white-space:nowrap;letter-spacing:0.02em;'
+                    f'line-height:1;box-shadow:0 1px 2px rgba(0,0,0,0.1);border:1px solid #7c3aed;">'
                     f'DUE {_def_due_str}</div>'
                     # Popover
                     f'<div id="{_def_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
@@ -3295,8 +3317,8 @@ def render_all_projects_dashboard(
             if not exp_created_dt or _is_refill:
                 return ""
             _left = f"{(week/8)*100}%"
-            return (f'<div style="position:absolute;left:{_left};width:2px;height:28px;background:{color};'
-                    f'top:-3px;border-radius:1px;box-shadow:0 0 6px {glow};z-index:2;"></div>')
+            return (f'<div style="position:absolute;left:{_left};width:2px;height:24px;background:{color};'
+                    f'top:0px;border-radius:1px;box-shadow:0 0 6px {glow};z-index:2;"></div>')
         _orange_html = _threshold_bar(orange_week, "#f97316", "rgba(249,115,22,0.6)")
         _red_html    = _threshold_bar(red_week,    "#be185d", "rgba(190,24,93,0.6)")
 
@@ -3307,9 +3329,9 @@ def render_all_projects_dashboard(
         _start_date_str = exp_created_dt.strftime("%a %-m/%-d") if exp_created_dt else ""
         _weeks_header_html = (
             f'<span style="{_bs}left:0;transform:translateX(0);text-align:left;">'
-            f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;'
-            f'text-shadow:0 1px 3px rgba(0,0,0,0.4);">START</span>'
-            + (f'<br><span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.9);">{_start_date_str}</span>' if _start_date_str else '')
+            f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);'
+            f'">START</span>'
+            + (f'<br><span style="font-size:11px;font-weight:500;color:rgba(255,255,255,0.95);text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_start_date_str}</span>' if _start_date_str else '')
             + f'</span>'
         )
         for _wh in range(1, 8):
@@ -3317,24 +3339,24 @@ def render_all_projects_dashboard(
             if exp_created_dt and not _is_refill:
                 _wh_date = (exp_created_dt + _td(weeks=_wh)).strftime("%a %-m/%-d")
                 if _wh == orange_week:
-                    _wh_num = f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">{_wh}w</span>'
+                    _wh_num = f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh}w</span>'
                     _wh_dt  = f'<span style="font-size:11px;font-weight:800;color:#f97316;">{_wh_date}</span>'
                 elif _wh == red_week:
-                    _wh_num = f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">{_wh}w</span>'
+                    _wh_num = f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh}w</span>'
                     _wh_dt  = f'<span style="font-size:11px;font-weight:800;color:#fb7185;">{_wh_date}</span>'
                 else:
-                    _wh_num = f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">{_wh}w</span>'
-                    _wh_dt  = f'<span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.9);">{_wh_date}</span>'
+                    _wh_num = f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh}w</span>'
+                    _wh_dt  = f'<span style="font-size:11px;font-weight:500;color:rgba(255,255,255,0.95);text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh_date}</span>'
                 _wh_txt = f'{_wh_num}<br>{_wh_dt}'
             else:
-                _wh_txt = f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;">{_wh}w</span>'
+                _wh_txt = f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh}w</span>'
             _weeks_header_html += f'<span style="{_bs}left:{_wh_pct:.2f}%;transform:translateX(-50%);">{_wh_txt}</span>'
         if exp_created_dt and not _is_refill:
             _wh_8_date = (exp_created_dt + _td(weeks=8)).strftime("%a %-m/%-d")
-            _wh_8_txt = (f'<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">8w+</span>'
-                         f'<br><span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.9);">{_wh_8_date}</span>')
+            _wh_8_txt = (f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">8w+</span>'
+                         f'<br><span style="font-size:11px;font-weight:500;color:rgba(255,255,255,0.95);text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh_8_date}</span>')
         else:
-            _wh_8_txt = '<span style="font-size:12px;font-weight:900;color:rgba(255,255,255,1);letter-spacing:1px;">8w+</span>'
+            _wh_8_txt = '<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">8w+</span>'
         _weeks_header_html += f'<span style="{_bs}right:0;transform:translateX(0);text-align:right;">{_wh_8_txt}</span>'
         if _is_refill:
             _default_bracket_html = ""
@@ -3397,17 +3419,17 @@ def render_all_projects_dashboard(
                 _asm_str = _asm_dt.strftime("%a %-m/%-d")
                 if 0 <= _asm_pos <= 100:
                     _asm_markers_html += (
-                        f'<div style="position:absolute;left:{_asm_pos:.2f}%;top:-3px;'
-                        f'width:3px;height:28px;background:#34d399;border-radius:1px;'
-                        f'box-shadow:0 0 6px rgba(52,211,153,0.7);z-index:5;transform:translateX(-50%);pointer-events:none;"></div>'
-                        f'<div style="position:absolute;left:{_asm_pos:.2f}%;top:25px;'
-                        f'width:90px;height:20px;transform:translateX(-50%);z-index:26;cursor:pointer;"'
+                        f'<div style="position:absolute;left:{_asm_pos:.2f}%;top:0px;'
+                        f'width:3px;height:24px;background:#f97316;border-radius:1px;'
+                        f'box-shadow:0 0 6px rgba(249,115,22,0.55);z-index:5;transform:translateX(-50%);pointer-events:none;"></div>'
+                        f'<div style="position:absolute;left:{_asm_pos:.2f}%;top:26px;'
+                        f'width:90px;height:16px;transform:translateX(-50%);z-index:26;cursor:pointer;"'
                         f' onmouseenter="document.getElementById(\'{_chain_pop_id}\').style.display=\'block\'"'
                         f' onmouseleave="document.getElementById(\'{_chain_pop_id}\').style.display=\'none\'">'
                         f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
-                        f'background:#059669;color:white;font-size:11px;font-weight:700;'
-                        f'padding:3px 8px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
-                        f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid #34d399;">ASM {_asm_str}</div>'
+                        f'background:#f1f5f9;color:#9a3412;font-size:10px;font-weight:700;'
+                        f'padding:2px 6px;border-radius:4px;white-space:nowrap;letter-spacing:0.02em;'
+                        f'line-height:1;box-shadow:0 1px 2px rgba(0,0,0,0.1);border:1px solid #f97316;">ASM {_asm_str}</div>'
                         f'{_chain_pop_html}'
                         f'</div>'
                     )
@@ -3427,88 +3449,73 @@ def render_all_projects_dashboard(
                     )
                     if 0 <= _lsp_pos <= 100:
                         _asm_markers_html += (
-                            f'<div style="position:absolute;left:{_lsp_pos:.2f}%;top:-3px;'
-                            f'width:3px;height:28px;background:#38bdf8;border-radius:1px;'
-                            f'box-shadow:0 0 6px rgba(56,189,248,0.7);z-index:5;transform:translateX(-50%);pointer-events:none;"></div>'
-                            f'<div style="position:absolute;left:{_lsp_pos:.2f}%;top:25px;'
-                            f'width:90px;height:20px;transform:translateX(-50%);z-index:26;cursor:pointer;"'
+                            f'<div style="position:absolute;left:{_lsp_pos:.2f}%;top:0px;'
+                            f'width:3px;height:24px;background:#2563eb;border-radius:1px;'
+                            f'box-shadow:0 0 6px rgba(37,99,235,0.5);z-index:5;transform:translateX(-50%);pointer-events:none;"></div>'
+                            f'<div style="position:absolute;left:{_lsp_pos:.2f}%;top:26px;'
+                            f'width:90px;height:16px;transform:translateX(-50%);z-index:26;cursor:pointer;"'
                             f' onmouseenter="document.getElementById(\'{_lsp_pop_id}\').style.display=\'block\'"'
                             f' onmouseleave="document.getElementById(\'{_lsp_pop_id}\').style.display=\'none\'">'
                             f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
-                            f'background:#0284c7;color:white;font-size:11px;font-weight:700;'
-                            f'padding:3px 8px;border-radius:3px;white-space:nowrap;letter-spacing:0.02em;'
-                            f'box-shadow:0 1px 5px rgba(0,0,0,0.4);border:1px solid #38bdf8;">LSP {_lsp_str}</div>'
+                            f'background:#f1f5f9;color:#1e40af;font-size:10px;font-weight:700;'
+                            f'padding:2px 6px;border-radius:4px;white-space:nowrap;letter-spacing:0.02em;'
+                            f'line-height:1;box-shadow:0 1px 2px rgba(0,0,0,0.1);border:1px solid #2563eb;">LSP {_lsp_str}</div>'
                             f'{_lsp_pop_html}'
                             f'</div>'
                         )
             except Exception:
                 pass
 
-        timeline_bar = f"""<div style="margin: 10px 12px 8px 12px; padding: 10px; background: rgba(0,0,0,0.15); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);"><div style="position:relative; width:100%; height:42px; margin-bottom:8px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:30px; background:rgba(255,255,255,0.15); border-radius:11px; box-shadow: inset 0 1px 4px rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2);">{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; width:1px; height:100%; background:rgba(255,255,255,0.1); z-index:1;"></div>' for w in range(1,8)])}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}</div>
-            <div style="display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:10px; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-              <div style="display:flex; align-items:center; gap:8px; color:white; font-size:9px; font-weight:600;">
-                  <span style="color:rgba(255,255,255,0.7);">IN PROGRESS:</span>
-                  <span style="display:flex; align-items:center; gap:4px;"><span style="width:8px; height:8px; background:#0891b2; border-radius:50%; border:1px solid #1e3a5f;"></span> On Track</span>
-                  <span style="display:flex; align-items:center; gap:4px;"><span style="width:8px; height:8px; background:#f97316; border-radius:50%; border:1px solid #1e3a5f;"></span> Warning</span>
-                  <span style="display:flex; align-items:center; gap:4px;"><span style="width:8px; height:8px; background:#be185d; border-radius:50%; border:1px solid #1e3a5f;"></span> Overdue</span>
-              </div>
-              <div style="width:1px; background:rgba(255,255,255,0.3);"></div>
-              <div style="display:flex; align-items:center; gap:8px; color:white; font-size:9px; font-weight:600;">
-                  <span style="color:rgba(255,255,255,0.7);">FULFILLED:</span>
-                  <span style="display:flex; align-items:center; gap:4px;"><span style="width:8px; height:8px; background:#0891b2; border-radius:2px; transform:rotate(45deg); border:1px solid #1e3a5f;"></span> On Time</span>
-                  <span style="display:flex; align-items:center; gap:4px;"><span style="width:8px; height:8px; background:#f97316; border-radius:2px; transform:rotate(45deg); border:1px solid #1e3a5f;"></span> Warning</span>
-                  <span style="display:flex; align-items:center; gap:4px;"><span style="width:8px; height:8px; background:#be185d; border-radius:2px; transform:rotate(45deg); border:1px solid #1e3a5f;"></span> Late</span>
-              </div>
-          </div>
-        </div>"""
+        # Color-coded lane: Partner = deep-purple system, R&D = tech-blue system.
+        # Flooded GRADIENT timeline box (Partner=purple, R&D=blue). Week axis + legend
+        # ride inside the box (white text); milestone chips sit just below the track.
+        _grad = ("linear-gradient(90deg, #7461b8 0%, #a05f8a 100%)" if has_ptr
+                 else "linear-gradient(90deg, #3a5c7a 0%, #3d8aa2 100%)")
+        # Elapsed-time progress fill (START -> now), as a fraction of the 8-week track.
+        try:
+            _now_pct = max(0.0, min(100.0, (datetime.now() - exp_created_dt).days / 56.0 * 100.0))
+        except Exception:
+            _now_pct = 0.0
+        timeline_bar = f"""<div style="margin:8px 0 4px 0; padding:12px 14px; border-radius:8px; background:{_grad}; box-shadow:0 1px 3px rgba(15,23,42,0.18);"><div style="position:relative; width:100%; height:42px; margin-bottom:6px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:26px; background:rgba(255,255,255,0.14); border-radius:11px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.25); border:1px solid #cbd5e1;"><div style="position:absolute;left:0;top:0;height:100%;width:{_now_pct:.1f}%;background:rgba(255,255,255,0.33);border-radius:11px 0 0 11px;z-index:1;"></div>{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; top:0; width:1px; height:100%; background:rgba(255,255,255,0.25); z-index:1;"></div>' for w in range(1,8)])}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}</div></div>"""
 
         if experiment_active_map is not None:
             db_active = experiment_active_map.get(experiment_name, True)
         else:
             _ea_vals = project_df['experiment_active'].dropna() if 'experiment_active' in project_df.columns else pd.Series([], dtype=object)
             db_active = bool((_ea_vals.astype(str).str.lower().isin(['true', '1'])).any()) if not _ea_vals.empty else True
-        exp_header_gradient = "linear-gradient(135deg, #7c3aed 0%, #be185d 100%)" if has_ptr else "linear-gradient(135deg, #1e3a5f 0%, #0891b2 100%)"
+        exp_header_gradient = "#ffffff"  # Option B: header stays white; color lives in the track bar
 
         _exp_emails_raw = [str(e).strip() for e in project_df['submitter_email'].dropna().unique() if str(e).strip() not in ('', 'nan', 'none', 'None')] if 'submitter_email' in project_df.columns else []
         _exp_email_str = ' / '.join(_exp_emails_raw[:2]) if 1 <= len(_exp_emails_raw) <= 2 else ''
 
         html += f"""
-            <div class="project-wrapper" data-active="{"true" if db_active else "false"}" data-due-date="{_sort_due_date}">
+            <div class="project-wrapper" data-active="{"true" if db_active else "false"}" data-due-date="{_sort_due_date}" style="border-left:4px solid {_card_accent};">
                 <div class="header-banner" style="background: {exp_header_gradient}; min-height: auto; padding: 12px 18px;" onclick="toggleSection('{safe_exp_id}')">
-                    <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
-                        <button id="bucket_btn_{safe_exp_id}" onclick="event.stopPropagation();toggleBucketView('{safe_exp_id}')" style="margin-left:auto;order:99;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.35);color:white;font-size:9px;padding:3px 9px;border-radius:4px;cursor:pointer;font-family:monospace;font-weight:600;letter-spacing:0.5px;white-space:nowrap;flex-shrink:0;">Stage View</button>
-                        <div>
-                            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                                <div class="header-title" style="margin-bottom: 0; white-space: nowrap;">{experiment_name}</div>
-                                {exp_customer_tags}
-                            </div>
-                            <div style="font-size: 11px; color: rgba(255,255,255,0.75); font-weight: 400; margin-top: 3px; font-family: inherit; letter-spacing: 0;">
-                                <span style="font-size: 10px; color: rgba(255,255,255,0.55);">Created: {exp_created_str}</span>{(f' &nbsp;<span style="color:#e0e7ff; font-weight:600; font-size:13px;">' + _exp_email_str + '</span>') if _exp_email_str else ''}
-                            </div>
-                        </div>
-                        <div class="header-main-stat" style="margin-bottom: 0; font-size: 11px;">
-                            <span style="color:#67e8f9; font-weight:700;">{len(req_groups)}</span> Requests:
-                            <span style="color:#67e8f9; font-weight:700;">{count_fulfilled}</span> Fulfilled
-                        </div>
-                        <div style="font-size: 1px;">{avg_tat_html}</div>
+                    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
+                        <div class="header-title" style="margin-bottom:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:55%;">{experiment_name}</div>
+                        {_run_badge}
+                        {exp_customer_tags}
+                        <span class="kpill"><span class="kk">Requests:</span><b>{len(req_groups)}</b></span>
+                        <span class="kpill"><span class="kk">Fulfilled:</span><b style="color:#2563eb;">{count_fulfilled}</b></span>
+                        {avg_tat_html}
+                        <button id="bucket_btn_{safe_exp_id}" onclick="event.stopPropagation();toggleBucketView('{safe_exp_id}')" style="margin-left:auto;background:#fff;border:1px solid #e5e7eb;color:#374151;font-size:10px;padding:3px 9px;border-radius:6px;cursor:pointer;font-weight:600;white-space:nowrap;">Stage View</button>
                     </div>
-                    <div style="margin-bottom:10px; margin-top:52px;">
-                        <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
-                        <div id="bucket_{safe_exp_id}" style="display:none;background:rgba(0,0,0,0.15);border-radius:8px;border:1px solid rgba(255,255,255,0.1);">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week, stage_items, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)}</div>
-                    </div>
+                    <div style="font-size:10px; color:#9ca3af; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Created: {exp_created_str}{(f' &nbsp;<span style="color:#2563eb; font-weight:600;">' + _exp_email_str + '</span>') if _exp_email_str else ''}</div>
+                    <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
+                    <div id="bucket_{safe_exp_id}" style="display:none;background:#f8f9fa;border-radius:8px;border:1px solid #e5e7eb;margin-top:8px;">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week, stage_items, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)}</div>
                     <div class="header-stats" style="margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap;">
                         {f'<span class="stat-item" title="Requests submitted but no work has started yet" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
-                        {f'<span class="stat-item" title="LSP prep complete — ready to ship" style="background:rgba(34,197,94,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_ship_ready}</span> <span style="font-size:10px;">Ship Ready</span></span>' if count_ship_ready > 0 else ''}
-                        {f'<span class="stat-item" title="Requests actively in LSP processing" style="background:rgba(8,145,178,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_in_lsp}</span> <span style="font-size:10px;">In LSP</span></span>' if count_in_lsp > 0 else ''}
-                        {f'<span class="stat-item" title="Requests actively in assembly (GG/Gibson)" style="background:rgba(124,58,237,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_in_assembly}</span> <span style="font-size:10px;">In Assembly</span></span>' if count_in_assembly > 0 else ''}
-                        {f'<span class="stat-item" title="Requests waiting on parts or upstream dependencies" style="background:rgba(249,115,22,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_active_waiting}</span> <span style="font-size:10px;">Waiting</span></span>' if count_active_waiting > 0 else ''}
-                        {f'<span class="stat-item" title="No pipeline progress detected — may need intervention" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">⚠️ {count_stalled}</span> <span style="font-size:10px;">Stalled</span></span>' if count_stalled > 0 else ''}
-                        {f'<span class="stat-item" title="Assembly needs review before proceeding" style="background:rgba(217,119,6,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🔬 {count_asm_review}</span> <span style="font-size:10px;">ASM Review</span></span>' if count_asm_review > 0 else ''}
-                        {f'<span class="stat-item" title="A sequencing winner has been identified — ready for LSP" style="background:rgba(5,150,105,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🏆 {count_seq_winner}</span> <span style="font-size:10px;">Seq Winner</span></span>' if count_seq_winner > 0 else ''}
-                        {f'<span class="stat-item" title="Parts order submitted to synthesis vendor — waiting on delivery" style="background:rgba(124,58,237,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">⏳ {count_order_pending}</span> <span style="font-size:10px;">Order Pending</span></span>' if count_order_pending > 0 else ''}
-                        {f'<span class="stat-item" title="A Gibson or Golden Gate workorder has an antibiotic that does not match LIMS" style="background:rgba(220,38,38,0.6); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">🚨 {count_antibiotic_mismatch}</span> <span style="font-size:10px;">Antibiotic Mismatch</span></span>' if count_antibiotic_mismatch > 0 else ''}
-                        {f'<span class="stat-item" title="Assembly is blocked — upstream dependency unresolved" style="background:rgba(190,24,93,0.5); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_blocked}</span> <span style="font-size:10px;">Blocked</span></span>' if count_blocked > 0 else ''}
-                        {f'<span class="stat-item" title="Requests canceled" style="background:rgba(100,116,139,0.4); border:1px solid rgba(255,255,255,0.3);"><span class="stat-label" style="font-size:11px;">{count_canceled}</span> <span style="font-size:10px;">Canceled</span></span>' if count_canceled > 0 else ''}
+                        {f'<span class="stat-item" title="LSP prep complete — ready to ship" style="background:rgba(34,197,94,0.4); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">{count_ship_ready}</span> <span style="font-size:10px;">Ship Ready</span></span>' if count_ship_ready > 0 else ''}
+                        {f'<span class="stat-item" title="Requests actively in LSP processing" style="background:rgba(8,145,178,0.4); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">{count_in_lsp}</span> <span style="font-size:10px;">In LSP</span></span>' if count_in_lsp > 0 else ''}
+                        {f'<span class="stat-item" title="Requests actively in assembly (GG/Gibson)" style="background:rgba(124,58,237,0.4); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">{count_in_assembly}</span> <span style="font-size:10px;">In Assembly</span></span>' if count_in_assembly > 0 else ''}
+                        {f'<span class="stat-item" title="Requests waiting on parts or upstream dependencies" style="background:rgba(249,115,22,0.4); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">{count_active_waiting}</span> <span style="font-size:10px;">Waiting</span></span>' if count_active_waiting > 0 else ''}
+                        {f'<span class="stat-item" title="No pipeline progress detected — may need intervention" style="background:rgba(190,24,93,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">⚠️ {count_stalled}</span> <span style="font-size:10px;">Stalled</span></span>' if count_stalled > 0 else ''}
+                        {f'<span class="stat-item" title="Assembly needs review before proceeding" style="background:rgba(217,119,6,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">🔬 {count_asm_review}</span> <span style="font-size:10px;">ASM Review</span></span>' if count_asm_review > 0 else ''}
+                        {f'<span class="stat-item" title="A sequencing winner has been identified — ready for LSP" style="background:rgba(5,150,105,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">🏆 {count_seq_winner}</span> <span style="font-size:10px;">Seq Winner</span></span>' if count_seq_winner > 0 else ''}
+                        {f'<span class="stat-item" title="Parts order submitted to synthesis vendor — waiting on delivery" style="background:rgba(124,58,237,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">⏳ {count_order_pending}</span> <span style="font-size:10px;">Order Pending</span></span>' if count_order_pending > 0 else ''}
+                        {f'<span class="stat-item" title="A Gibson or Golden Gate workorder has an antibiotic that does not match LIMS" style="background:rgba(220,38,38,0.6); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">🚨 {count_antibiotic_mismatch}</span> <span style="font-size:10px;">Antibiotic Mismatch</span></span>' if count_antibiotic_mismatch > 0 else ''}
+                        {f'<span class="stat-item" title="Assembly is blocked — upstream dependency unresolved" style="background:rgba(190,24,93,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">{count_blocked}</span> <span style="font-size:10px;">Blocked</span></span>' if count_blocked > 0 else ''}
+                        {f'<span class="stat-item" title="Requests canceled" style="background:rgba(100,116,139,0.4); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">{count_canceled}</span> <span style="font-size:10px;">Canceled</span></span>' if count_canceled > 0 else ''}
                     </div>
                 </div>"""
 
