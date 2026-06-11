@@ -1970,6 +1970,16 @@ def render_all_projects_dashboard(
                 if str(r.get('workorder_id', '')) != str(root_id)
             )
             tree_stock_ids = {str(r['STOCK_ID']) for r in sorted_records if pd.notna(r.get('STOCK_ID'))}
+            # STOCK_IDs that have at least one non-CANCELED part row in this section.
+            # A CANCELED part whose fragment is NOT covered here is the sole attempt for
+            # a required input (keep it — it's real missing-input context); a CANCELED
+            # part duplicating an already-covered fragment is just noise (skip it).
+            _covered_part_stocks = {
+                str(r.get('STOCK_ID')) for r in sorted_records
+                if pd.notna(r.get('STOCK_ID')) and r.get('wo_status') != 'CANCELED'
+                and (r.get('type') in _parts_types_dfs
+                     or (r.get('type') in _asm_types_dfs and r.get('fulfills_request') == False))
+            }
             for row in sorted_records:
                 # Skip CANCELED workorders that never ran (no queue data) —
                 # these are abandoned attempts that clutter the timeline.
@@ -1982,10 +1992,17 @@ def render_all_projects_dashboard(
                     if not isinstance(_pn, list):
                         _pn = []
                     if not _pn:
+                        _is_canceled_part = (row.get('type') in _parts_types_dfs
+                                             or (row.get('type') in _asm_types_dfs
+                                                 and row.get('fulfills_request') == False))
                         if (row.get('fulfills_request') == True
                                 and row.get('type') in ('gibson_workorder', 'golden_gate_workorder')
                                 and _section_inputs_have_work):
                             pass  # show it — parts had work done
+                        elif (_is_canceled_part
+                              and pd.notna(row.get('STOCK_ID'))
+                              and str(row.get('STOCK_ID')) not in _covered_part_stocks):
+                            pass  # show it — sole attempt for a required fragment (missing-input context)
                         else:
                             continue
                 _is_parts_row = (row.get('type') in _parts_types_dfs
