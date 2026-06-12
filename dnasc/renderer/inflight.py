@@ -985,7 +985,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       + '</tr>';
   }}
   // L2 — DESIGN (the triangle): one per attempt_anchor_id = distinct backbone+parts.
-  function _colDesignRow(r, d) {{
+  function _colDesignRow(r, d, di) {{
     var hasAtt = (d.attempts||[]).length > 0;
     var open  = hasAtt && !!_expA[r.req_id+'|'+d.anchor];
     var natt  = ' <span style="font-size:9px;color:#64748b;font-weight:600;">&middot; '+d.n_attempts+' attempt'+(d.n_attempts==1?'':'s')+'</span>';
@@ -1002,7 +1002,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var warn = riskBadge(designRisk(d));
     return '<tr class="if-att-row"'+click+'>'
       + '<td style="'+TD+'padding-left:20px;">'+caret+'</td>'
-      + '<td style="'+TD+'" colspan="4"><span style="font-size:10px;font-weight:700;color:#334155;">'+esc(d.dtype||'Design')+'</span>'+natt+parts+'</td>'
+      + '<td style="'+TD+'" colspan="4"><span style="font-size:10px;font-weight:700;color:#334155;">Design '+(di+1)+' &middot; '+esc(d.dtype||'Design')+'</span>'+natt+parts+'</td>'
       + '<td style="'+TD+'"></td>'
       + '<td style="'+TD+'white-space:nowrap;">'+(warn||band)+'</td>'
       + '<td style="'+TD+'">'+num(d.pickable)+'</td>'
@@ -1015,17 +1015,23 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   // L4 — workorder within an attempt: Gibson row, then its &#9492;&#9472; transformations.
   // Phase column shows the agar plate &middot; well coordinate.
   function _colWoRow(w) {{
-    var pad = w.is_child ? 66 : 52;
-    var pre = w.is_child ? '<span style="color:#cbd5e1;">&#9492;&#9472; </span>' : '';
-    var lbl = pre + (w.strain?strainBdg(w.strain)+' ':'') + '<span style="font-size:9px;color:#64748b;">'+esc(w.dtype)+'</span>'
-            + ' <span style="font-size:8px;font-family:monospace;color:#cbd5e1;">'+esc(String(w.wid).slice(0,8))+'</span>';
+    // Strain rows stack flush under the design (no &#9492;&#9472; tree nesting): the strain chip
+    // is centered under the CONSTRUCT column, and the agar plate&middot;well is centered across
+    // the CUSTOMER+PHASE span (between them). The top request row keeps a plain Phase cell.
+    var strainCell = (w.strain?strainBdg(w.strain):'');
+    var agarCell = agarLink(w.agar_url,w.agar_label);
+    // Full process id (un-truncated) on the left, under the PAI / Golden Gate column,
+    // tab-indented so it reads as nested under the attempt.
+    var pidCell = '<span style="font-size:8px;font-family:monospace;color:#94a3b8;">'+esc(String(w.wid))+'</span>';
     var c8,c9,c10,rb;
     if (!w.hascol) {{ c8=_dash(); c9=_dash(); c10='<span style="color:#cbd5e1;">&mdash;</span>'; rb=''; }}
     else {{ c8=num(w.pickable); c9=num(w.picked); c10=seqBdg(w.seq,w.totc,false,w.status,w.picked); rb=pickBand(w.pickable); }}
     return '<tr class="if-strain-row">'
       + '<td style="'+TD+'"></td>'
-      + '<td style="'+TD+'padding-left:'+pad+'px;" colspan="4">'+lbl+'</td>'
-      + '<td style="'+TD+'white-space:nowrap;font-size:9px;">'+agarLink(w.agar_url,w.agar_label)+'</td>'
+      + '<td style="'+TD+'"></td>'
+      + '<td style="'+TD+'padding-left:24px;white-space:nowrap;">'+pidCell+'</td>'
+      + '<td style="'+TD+'text-align:center;white-space:nowrap;">'+strainCell+'</td>'
+      + '<td style="'+TD+'text-align:center;white-space:nowrap;font-size:9px;" colspan="2">'+agarCell+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+rb+'</td>'
       + '<td style="'+TD+'">'+c8+'</td>'
       + '<td style="'+TD+'">'+c9+'</td>'
@@ -1063,8 +1069,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function _colonyRows(r) {{
     var html = '<tr class="if-cardgap"><td colspan="12"></td></tr>' + _colReqRow(r);
     if (_expR[r.req_id]) {{
-      (r.designs||[]).forEach(function(d) {{
-        html += _colDesignRow(r, d);
+      (r.designs||[]).forEach(function(d, di) {{
+        html += _colDesignRow(r, d, di);
         if (_expA[r.req_id+'|'+d.anchor]) {{
           var atts = d.attempts||[];
           // Single attempt: the design row already carries the totals + "· 1 attempt",
@@ -1293,7 +1299,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       {{k:'pAI',       lbl:'pAI',           filter:true}},
       {{k:'construct', lbl:'Construct',     filter:true}},
       {{k:'customer',  lbl:'Customer',      filter:true}},
-      {{k:'phase',     lbl:'Phase / Agar',  filter:true}},
+      {{k:'phase',     lbl:'Phase',  filter:true}},
       {{k:'risk',      lbl:'Risk',          filter:false}},
       {{k:'c_pickable',lbl:'Pickable',      filter:false}},
       {{k:'c_picked',  lbl:'Picked',        filter:false}},
