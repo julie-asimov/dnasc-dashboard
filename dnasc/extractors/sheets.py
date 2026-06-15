@@ -44,18 +44,32 @@ def fetch_due_dates() -> dict[str, str]:
         return {}
 
     # One entry per experiment name — last row wins if duplicates exist.
+    # Schema: a single authoritative date (`due_date_in_asana`) drives the due
+    # marker + the normal NGS/assembly back-calc. `date_sequence_transferred` is
+    # informational only (the day sequences were delivered; precedes the BIOS
+    # created date) and never re-anchors the timer.
+    def _clean(v) -> str:
+        s = str(v).strip()
+        return "" if s in ("nan", "None", "") else s
+
     result: dict[str, dict] = {}
     for _, row in df.iterrows():
-        name  = str(row.get("experiment_name", "")).strip()
-        due   = str(row.get("due_date", "")).strip()
-        gantt = str(row.get("date_in_cld_gnatt", "")).strip()
-        if not name or name in ("nan", "None", ""):
+        name = _clean(row.get("experiment_name", ""))
+        # Preferred column is `due_date_in_asana`; accept legacy headers as fallback.
+        due = (_clean(row.get("due_date_in_asana", ""))
+               or _clean(row.get("date_in_asana", ""))
+               or _clean(row.get("due_date", ""))
+               or _clean(row.get("date_in_cld_gnatt", "")))
+        seq = (_clean(row.get("date_sequence_transferred", ""))
+               or _clean(row.get("sequence_transferred", "")))
+        if not name:
             continue
-        if not due or due in ("nan", "None", ""):
+        if not due:
             continue
         result[name] = {
-            "due_date":          due,
-            "date_in_cld_gnatt": gantt if gantt not in ("nan", "None", "") else "",
+            # Internal key stays `due_date` so the In-Flight tab anchor needs no change.
+            "due_date":             due,
+            "sequence_transferred": seq,
         }
 
     _save(result)
@@ -71,6 +85,75 @@ def load_due_dates() -> dict[str, str]:
         except Exception:
             pass
     return {}
+
+
+def append_experiment_names(names: list[str]) -> dict:
+    """
+    Append experiment names (with blank date columns) to the Google Sheet so missing
+    partner projects show up as rows to be filled in. Requires the service account to
+    have *Editor* access on the sheet — read-only access (the default) will 403.
+
+    Only names not already present are appended. Returns a status dict:
+        {"appended": [...], "skipped_existing": [...], "ok": bool, "error": str|None}
+    """
+    result = {"appended": [], "skipped_existing": [], "ok": False, "error": None}
+    names = [str(n).strip() for n in (names or []) if str(n).strip()]
+    if not names:
+        result["ok"] = True
+        return result
+
+    try:
+        import requests
+        from google.auth import default
+        from google.auth.transport.requests import Request as GoogleRequest
+
+        # Full read/write scope — append is a write.
+        creds, _ = default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        creds.refresh(GoogleRequest())
+
+        sheet_id = PipelineConfig.DUE_DATES_SHEET_ID
+        quota_proj = PipelineConfig.DUE_DATES_QUOTA_PROJECT
+        base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
+        headers = {"Authorization": f"Bearer {creds.token}"}
+        if quota_proj:
+            headers["x-goog-user-project"] = quota_proj
+
+        # Existing names (column A, skip header) so we never duplicate a row.
+        r = requests.get(f"{base}/values/Sheet1!A2:A", headers=headers, timeout=20)
+        existing = set()
+        if r.status_code == 200:
+            for row in r.json().get("values", []):
+                if row and str(row[0]).strip():
+                    existing.add(str(row[0]).strip())
+        else:
+            log.warning("append: could not read existing names (%d): %s", r.status_code, r.text[:200])
+
+        to_add = [n for n in dict.fromkeys(names) if n not in existing]
+        result["skipped_existing"] = [n for n in names if n in existing]
+        if not to_add:
+            result["ok"] = True
+            return result
+
+        # 3 columns: experiment_name, date_sequence_transferred (blank), due_date_in_asana (blank).
+        body = {"values": [[n, "", ""] for n in to_add]}
+        ar = requests.post(
+            f"{base}/values/Sheet1!A:C:append",
+            headers=headers,
+            params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
+            json=body,
+            timeout=20,
+        )
+        if ar.status_code == 200:
+            result["appended"] = to_add
+            result["ok"] = True
+            log.info("Appended %d missing experiment(s) to the sheet", len(to_add))
+        else:
+            result["error"] = f"{ar.status_code}: {ar.text[:300]}"
+            log.warning("append failed: %s", result["error"])
+    except Exception as e:
+        result["error"] = str(e)
+        log.warning("append exception: %s", e)
+    return result
 
 
 # ── private ──────────────────────────────────────────────────────────────────

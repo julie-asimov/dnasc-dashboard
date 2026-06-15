@@ -34,7 +34,9 @@ sys.path.insert(0, str(SCRIPT_DIR))
 # ── Imports ───────────────────────────────────────────────────────────────────
 from dnasc import run_pipeline, render_dashboard, PipelineConfig
 from dnasc.extractors.bios import BIOSExtractor
-from dnasc.extractors.sheets import fetch_due_dates
+from dnasc.extractors.sheets import fetch_due_dates, append_experiment_names
+
+MISSING_DUE_FILE = STATE_DIR / "missing_asana_dates.json"
 
 # ── Pipeline version (bump this string when you push new code) ───────────────
 PIPELINE_VERSION = PipelineConfig.PIPELINE_VERSION
@@ -70,6 +72,26 @@ def main():
     VERSION_TS = WWW_DIR / "dnasc_version.txt"
     VERSION_TS.write_text(str(int(time.time())))
     print(f"   ✅ Dashboard written → {HTML_OUT}")
+
+    # 5. Append any active partner experiments missing an Asana due date to the
+    #    sheet (render wrote the list). Safe no-op if the service account lacks
+    #    Editor access — logs a warning, never blocks the refresh.
+    print("\n📤 Syncing missing partner experiments to the due-date sheet...")
+    try:
+        import json
+        names = json.loads(MISSING_DUE_FILE.read_text()) if MISSING_DUE_FILE.exists() else []
+        if names:
+            res = append_experiment_names(names)
+            if res["ok"] and res["appended"]:
+                print(f"   ✅ Added {len(res['appended'])} new name(s): {', '.join(res['appended'])}")
+            elif res["ok"]:
+                print("   ✅ Nothing to add (all already in the sheet).")
+            else:
+                print(f"   ⚠️  Could not write to sheet ({res['error']}) — names flagged on dashboard only.")
+        else:
+            print("   ✅ No partner experiments missing an Asana date.")
+    except Exception as e:
+        print(f"   ⚠️  Sync skipped: {e}")
 
     elapsed = time.time() - start
     print(f"\n🎉 Full refresh complete in {elapsed:.1f}s")

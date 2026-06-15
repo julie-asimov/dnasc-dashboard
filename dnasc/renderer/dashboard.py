@@ -2915,6 +2915,10 @@ def render_all_projects_dashboard(
     except Exception:
         pass
 
+    # Partner experiments with no Asana due date in the override sheet — collected
+    # during render so they can be flagged on the card and logged at the end.
+    _missing_partner_exps: list[str] = []
+
     # Pre-compute canonical experiment for each req_id so that requests whose parts
     # belong to a different experiment (cross-experiment fanning) are only rendered
     # once — in the experiment that owns the root GG/Gibson workorder.
@@ -3147,13 +3151,30 @@ def render_all_projects_dashboard(
         if _due_raw is None:
             _due_entry_data = None
         elif isinstance(_due_raw, str):
-            _due_entry_data = {"due_date": _due_raw, "date_in_cld_gnatt": ""}
+            _due_entry_data = {"due_date": _due_raw, "sequence_transferred": ""}
         elif isinstance(_due_raw, dict):
             _due_entry_data = _due_raw
         else:
             _due_entry_data = _due_raw[0] if _due_raw else None
 
         _due_entry = bool(_due_entry_data)   # truthy flag used by bracket/sort logic
+
+        # Partner project with no Asana due date in the sheet → flag it. Scoped to
+        # ACTIVE experiments (≥1 in-progress request) so fulfilled/old partner work
+        # isn't flagged. Infra experiments (refills, etc.) are exempt.
+        _exp_has_active = (
+            project_df['request_status'].astype(str).str.upper() == 'IN_PROGRESS'
+        ).any() if 'request_status' in project_df.columns else False
+        _missing_asana = has_ptr and not _due_entry and not _is_infra_exp and _exp_has_active
+        if _missing_asana:
+            _missing_partner_exps.append(experiment_name)
+        _missing_due_badge = (
+            '<span class="badge" title="Partner project not found in the Asana due-date '
+            'sheet — add it so milestones can anchor on the committed date." '
+            'style="background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;margin-left:4px;'
+            'font-weight:800;white-space:nowrap;">⚠ MISSING ASANA DATE</span>'
+            if _missing_asana else ''
+        )
 
         if _due_entry_data:
             try:
@@ -3166,7 +3187,7 @@ def render_all_projects_dashboard(
                     return min(100, max(0, (d - _ec_date).days / _8w_days * 100))
 
                 _due_date_str = _due_entry_data.get("due_date", "")
-                _gantt_str    = _due_entry_data.get("date_in_cld_gnatt", "")
+                _seq_str      = _due_entry_data.get("sequence_transferred", "")
                 if _due_date_str:
                     _due_dt   = datetime.strptime(_due_date_str, "%Y-%m-%d").replace(tzinfo=pytz.UTC)
                     _sort_due_date = _due_date_str
@@ -3191,8 +3212,9 @@ def render_all_projects_dashboard(
 
                     if exp_created_dt:
                         _ngs_dt    = _due_dt - pd.Timedelta(days=1)
-                        _gantt_dt  = datetime.strptime(_gantt_str, "%Y-%m-%d").replace(tzinfo=pytz.UTC) if _gantt_str else None
-                        # Compute ASM pos for bracket start (last Mon/Thu before due, minus 13 days)
+                        _seq_dt    = datetime.strptime(_seq_str, "%Y-%m-%d").replace(tzinfo=pytz.UTC) if _seq_str else None
+                        # NGS day = last Mon/Thu strictly before the Asana due date
+                        # (weekday Mon=0, Thu=3); ASM bracket starts 13 days before it.
                         _due_ngs_adj = _ngs_dt
                         for _bi in range(7):
                             _bc = _due_dt - pd.Timedelta(days=_bi+1)
@@ -3201,16 +3223,15 @@ def render_all_projects_dashboard(
                         _due_asm_pos = max(0, _pos(_due_asm_dt))
                         _ngs_pos   = _pos(_ngs_dt)
                         _due_pos   = _pos(_due_dt)
-                        _gantt_pos = _pos(_gantt_dt) if _gantt_dt else _due_pos
                         if 0 < _due_pos <= 100:
                             _dr            = (_due_dt.date() - _now_utc.date()).days
                             _urgency_color = "#f87171" if _dr < 0 else "#fcd34d" if _dr <= 7 else "#6ee7b7"
-                            _range_width   = max(0.5, _gantt_pos - _due_asm_pos)
-                            _ngs_label     = _ngs_dt.strftime("%a %b %-d")
+                            # Range bar now runs ASM → due (single Asana date; no second date).
+                            _range_width   = max(0.5, _due_pos - _due_asm_pos)
                             _due_label     = _due_dt.strftime("%a %b %-d")
-                            _gantt_label   = _gantt_dt.strftime("%a %-m/%-d") if _gantt_dt else ""
+                            _seq_label     = _seq_dt.strftime("%a %-m/%-d") if _seq_dt else ""
                             _pop_id        = f"duepop_{safe_exp_id}"
-                            _pill_text     = f"DUE {_due_dt.strftime('%a %-m/%-d')}"
+                            _pill_text     = f"ASANA {_due_dt.strftime('%a %-m/%-d')}"
                             _due_marker_html = (
                                 # Range bar: ASM → due/gantt
                                 f'<div style="position:absolute;left:{_due_asm_pos:.2f}%;top:0;'
@@ -3234,14 +3255,12 @@ def render_all_projects_dashboard(
                                 f'<div id="{_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
                                 f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
                                 f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #cbd5e1;">'
-                                f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Due Date</div>'
-                                f'<div style="display:grid;grid-template-columns:72px 1fr;gap:2px 8px;">'
-                                f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Last NGS</span>'
-                                f'<span style="font-weight:600;">{_ngs_label}</span>'
-                                f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Due</span>'
+                                f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Asana Due Date</div>'
+                                f'<div style="display:grid;grid-template-columns:90px 1fr;gap:2px 8px;">'
+                                + (f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Seq Transferred</span>'
+                                   f'<span style="font-weight:600;">{_seq_label}</span>' if _seq_dt else '') +
+                                f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">Due (Asana)</span>'
                                 f'<span style="font-weight:700;color:{_urgency_color};">{_due_label}</span>'
-                                + (f'<span style="color:rgba(255,255,255,0.6);font-size:9px;font-weight:700;text-transform:uppercase;">CLD Gantt</span>'
-                                   f'<span style="font-weight:600;">{_gantt_label}</span>' if _gantt_dt else '') +
                                 f'</div></div></div>'
                             )
             except Exception:
@@ -3480,6 +3499,42 @@ def render_all_projects_dashboard(
                             f'{_lsp_pop_html}'
                             f'</div>'
                         )
+
+                # Last Prod Day marker (teal) — the results/LSP-release day (Tue/Fri),
+                # i.e. last NGS + 1. Only shown when there's an Asana override AND it
+                # differs from the prod day. Without an override the default DUE marker
+                # already sits on the release day, so PROD would duplicate it.
+                _show_prod = bool(_due_ref_str) and (_rel_dt.date() != _due_ref_dt.date())
+                if _show_prod:
+                    _prod_pos = _posm(_rel_dt)
+                    _prod_str = _rel_dt.strftime("%a %-m/%-d")
+                    _prod_pop_id = f"prodpop_{safe_exp_id}"
+                    _prod_pop_html = (
+                        f'<div id="{_prod_pop_id}" style="display:none;position:absolute;left:38px;top:8px;'
+                        f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
+                        f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #14b8a6;">'
+                        f'<div style="font-weight:800;color:white;margin-bottom:5px;font-size:11px;">Last Prod Day</div>'
+                        f'<div style="display:grid;grid-template-columns:90px 1fr;gap:2px 8px;">{_pop_grid}</div>'
+                        f'</div>'
+                    )
+                    if 0 <= _prod_pos <= 100:
+                        # Second row (top:44px) so it never collides with the ASANA box,
+                        # which sits ~1-2 days away on the top row. Line extends down to it.
+                        _asm_markers_html += (
+                            f'<div style="position:absolute;left:{_prod_pos:.2f}%;top:0px;'
+                            f'width:3px;height:44px;background:#0d9488;border-radius:1px;'
+                            f'box-shadow:0 0 6px rgba(13,148,136,0.5);z-index:3;transform:translateX(-50%);pointer-events:none;"></div>'
+                            f'<div style="position:absolute;left:{_prod_pos:.2f}%;top:44px;'
+                            f'width:90px;height:16px;transform:translateX(-50%);z-index:26;cursor:pointer;"'
+                            f' onmouseenter="document.getElementById(\'{_prod_pop_id}\').style.display=\'block\'"'
+                            f' onmouseleave="document.getElementById(\'{_prod_pop_id}\').style.display=\'none\'">'
+                            f'<div style="position:absolute;left:50%;top:0;transform:translateX(-50%);'
+                            f'background:#f1f5f9;color:#0f766e;font-size:10px;font-weight:700;'
+                            f'padding:2px 6px;border-radius:4px;white-space:nowrap;letter-spacing:0.02em;'
+                            f'line-height:1;box-shadow:0 1px 2px rgba(0,0,0,0.1);border:1px solid #0d9488;">PROD {_prod_str}</div>'
+                            f'{_prod_pop_html}'
+                            f'</div>'
+                        )
             except Exception:
                 pass
 
@@ -3493,7 +3548,7 @@ def render_all_projects_dashboard(
             _now_pct = max(0.0, min(100.0, (datetime.now() - exp_created_dt).days / 56.0 * 100.0))
         except Exception:
             _now_pct = 0.0
-        timeline_bar = f"""<div style="margin:8px 0 4px 0; padding:12px 14px; border-radius:8px; background:{_grad}; box-shadow:0 1px 3px rgba(15,23,42,0.18);"><div style="position:relative; width:100%; height:42px; margin-bottom:6px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:26px; background:rgba(255,255,255,0.14); border-radius:11px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.25); border:1px solid #cbd5e1;"><div style="position:absolute;left:0;top:0;height:100%;width:{_now_pct:.1f}%;background:rgba(255,255,255,0.33);border-radius:11px 0 0 11px;z-index:1;"></div>{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; top:0; width:1px; height:100%; background:rgba(255,255,255,0.25); z-index:1;"></div>' for w in range(1,8)])}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}</div></div>"""
+        timeline_bar = f"""<div style="margin:8px 0 4px 0; padding:12px 14px; border-radius:8px; background:{_grad}; box-shadow:0 1px 3px rgba(15,23,42,0.18);"><div style="position:relative; width:100%; height:42px; margin-bottom:6px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:46px; background:rgba(255,255,255,0.14); border-radius:11px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.25); border:1px solid #cbd5e1;"><div style="position:absolute;left:0;top:0;height:100%;width:{_now_pct:.1f}%;background:rgba(255,255,255,0.33);border-radius:11px 0 0 11px;z-index:1;"></div>{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; top:0; width:1px; height:100%; background:rgba(255,255,255,0.25); z-index:1;"></div>' for w in range(1,8)])}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}</div></div>"""
 
         if experiment_active_map is not None:
             db_active = experiment_active_map.get(experiment_name, True)
@@ -3511,6 +3566,7 @@ def render_all_projects_dashboard(
                     <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
                         <div class="header-title" style="margin-bottom:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:55%;">{experiment_name}</div>
                         {_run_badge}
+                        {_missing_due_badge}
                         {exp_customer_tags}
                         <span class="kpill"><span class="kk">Requests:</span><b>{len(req_groups)}</b></span>
                         <span class="kpill"><span class="kk">Fulfilled:</span><b style="color:#2563eb;">{count_fulfilled}</b></span>
@@ -3619,6 +3675,20 @@ def render_all_projects_dashboard(
     """
     html = html.replace("__LSP_CAPACITY_TAB_CONTENT__", lsp_capacity_html)
     html = html.replace("__INFLIGHT_FRAGMENT__", _inflight_fragment)
+
+    _uniq_missing = sorted(set(_missing_partner_exps))
+    if _uniq_missing:
+        log.warning("Partner experiments missing an Asana due date (%d): %s",
+                    len(_uniq_missing), ", ".join(_uniq_missing))
+    # Persist the missing list so full_refresh.py can append these names to the sheet.
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        _mp = _Path("dashboard_state/missing_asana_dates.json")
+        _mp.parent.mkdir(parents=True, exist_ok=True)
+        _mp.write_text(_json.dumps(_uniq_missing, indent=2))
+    except Exception:
+        pass
     return html
 
 

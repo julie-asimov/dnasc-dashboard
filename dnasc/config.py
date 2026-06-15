@@ -38,7 +38,7 @@ class PipelineConfig:
     # ── Due-date Google Sheet ─────────────────────────────────────────────────
     DUE_DATES_SHEET_ID: str     = "1qnZdQcviM83FW2ELC-KUAYYLaZoC8GDfjNjjFyB4z0k"
     DUE_DATES_QUOTA_PROJECT: str = ""
-    DUE_DATES_CSV_FALLBACK: str = "due_dates_override.csv"   # place in scripts/ root on any host
+    DUE_DATES_CSV_FALLBACK: str = "due_dates/due_dates_override.csv"   # local Sheets fallback
 
     # ── LSP ───────────────────────────────────────────────────────────────────
     LSP_BLACKLIST: list[str] = ["LSP-7602"]
@@ -49,7 +49,7 @@ class PipelineConfig:
     SEQ_STALL_DAYS: int = 7          # picked>0 & seq_confirmed=0 & days-since-last-op>this → red flag
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.10.33"
+    PIPELINE_VERSION: str = "1.10.34"
 
     @classmethod
     def get_date_filter(cls) -> str:
