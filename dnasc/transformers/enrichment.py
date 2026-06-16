@@ -232,9 +232,13 @@ class EnrichmentTransformer:
 
         # ── Global lookup: STOCK_ID → list of part-type rows ─────────
         parts_mask = df['type'].isin(_PARTS_TYPES) & df['STOCK_ID'].notna()
+        # Only `type` and `vendor` are ever read off these records (see
+        # _infer_stage), so subset before to_dict — converting the full ~50-col
+        # group per stock was the dominant cost of this step.
         global_parts_by_stock: dict[str, list] = {}
-        for sid, grp in df[parts_mask].groupby('STOCK_ID'):
-            global_parts_by_stock[str(sid)] = grp.to_dict('records')
+        _parts_cols = [c for c in ('type', 'vendor') if c in df.columns]
+        for sid, grp in df.loc[parts_mask, _parts_cols + ['STOCK_ID']].groupby('STOCK_ID'):
+            global_parts_by_stock[str(sid)] = grp[_parts_cols].to_dict('records')
 
         # ── stock_to_req: first active STOCK_ID → {req_id, wo_type} ──
         active_mask = (
@@ -269,7 +273,12 @@ class EnrichmentTransformer:
         _ORDER_THRESHOLD = timedelta(hours=4)
         _now = datetime.now(timezone.utc)
 
-        for req_id, r_df in df.groupby('req_id', dropna=True):
+        # Group once and reuse — both this loop and the PARTS-phase BB-fill loop
+        # below need per-request slices.  Re-running df[df['req_id'] == rid] per
+        # request rescans the full frame each time (O(requests × rows)).
+        req_groups: dict = dict(tuple(df.groupby('req_id', dropna=True)))
+
+        for req_id, r_df in req_groups.items():
             status = str(
                 r_df['request_status'].dropna().iloc[0]
                 if 'request_status' in r_df.columns and not r_df['request_status'].isna().all()
@@ -440,7 +449,9 @@ class EnrichmentTransformer:
         for _rid, _rph in req_phase.items():
             if _rph != 'PARTS' or req_operation.get(_rid):
                 continue
-            _rdf = df[df['req_id'] == _rid]
+            _rdf = req_groups.get(_rid)
+            if _rdf is None:
+                continue
             _asm_waiting = _rdf[
                 _rdf['type'].isin(_asm_types_set) &
                 (_rdf['visual_status'] == 'WAITING')
