@@ -89,15 +89,18 @@ _PROTO_MAP: dict[tuple[str, str], tuple[int, str]] = {
 }
 
 
-def _active_protocols(row) -> set:
-    """Return set of protocol names whose operation_state is RD or RU."""
-    pn = row.get('protocol_name')
-    ps = row.get('operation_state')
+def _active_protocols_raw(pn, ps) -> set:
+    """Active-protocol set from raw protocol_name / operation_state cell values."""
     if isinstance(pn, np.ndarray): pn = pn.tolist()
     if isinstance(ps, np.ndarray): ps = ps.tolist()
     if not isinstance(pn, list) or not isinstance(ps, list):
         return set()
     return {p for p, s in zip(pn, ps) if s in ('RD', 'RU')}
+
+
+def _active_protocols(row) -> set:
+    """Return set of protocol names whose operation_state is RD or RU."""
+    return _active_protocols_raw(row.get('protocol_name'), row.get('operation_state'))
 
 
 def _stage_from_parts(prt_df: pd.DataFrame) -> str:
@@ -383,11 +386,14 @@ class EnrichmentTransformer:
                 (_nc['type'].isin(_PARTS_TYPES))
             ] if _root_stocks else _nc
             _best_pri, _best_label, _best_state = -1, '', ''
-            for _, _row in _op_rows.iterrows():
-                for _p, _s in zip(
-                    (_row['protocol_name'] if isinstance(_row.get('protocol_name'), (list, np.ndarray)) else []),
-                    (_row['operation_state'] if isinstance(_row.get('operation_state'), (list, np.ndarray)) else []),
-                ):
+            # Iterate raw cell arrays instead of iterrows() — avoids building a
+            # pandas Series per row (the dominant cost of this step).
+            _op_pn = _op_rows['protocol_name'].to_numpy()
+            _op_st = _op_rows['operation_state'].to_numpy()
+            for _pn_cell, _st_cell in zip(_op_pn, _op_st):
+                if not isinstance(_pn_cell, (list, np.ndarray)) or not isinstance(_st_cell, (list, np.ndarray)):
+                    continue
+                for _p, _s in zip(_pn_cell, _st_cell):
                     _key = (str(_p), str(_s))
                     if _key in _PROTO_MAP:
                         _pri, _lbl = _PROTO_MAP[_key]
@@ -424,10 +430,16 @@ class EnrichmentTransformer:
             _order_pending = False
             if has_real_workorders and not is_finished and status != 'CANCELED':
                 parts_rows = active_rows[active_rows['type'].isin(_ORDER_PARTS_TYPES)]
-                for _, _pr in parts_rows.iterrows():
-                    _active = _active_protocols(_pr)
+                _pr_pn = parts_rows['protocol_name'].to_numpy()
+                _pr_st = parts_rows['operation_state'].to_numpy()
+                _pr_created = (
+                    parts_rows['wo_created_at'].to_numpy()
+                    if 'wo_created_at' in parts_rows.columns
+                    else np.full(len(parts_rows), None)
+                )
+                for _pn_cell, _st_cell, _created in zip(_pr_pn, _pr_st, _pr_created):
+                    _active = _active_protocols_raw(_pn_cell, _st_cell)
                     if _active & _ORDER_PROTOCOLS:
-                        _created = _pr.get('wo_created_at')
                         try:
                             _created = pd.Timestamp(_created)
                             if _created.tzinfo is None:
