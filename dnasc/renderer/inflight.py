@@ -454,6 +454,11 @@ def _parse_override_due(raw) -> date | None:
 
 _DEFAULT_EXCLUDED_EXP  = frozenset()
 _DEFAULT_HIDDEN_STATUS = frozenset(['FULFILLED', 'CANCELED'])
+# Request-level statuses that count as "in flight" — everything that is not
+# FULFILLED/CANCELED. Lifecycle (lsp_capacity._STATUS_RANK): NEW (actively being
+# designed) -> PLANNED (design done, no work yet) -> IN_PROGRESS (work started)
+# -> REMEDIATION. All four count as in progress.
+_ACTIVE_REQ_STATUS = frozenset(['NEW', 'PLANNED', 'IN_PROGRESS', 'REMEDIATION'])
 _PINNED_EXPS           = frozenset(['LSP Refill Requests', 'A469-Build DNASC CHO Destination Vectors'])
 
 # ── Main renderer ─────────────────────────────────────────────────────────────
@@ -486,7 +491,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     req_rows = pd.concat([base[fr_col == True], base]).drop_duplicates(subset='req_id', keep='first')
 
     active_exps = set(
-        req_rows[req_rows['request_status'] == 'IN_PROGRESS']['experiment_name'].dropna().unique()
+        req_rows[req_rows['request_status'].isin(_ACTIVE_REQ_STATUS)]['experiment_name'].dropna().unique()
     )
     req_rows = req_rows[req_rows['experiment_name'].isin(active_exps)].copy()
 
@@ -562,7 +567,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         r['assembly'],
     ))
 
-    _ip = [r for r in records if r['status'] == 'IN_PROGRESS']
+    _ip = [r for r in records if r['status'] in _ACTIVE_REQ_STATUS]
     in_prog  = len(_ip)
     flagged  = sum(1 for r in _ip if r['flags'])
     past_due = sum(1 for r in _ip if 'PAST_DUE' in r['flags'])
@@ -597,7 +602,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         return s
 
     _status_map = dict(tok.STATUS)
-    _status_map["PLANNED"] = tok.STATUS["RUNNING"]   # legacy state -> brand purple
+    _status_map["PLANNED"] = tok.STATUS["RUNNING"]   # design done, no work -> in-progress purple
+    _status_map["NEW"]     = ("#f1f5f9", "#475569", "#cbd5e1")  # NEW = "In Design" — slate (matches dashboard In Design stage)
     JS_S_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in _status_map.items()) + "}"
     JS_S_ICON  = "{" + ",".join(f"'{k}':'{ic}'" for k, ic in tok.STATUS_ICON.items()) + "}"
     JS_ST_GRAY = _tint(tok.STATUS["CANCELED"])
@@ -727,6 +733,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   var _ALL_CUST = {json.dumps(all_customers)};
   var _ALL_SUBM = {json.dumps(all_submitters)};
   var _EXCL_EXP = {excl_exp_json};
+  var _ACTIVE_ST = {json.dumps(sorted(_ACTIVE_REQ_STATUS))};   // in-flight: NEW/PLANNED/IN_PROGRESS/REMEDIATION
 
   // ── Filter state — ifRender NEVER reads from DOM ──────────────────────────
   var _flt = {{
@@ -776,7 +783,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     REPICK:'refresh',READY:'clock',WAITING:'hourglass',BLOCKED:'ban',CANCELED:'slash',DRAFT:'pencil'}};
   // status badge: Lucide icon (colorblind cue, inherits text color) + label + tint.
   function statusBdg(s){{var k=STATUS_LU[s];var ic=k?lucide(LU[k])+'&nbsp;':'';
-    return '<span style="'+PILL+'display:inline-flex;align-items:center;'+(S_ST[s]||_ST_GRAY)+'">'+ic+esc(String(s).replace(/_/g,' '))+'</span>';}}
+    var lbl=(s==='NEW')?'In Design':String(s).replace(/_/g,' ');   // NEW request = actively being designed
+    return '<span style="'+PILL+'display:inline-flex;align-items:center;'+(S_ST[s]||_ST_GRAY)+'">'+ic+esc(lbl)+'</span>';}}
   // phase pill: solid brand-sweep fill, own geometry.
   function phaseBdg(p){{return P_ST[p]?'<span style="'+GEO_PHASE+P_ST[p]+'">'+esc(p)+'</span>':'';}}
   var PAI_STY   ='{PAI_STYLE}';
@@ -919,7 +927,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     if (_flt.phase !== null && !_flt.phase.has(r.phase)) return false;
     if (_flt.fp !== null && r.fp !== _flt.fp) return false;
     var ff = _flt.flag;
-    if      (ff === 'ip')      {{ if (r.status !== 'IN_PROGRESS') return false; }}
+    if      (ff === 'ip')      {{ if (_ACTIVE_ST.indexOf(r.status) === -1) return false; }}
     else if (ff === 'flagged') {{ if (!r.flags.length)             return false; }}
     else if (ff !== 'all')     {{ if (r.flags.indexOf(ff) === -1)  return false; }}
     var q;
@@ -1263,11 +1271,12 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   }};
   window.ifFlagFilter = function(f) {{
     _flt.flag = f;
-    // "All" = show every status; "IN PROGRESS" = narrow to just IN_PROGRESS
+    // "All" = show every status; "IN PROGRESS" = narrow to in-flight statuses
+    // (NEW/PLANNED/IN_PROGRESS/REMEDIATION — everything not fulfilled/canceled).
     if (f === 'all') {{
       _flt.status = new Set(_ALL_ST);
     }} else if (f === 'ip') {{
-      _flt.status = new Set(['IN_PROGRESS']);
+      _flt.status = new Set(_ACTIVE_ST);
       _flt.flag   = 'all';   // flag filter is irrelevant once status is narrowed
     }}
     document.querySelectorAll('.iff-fbtn').forEach(function(b){{b.classList.remove('iff-active');b.style.fontWeight='';}});

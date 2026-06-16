@@ -35,3 +35,8 @@ inventory_check/
 query_results/
 twist_orders.ipynb
 dnasc/renderer/lsp_capacity.py
+
+# Slideshow: track scripts/README/template, ignore deps & generated output
+slideshow/node_modules/
+slideshow/package-lock.json
+slideshow/decks/

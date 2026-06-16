@@ -2980,7 +2980,92 @@ def render_all_projects_dashboard(
             f'<span style="{_ec_geom}background:{bg};color:{fg};border:1px solid {fg}55;">{tok.CUSTOMER_DOT}{lbl}</span>'
             for _, lbl, bg, fg in _exp_customers
         )
+        # ── Experiment creation date + due/seq override + timeline axis ───────
+        # Computed BEFORE the request loop so the age-dots can be positioned on the
+        # same axis, anchored to the dnasc-created (BIOS) date rather than week 0.
+        exp_created_str = "N/A"
+        exp_created_dt = None
+        if 'experiment_created_at' in project_df.columns:
+            exp_created_raw = project_df['experiment_created_at'].iloc[0]
+            exp_created_dt = to_est(exp_created_raw)
+            if exp_created_dt:
+                exp_created_str = exp_created_dt.strftime('%Y-%m-%d · %-I:%M %p EST')
+
+        _NO_TIMELINE_MARKERS = {"LSP Refill Requests", "A469-Build DNASC CHO Destination Vectors"}
+        _is_infra_exp = experiment_name in _NO_TIMELINE_MARKERS
+        _due_raw         = None if _is_infra_exp else _due_date_map.get(experiment_name)
+        _due_badge_html  = ""
+        _due_marker_html = ""
+        _sort_due_date   = "9999-99-99"   # default: no due date → sorts to end
+        if _due_raw is None:
+            _due_entry_data = None
+        elif isinstance(_due_raw, str):
+            _due_entry_data = {"due_date": _due_raw, "sequence_transferred": ""}
+        elif isinstance(_due_raw, dict):
+            _due_entry_data = _due_raw
+        else:
+            _due_entry_data = _due_raw[0] if _due_raw else None
+        _due_entry = bool(_due_entry_data)
+
+        # Sequence-transferred date = the real experiment start (sequences delivered),
+        # which precedes the dnasc BIOS-created date. NOT used in any TAT math.
+        _seq_exp_dt = None
+        if _due_entry_data:
+            _seq_raw = str(_due_entry_data.get("sequence_transferred", "") or "").strip()
+            if _seq_raw and _seq_raw not in ("nan", "None"):
+                try:
+                    _seq_exp_dt = datetime.strptime(_seq_raw, "%Y-%m-%d").replace(tzinfo=pytz.UTC)
+                except Exception:
+                    _seq_exp_dt = None
+
+        # Timeline axis. Week numbers ALWAYS count from dnasc-created (0w = entry) so the
+        # orange/red TAT thresholds (4/5w partner, 5/6w R&D) sit on their week marks.
+        # For partner experiments with a seq-transfer date, the left edge = seq and the
+        # axis is PROPORTIONAL: a longer upstream lead → a longer hatched band (0w/dnasc
+        # sits further right). R&D / no-seq: linear 8-week axis from dnasc-created.
+        _tl_origin_dt = exp_created_dt
+        _tl_days      = 56.0
+        _tl_weeks     = 8
+        _show_dnasc_start = False
+        _dnasc_pct    = 0.0
+        _lead_days    = 0
+        if has_ptr and exp_created_dt and _seq_exp_dt and _seq_exp_dt.date() < exp_created_dt.date():
+            _show_dnasc_start = True
+            _tl_origin_dt = _seq_exp_dt
+            _lead_days = (exp_created_dt.date() - _seq_exp_dt.date()).days
+            _tl_days = float(((exp_created_dt + pd.Timedelta(weeks=8)).date() - _seq_exp_dt.date()).days)
+            _dnasc_pct = min(100, max(0, _lead_days / _tl_days * 100))
+
+        def _axpos(dt):
+            """Position (0-100%) of a date on the timeline axis — linear from the left
+            edge (dnasc-created normally; seq-transfer for the seq-extended partner axis)."""
+            d = dt.date() if hasattr(dt, 'date') else dt
+            if not _tl_origin_dt:
+                return 0
+            return min(100, max(0, (d - _tl_origin_dt.date()).days / _tl_days * 100))
+
+        # Upstream-lead note (partner w/ seq date): experiment start + days before dnasc
+        # opened the work — informational, NOT part of dnasc TAT.
+        _seq_note_html = ""
+        if _show_dnasc_start:
+            _tot_txt = ""
+            try:
+                _dd = str((_due_entry_data or {}).get("due_date", "")).strip()
+                if _dd:
+                    _tot_days = (datetime.strptime(_dd, "%Y-%m-%d").date() - _seq_exp_dt.date()).days
+                    _tot_txt = f" · {_tot_days}d total to due (incl. lead)"
+            except Exception:
+                _tot_txt = ""
+            _seq_note_html = (
+                f'<span class="kpill" style="background:#fff7ed;border:1px solid #fed7aa;" '
+                f'title="Sequences transferred (experiment start) {_seq_exp_dt:%a %b %-d} — '
+                f'{_lead_days}d before dnasc opened the work; upstream, not counted in dnasc TAT.{_tot_txt}">'
+                f'<span class="kk" style="color:#9a3412;">Seq transferred {_seq_exp_dt:%-m/%-d}</span> '
+                f'<b style="color:#c2410c;">+{_lead_days}d upstream (not in TAT)</b></span>'
+            )
+
         dots_html = ""; stage_counts = {}; stage_items = {}; fulfilled_week_counts = {}
+        _exp_end_times = []; _exp_any_active = False   # for the TOTAL RUNNING headline
         # Sort requests: newest first, but group base+variant construct names together.
         # Strip trailing _identifier suffix to find the base construct name, then use
         # the newest request_created_at in the base group as the anchor date so variants
@@ -3036,10 +3121,20 @@ def render_all_projects_dashboard(
                 production_tats.append((production_end - r_created).days)
                 total_tats.append((total_end - r_created).days)
                 dot_color = _age_color(age_weeks, yellow_limit, red_limit, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)
+                _dot_date = production_end
+                _exp_end_times.append(total_end)
             else:
                 age_weeks = (now - r_created).days / 7
                 dot_color = _age_color(age_weeks, yellow_limit, red_limit, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)
-            pos = max(0, min(100, (age_weeks / 8) * 100))
+                _dot_date = now
+                if status not in ('CANCELED',):
+                    _exp_any_active = True
+            # Seq-extended axis: place dots by calendar date so they start at 0w (dnasc
+            # created). Standard axis: age/8 (origin already = dnasc-created).
+            if _show_dnasc_start:
+                pos = _axpos(_dot_date)
+            else:
+                pos = max(0, min(100, (age_weeks / 8) * 100))
 
             # is_stalled / is_asm_review / is_blocked / has_real_workorders all
             # pre-computed by the pipeline enrichment step — read from parquet.
@@ -3124,40 +3219,14 @@ def render_all_projects_dashboard(
             tat_parts = []
             if production_tats:
                 avg_f = sum(production_tats) / len(production_tats); weeks, days = int(avg_f//7), int(avg_f%7)
-                tat_parts.append(f"<span class='kpill'><span class='kk'>Avg Production:</span><b style='color:#2563eb;'>{weeks}w {days}d</b></span>")
+                tat_parts.append(f"<span class='kpill'><span class='kk' title='Request created → LSP Reviewing (QC confirmed)'>Avg to QC Confirmed:</span><b style='color:#2563eb;'>{weeks}w {days}d</b></span>")
             if total_tats:
                 avg_t = sum(total_tats) / len(total_tats); weeks, days = int(avg_t//7), int(avg_t%7)
-                tat_parts.append(f"<span class='kpill'><span class='kk'>Avg Total:</span><b style='color:#2563eb;'>{weeks}w {days}d</b></span>")
+                tat_parts.append(f"<span class='kpill'><span class='kk' title='Request created → LSP Releasing (available) — the dnasc TAT'>Avg to Available:</span><b style='color:#2563eb;'>{weeks}w {days}d</b></span>")
             avg_tat_html = f'''<div style="display:flex; gap:10px; font-weight:700;">{" ".join(tat_parts)}</div>'''
 
-        # ── Experiment creation date (needed for due date marker) ────────────
-        exp_created_str = "N/A"
-        exp_created_dt = None
-        if 'experiment_created_at' in project_df.columns:
-            exp_created_raw = project_df['experiment_created_at'].iloc[0]
-            exp_created_dt = to_est(exp_created_raw)
-            if exp_created_dt:
-                exp_created_str = exp_created_dt.strftime('%Y-%m-%d · %-I:%M %p EST')
-
-        # ── Due date (from Google Sheet / CSV override) ───────────────────────
-        _NO_TIMELINE_MARKERS = {"LSP Refill Requests", "A469-Build DNASC CHO Destination Vectors"}
-        _is_infra_exp = experiment_name in _NO_TIMELINE_MARKERS
-        _due_raw         = None if _is_infra_exp else _due_date_map.get(experiment_name)
-        _due_badge_html  = ""
-        _due_marker_html = ""
-        _sort_due_date   = "9999-99-99"   # default: no due date → sorts to end
-
-        # Normalize due entry — use the first (or only) entry from the sheet
-        if _due_raw is None:
-            _due_entry_data = None
-        elif isinstance(_due_raw, str):
-            _due_entry_data = {"due_date": _due_raw, "sequence_transferred": ""}
-        elif isinstance(_due_raw, dict):
-            _due_entry_data = _due_raw
-        else:
-            _due_entry_data = _due_raw[0] if _due_raw else None
-
-        _due_entry = bool(_due_entry_data)   # truthy flag used by bracket/sort logic
+        # (exp_created_dt, due/seq override, and the timeline axis were computed
+        # before the request loop above so the age-dots could use them.)
 
         # Partner project with no Asana due date in the sheet → flag it. Scoped to
         # ACTIVE experiments (≥1 in-progress request) so fulfilled/old partner work
@@ -3179,12 +3248,8 @@ def render_all_projects_dashboard(
         if _due_entry_data:
             try:
                 _now_utc      = datetime.now(pytz.UTC)
-                _8w_days      = 56.0
-                _ec_date      = exp_created_dt.date() if exp_created_dt else None
                 def _pos(dt):
-                    if not _ec_date: return 0
-                    d = dt.date() if hasattr(dt, 'date') else dt
-                    return min(100, max(0, (d - _ec_date).days / _8w_days * 100))
+                    return _axpos(dt)
 
                 _due_date_str = _due_entry_data.get("due_date", "")
                 _seq_str      = _due_entry_data.get("sequence_transferred", "")
@@ -3283,11 +3348,8 @@ def render_all_projects_dashboard(
                 _def_ngs_dt  = _last_ngs_b(_red_thresh_dt - _td2(days=1))
                 _def_due_dt  = _def_ngs_dt + _td2(days=1)   # day after last NGS = standard due
                 _sort_due_date = _def_due_dt.strftime("%Y-%m-%d")  # ISO for sort
-                _8w = 56.0
-                _ec_date2 = exp_created_dt.date()
                 def _pos2(dt):
-                    d = dt.date() if hasattr(dt, 'date') else dt
-                    return min(100, max(0, (d - _ec_date2).days / _8w * 100))
+                    return _axpos(dt)
                 _def_asm_dt  = _last_ngs_b(_red_thresh_dt - _td2(days=1)) - _td2(days=13)
                 _def_ngs_pos = _pos2(_def_ngs_dt)
                 _def_red_pos = _pos2(_red_thresh_dt)
@@ -3349,51 +3411,91 @@ def render_all_projects_dashboard(
             return dt
         _is_refill = _is_infra_exp
         def _threshold_bar(week, color, glow):
-            """Colored vertical bar only — no pill."""
+            """Colored vertical bar at `week` weeks from dnasc-created, on the axis."""
             if not exp_created_dt or _is_refill:
                 return ""
-            _left = f"{(week/8)*100}%"
+            _left = f"{_axpos(exp_created_dt + _td(weeks=week)):.2f}%"
             return (f'<div style="position:absolute;left:{_left};width:2px;height:24px;background:{color};'
                     f'top:0px;border-radius:1px;box-shadow:0 0 6px {glow};z-index:2;"></div>')
-        _orange_html = _threshold_bar(orange_week, "#f97316", "rgba(249,115,22,0.6)")
-        _red_html    = _threshold_bar(red_week,    "#be185d", "rgba(190,24,93,0.6)")
+        # Threshold bars removed — the colored week dates (amber 4w, red 5w) carry the
+        # TAT-warning cue instead; the week gridlines at 4w/5w stay normal like the rest.
+        _orange_html = ""
+        _red_html    = ""
 
         # Dynamic week header: two-line labels absolutely positioned at exact grid-line %
         # Row 1: week number (bold)  Row 2: date (smaller)
         # Pills use height:20px so their hover area stays in row-1 zone, clear of row-2 dates
         _bs = 'position:absolute;font-family:monospace;white-space:nowrap;text-align:center;line-height:1.4;'
-        _start_date_str = exp_created_dt.strftime("%a %-m/%-d") if exp_created_dt else ""
-        _weeks_header_html = (
-            f'<span style="{_bs}left:0;transform:translateX(0);text-align:left;">'
-            f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);'
-            f'">START</span>'
-            + (f'<br><span style="font-size:11px;font-weight:500;color:rgba(255,255,255,0.95);text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_start_date_str}</span>' if _start_date_str else '')
-            + f'</span>'
-        )
-        for _wh in range(1, 8):
-            _wh_pct = _wh / 8 * 100
-            if exp_created_dt and not _is_refill:
-                _wh_date = (exp_created_dt + _td(weeks=_wh)).strftime("%a %-m/%-d")
-                if _wh == orange_week:
-                    _wh_num = f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh}w</span>'
-                    _wh_dt  = f'<span style="font-size:11px;font-weight:800;color:#f97316;">{_wh_date}</span>'
-                elif _wh == red_week:
-                    _wh_num = f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh}w</span>'
-                    _wh_dt  = f'<span style="font-size:11px;font-weight:800;color:#fb7185;">{_wh_date}</span>'
+        # Threshold dates (from dnasc-created) so the matching week label can be colored.
+        _orange_d = (exp_created_dt + _td(weeks=orange_week)).date() if exp_created_dt else None
+        _red_d    = (exp_created_dt + _td(weeks=red_week)).date()    if exp_created_dt else None
+        def _hpos(dt):
+            return _axpos(dt)
+        _wn = 'font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);'
+        _wd_n = 'font-size:11px;font-weight:500;color:rgba(255,255,255,0.95);text-shadow:0 1px 2px rgba(0,0,0,0.3);'
+
+        if _show_dnasc_start:
+            # Seq-extended axis: SEQ (experiment start) at the far left, then dnasc
+            # weeks 0w..8w positioned by date. The SEQ label only shows when the band is
+            # wide enough to clear the 0w label (else it's in the band hover); on tight
+            # leads the 0w label left-aligns so it neither overlaps SEQ nor spills left.
+            _weeks_header_html = ""
+            if _dnasc_pct >= 10:
+                _weeks_header_html = (
+                    f'<span style="{_bs}left:0;transform:translateX(0);text-align:left;">'
+                    f'<span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.85);">SEQ</span>'
+                    f'<br><span style="font-size:11px;font-weight:500;color:rgba(255,255,255,0.85);">{_seq_exp_dt:%-m/%-d}</span></span>'
+                )
+            for _wh in range(0, 9):
+                _wd = exp_created_dt + _td(weeks=_wh)
+                _wpct = _hpos(_wd)
+                _wdate = _wd.strftime("%a %-m/%-d")
+                if _wh == 8:
+                    _tx = 'translateX(-100%)'
+                elif _wh == 0 and _dnasc_pct < 12:
+                    _tx = 'translateX(0)'
                 else:
-                    _wh_num = f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh}w</span>'
-                    _wh_dt  = f'<span style="font-size:11px;font-weight:500;color:rgba(255,255,255,0.95);text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh_date}</span>'
-                _wh_txt = f'{_wh_num}<br>{_wh_dt}'
-            else:
-                _wh_txt = f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh}w</span>'
-            _weeks_header_html += f'<span style="{_bs}left:{_wh_pct:.2f}%;transform:translateX(-50%);">{_wh_txt}</span>'
-        if exp_created_dt and not _is_refill:
-            _wh_8_date = (exp_created_dt + _td(weeks=8)).strftime("%a %-m/%-d")
-            _wh_8_txt = (f'<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">8w+</span>'
-                         f'<br><span style="font-size:11px;font-weight:500;color:rgba(255,255,255,0.95);text-shadow:0 1px 2px rgba(0,0,0,0.3);">{_wh_8_date}</span>')
+                    _tx = 'translateX(-50%)'
+                if _wh == 0:
+                    _num = '<span style="font-size:11px;font-weight:800;color:#ffffff;text-shadow:0 1px 3px rgba(0,0,0,0.6);">0w · dnasc</span>'
+                    _dtt = f'<span style="font-size:11px;font-weight:700;color:#ffffff;text-shadow:0 1px 3px rgba(0,0,0,0.6);">{_wdate}</span>'
+                elif _wd.date() == _orange_d:
+                    _num = f'<span style="{_wn}">{_wh}w</span>'; _dtt = f'<span style="font-size:11px;font-weight:800;color:#fbbf24;">{_wdate}</span>'
+                elif _wd.date() == _red_d:
+                    _num = f'<span style="{_wn}">{_wh}w</span>'; _dtt = f'<span style="font-size:11px;font-weight:800;color:#fb7185;">{_wdate}</span>'
+                else:
+                    _num = f'<span style="{_wn}">{_wh}w{"+" if _wh==8 else ""}</span>'; _dtt = f'<span style="{_wd_n}">{_wdate}</span>'
+                _weeks_header_html += f'<span style="{_bs}left:{_wpct:.2f}%;transform:{_tx};">{_num}<br>{_dtt}</span>'
         else:
-            _wh_8_txt = '<span style="font-size:11px;font-weight:600;color:#ffffff;letter-spacing:0.2px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">8w+</span>'
-        _weeks_header_html += f'<span style="{_bs}right:0;transform:translateX(0);text-align:right;">{_wh_8_txt}</span>'
+            _start_date_str = _tl_origin_dt.strftime("%a %-m/%-d") if _tl_origin_dt else ""
+            _weeks_header_html = (
+                f'<span style="{_bs}left:0;transform:translateX(0);text-align:left;">'
+                f'<span style="{_wn}">START</span>'
+                + (f'<br><span style="{_wd_n}">{_start_date_str}</span>' if _start_date_str else '')
+                + f'</span>'
+            )
+            for _wh in range(1, _tl_weeks):
+                _wh_pct = _wh / _tl_weeks * 100
+                if _tl_origin_dt and not _is_refill:
+                    _wh_dt_date = (_tl_origin_dt + _td(weeks=_wh)).date()
+                    _wh_date = _wh_dt_date.strftime("%a %-m/%-d")
+                    if _wh_dt_date == _orange_d:
+                        _wh_dt  = f'<span style="font-size:11px;font-weight:800;color:#fbbf24;">{_wh_date}</span>'
+                    elif _wh_dt_date == _red_d:
+                        _wh_dt  = f'<span style="font-size:11px;font-weight:800;color:#fb7185;">{_wh_date}</span>'
+                    else:
+                        _wh_dt  = f'<span style="{_wd_n}">{_wh_date}</span>'
+                    _wh_txt = f'<span style="{_wn}">{_wh}w</span><br>{_wh_dt}'
+                else:
+                    _wh_txt = f'<span style="{_wn}">{_wh}w</span>'
+                _weeks_header_html += f'<span style="{_bs}left:{_wh_pct:.2f}%;transform:translateX(-50%);">{_wh_txt}</span>'
+            if _tl_origin_dt and not _is_refill:
+                _wh_last_date = (_tl_origin_dt + _td(weeks=_tl_weeks)).strftime("%a %-m/%-d")
+                _wh_last_txt = (f'<span style="{_wn}">{_tl_weeks}w+</span>'
+                                f'<br><span style="{_wd_n}">{_wh_last_date}</span>')
+            else:
+                _wh_last_txt = f'<span style="{_wn}">{_tl_weeks}w+</span>'
+            _weeks_header_html += f'<span style="{_bs}right:0;transform:translateX(0);text-align:right;">{_wh_last_txt}</span>'
         if _is_refill:
             _default_bracket_html = ""
             _due_marker_html = ""
@@ -3422,10 +3524,8 @@ def render_all_projects_dashboard(
                                 else _ref_ngs_dt - _td(days=1))
                 _rel_dt = _ref_ngs_dt + _td(days=1)
 
-                _ec2 = exp_created_dt.date()
                 def _posm(dt):
-                    d = dt.date() if hasattr(dt, 'date') else dt
-                    return min(100, max(0, (d - _ec2).days / 56.0 * 100))
+                    return _axpos(dt)
 
                 _chain_pop_id = f"chainpop_{safe_exp_id}"
                 _pop_rows = [("Assembly", _asm_dt.strftime("%a %b %-d")),
@@ -3543,12 +3643,71 @@ def render_all_projects_dashboard(
         # ride inside the box (white text); milestone chips sit just below the track.
         _grad = ("linear-gradient(90deg, #7461b8 0%, #a05f8a 100%)" if has_ptr
                  else "linear-gradient(90deg, #3a5c7a 0%, #3d8aa2 100%)")
-        # Elapsed-time progress fill (START -> now), as a fraction of the 8-week track.
+        # Elapsed-time progress fill (origin -> now), as a fraction of the track.
         try:
-            _now_pct = max(0.0, min(100.0, (datetime.now() - exp_created_dt).days / 56.0 * 100.0))
+            _now_pct = _axpos(datetime.now(pytz.UTC))
         except Exception:
             _now_pct = 0.0
-        timeline_bar = f"""<div style="margin:8px 0 4px 0; padding:12px 14px; border-radius:8px; background:{_grad}; box-shadow:0 1px 3px rgba(15,23,42,0.18);"><div style="position:relative; width:100%; height:42px; margin-bottom:6px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:46px; background:rgba(255,255,255,0.14); border-radius:11px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.25); border:1px solid #cbd5e1;"><div style="position:absolute;left:0;top:0;height:100%;width:{_now_pct:.1f}%;background:rgba(255,255,255,0.33);border-radius:11px 0 0 11px;z-index:1;"></div>{" ".join([f'<div style="position:absolute; left:{(w/8)*100}%; top:0; width:1px; height:100%; background:rgba(255,255,255,0.25); z-index:1;"></div>' for w in range(1,8)])}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}</div></div>"""
+
+        # Seq-extended axis: a purple line marks 0w (dnasc created = entry), and a green
+        # dot marks "now". SEQ / 0w·dnasc labels live in the week header above.
+        _seq_marker_html = ""
+        if _show_dnasc_start:
+            _now_lbl = now.strftime("%-m/%-d")
+            _seq_marker_html = (
+                f'<div title="0w — dnasc created (entry); dnasc TAT starts here" '
+                f'style="position:absolute;left:{_dnasc_pct:.2f}%;top:0;width:3px;height:100%;'
+                f'background:#ffffff;z-index:6;transform:translateX(-50%);box-shadow:0 0 6px rgba(0,0,0,0.55);"></div>'
+                f'<div title="now {_now_lbl}" style="position:absolute;left:{_now_pct:.2f}%;top:50%;transform:translate(-50%,-50%);'
+                f'width:12px;height:12px;border-radius:50%;background:#10b981;border:2px solid #fff;z-index:8;box-shadow:0 1px 3px rgba(0,0,0,0.4);"></div>'
+                f'<div style="position:absolute;left:{_now_pct:.2f}%;top:44px;transform:translateX(-50%);'
+                f'background:#ecfdf5;color:#047857;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;'
+                f'white-space:nowrap;line-height:1;border:1px solid #10b981;z-index:7;pointer-events:none;">now {_now_lbl}</div>'
+            )
+        # Greyed hatched band over the pre-dnasc lead (seq → dnasc start) = upstream.
+        _upstream_band = ""
+        if _show_dnasc_start and _dnasc_pct > 0:
+            _up_pop_id = f"uppop_{safe_exp_id}"
+            _upstream_band = (
+                # Hatched band (visual only)
+                f'<div style="position:absolute;left:0;top:0;width:{_dnasc_pct:.2f}%;height:100%;'
+                f'background:repeating-linear-gradient(45deg,rgba(71,85,105,0.30),rgba(71,85,105,0.30) 5px,rgba(71,85,105,0.12) 5px,rgba(71,85,105,0.12) 10px);'
+                f'border-right:1px dashed rgba(255,255,255,0.7);border-radius:11px 0 0 11px;z-index:2;pointer-events:none;"></div>'
+                # Hover zone on top (above the dots layer) + styled popover
+                f'<div style="position:absolute;left:0;top:0;width:{_dnasc_pct:.2f}%;height:100%;z-index:27;cursor:help;"'
+                f' onmouseenter="document.getElementById(\'{_up_pop_id}\').style.display=\'block\'"'
+                f' onmouseleave="document.getElementById(\'{_up_pop_id}\').style.display=\'none\'">'
+                f'<div id="{_up_pop_id}" style="display:none;position:absolute;left:2px;top:26px;'
+                f'background:#1e1b4b;color:white;font-size:10px;padding:8px 11px;border-radius:5px;'
+                f'white-space:nowrap;box-shadow:0 3px 12px rgba(0,0,0,0.7);z-index:100;border:1px solid #94a3b8;">'
+                f'<div style="font-weight:800;margin-bottom:4px;">Experiment Start (upstream)</div>'
+                f'<div>Seq transferred {_seq_exp_dt:%a %b %-d}<br>'
+                f'<span style="color:rgba(255,255,255,0.6);">+{_lead_days}d before dnasc · not counted in TAT</span></div>'
+                f'</div></div>'
+            )
+        # Elapsed (now) fill starts at 0w (dnasc entry), not the seq edge.
+        _nowfill_left  = _dnasc_pct
+        _nowfill_width = max(0.0, _now_pct - _dnasc_pct)
+        # Gridlines: dnasc weeks 0w..8w by date when seq-extended, else even eighths.
+        if _show_dnasc_start:
+            _gridlines_html = "".join(
+                f'<div style="position:absolute; left:{_hpos(exp_created_dt + _td(weeks=w)):.2f}%; top:0; width:1px; height:100%; background:rgba(255,255,255,0.25); z-index:1;"></div>'
+                for w in range(0, 9))
+        else:
+            _gridlines_html = "".join(
+                f'<div style="position:absolute; left:{(w/_tl_weeks)*100:.2f}%; top:0; width:1px; height:100%; background:rgba(255,255,255,0.25); z-index:1;"></div>'
+                for w in range(1, _tl_weeks))
+        # Legend (seq-extended axis only).
+        _tl_legend = ""
+        if _show_dnasc_start:
+            _tl_legend = (
+                '<div style="display:flex;gap:16px;align-items:center;margin-top:8px;font-size:9px;color:rgba(255,255,255,0.92);flex-wrap:wrap;">'
+                '<span style="display:flex;align-items:center;gap:5px;"><span style="width:18px;height:9px;background:repeating-linear-gradient(45deg,rgba(255,255,255,0.55),rgba(255,255,255,0.55) 3px,rgba(255,255,255,0.15) 3px,rgba(255,255,255,0.15) 6px);border:1px solid rgba(255,255,255,0.5);"></span>upstream seq→dnasc (not in TAT)</span>'
+                '<span style="display:flex;align-items:center;gap:5px;"><span style="width:3px;height:11px;background:#ffffff;"></span>0w = dnasc created (entry)</span>'
+                '<span style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#10b981;border:1px solid #fff;"></span>now</span>'
+                '</div>'
+            )
+        timeline_bar = f"""<div style="margin:8px 0 4px 0; padding:12px 14px; border-radius:8px; background:{_grad}; box-shadow:0 1px 3px rgba(15,23,42,0.18);"><div style="position:relative; width:100%; height:42px; margin-bottom:6px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:46px; background:rgba(255,255,255,0.14); border-radius:11px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.25); border:1px solid #cbd5e1;"><div style="position:absolute;left:{_nowfill_left:.1f}%;top:0;height:100%;width:{_nowfill_width:.1f}%;background:rgba(255,255,255,0.33);z-index:1;"></div>{_upstream_band}{_gridlines_html}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}{_seq_marker_html}</div>{_tl_legend}</div>"""
 
         if experiment_active_map is not None:
             db_active = experiment_active_map.get(experiment_name, True)
@@ -3559,6 +3718,41 @@ def render_all_projects_dashboard(
 
         _exp_emails_raw = [str(e).strip() for e in project_df['submitter_email'].dropna().unique() if str(e).strip() not in ('', 'nan', 'none', 'None')] if 'submitter_email' in project_df.columns else []
         _exp_email_str = ' / '.join(_exp_emails_raw[:2]) if 1 <= len(_exp_emails_raw) <= 2 else ''
+
+        # ── TOTAL RUNNING / TOTAL headline ────────────────────────────────────
+        # Elapsed since the project's earliest real start: seq transfer if present,
+        # else dnasc-created (fallback also covers a missing/invalid seq so the box
+        # never breaks or goes negative). Live "RUNNING" while any request is active;
+        # frozen "TOTAL (seq → fulfilled)" once everything is done. Includes the
+        # upstream lead — deliberately labeled so it's not mistaken for TAT.
+        _run_html = ""
+        _run_start = _seq_exp_dt if _seq_exp_dt else exp_created_dt
+        if _run_start and exp_created_dt and _run_start > exp_created_dt:
+            _run_start = exp_created_dt
+        if _run_start and not _is_infra_exp:
+            if _exp_any_active or not _exp_end_times:
+                _run_end, _running = now, True
+            else:
+                _run_end, _running = max(_exp_end_times), False
+            _run_days = max(0, (_run_end.date() - _run_start.date()).days)
+            _rw, _rd = _run_days // 7, _run_days % 7
+            _run_dur = f"{_rw}w {_rd}d" if _rw else f"{_rd}d"
+            _from_seq = bool(_seq_exp_dt and _run_start == _seq_exp_dt)
+            if _running:
+                _run_lbl = "RUNNING (since sequence transfer)" if _from_seq else "RUNNING"
+                _run_tip = (f"Elapsed since {'sequences transferred' if _from_seq else 'dnasc created'} "
+                            f"{_run_start:%b %-d} — live clock; includes upstream lead, unlike the dnasc TAT.")
+                _run_bg, _run_fg, _run_bd = "#eff6ff", "#1e40af", "#bfdbfe"
+            else:
+                _run_lbl = "TOTAL"
+                _run_tip = (f"Final elapsed {_run_start:%b %-d} → {_run_end:%b %-d} "
+                            f"({'seq' if _from_seq else 'dnasc'} → fulfilled); includes upstream lead, unlike TAT.")
+                _run_bg, _run_fg, _run_bd = "#f0fdf4", "#166534", "#bbf7d0"
+            _run_html = (
+                f'<span class="kpill" title="{_run_tip}" style="margin-left:auto;background:{_run_bg};border:1px solid {_run_bd};">'
+                f'<span class="kk" style="color:{_run_fg};">{_run_lbl}</span> '
+                f'<b style="color:{_run_fg};">{_run_dur}</b></span>'
+            )
 
         html += f"""
             <div class="project-wrapper" data-active="{"true" if db_active else "false"}" data-due-date="{_sort_due_date}" style="border-left:4px solid {_card_accent};">
@@ -3571,7 +3765,8 @@ def render_all_projects_dashboard(
                         <span class="kpill"><span class="kk">Requests:</span><b>{len(req_groups)}</b></span>
                         <span class="kpill"><span class="kk">Fulfilled:</span><b style="color:#2563eb;">{count_fulfilled}</b></span>
                         {avg_tat_html}
-                        <button id="bucket_btn_{safe_exp_id}" onclick="event.stopPropagation();toggleBucketView('{safe_exp_id}')" style="margin-left:auto;background:#fff;border:1px solid #e5e7eb;color:#374151;font-size:10px;padding:3px 9px;border-radius:6px;cursor:pointer;font-weight:600;white-space:nowrap;">Stage View</button>
+                        {_run_html}
+                        <button id="bucket_btn_{safe_exp_id}" onclick="event.stopPropagation();toggleBucketView('{safe_exp_id}')" style="margin-left:8px;background:#fff;border:1px solid #e5e7eb;color:#374151;font-size:10px;padding:3px 9px;border-radius:6px;cursor:pointer;font-weight:600;white-space:nowrap;">Stage View</button>
                     </div>
                     <div style="font-size:10px; color:#9ca3af; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Created: {exp_created_str}{(f' &nbsp;<span style="color:#2563eb; font-weight:600;">' + _exp_email_str + '</span>') if _exp_email_str else ''}</div>
                     <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
