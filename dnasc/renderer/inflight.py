@@ -461,6 +461,12 @@ _DEFAULT_HIDDEN_STATUS = frozenset(['FULFILLED', 'CANCELED'])
 # -> REMEDIATION. All four count as in progress.
 _ACTIVE_REQ_STATUS = frozenset(['NEW', 'PLANNED', 'IN_PROGRESS', 'REMEDIATION'])
 _PINNED_EXPS           = frozenset(['LSP Refill Requests', 'A469-Build DNASC CHO Destination Vectors'])
+# Experiments where a trailing _vN construct suffix marks a redo variant that
+# should group under its original. `_v2` is overloaded elsewhere (e.g. dep_rep
+# and other uses), so this grouping is opt-in per experiment — match is a
+# substring of experiment_name. Remove an entry (or empty the tuple) to turn the
+# original+v2 grouping off for that experiment.
+_VARIANT_GROUP_EXPS = ('VRT002',)
 
 # ── Main renderer ─────────────────────────────────────────────────────────────
 
@@ -532,9 +538,12 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         _cr = colony_roll.get(req_id, {})
         # Variant grouping: a redo of the same design carries a trailing `_vN`
         # suffix on the construct name (e.g. "...(CO 1.5)" vs "...(CO 1.5)_v2").
-        # Strip it to a shared base so the original + its v2/v3 group together.
+        # Strip it to a shared base so the original + its v2/v3 group together —
+        # but ONLY for opt-in experiments (_VARIANT_GROUP_EXPS), since `_v2` is
+        # used for other things elsewhere.
         construct = str(row.get('construct_name', '') or '')
-        _vm = re.search(r'_(v\d+)$', construct)
+        _grp = any(tag in exp_name for tag in _VARIANT_GROUP_EXPS)
+        _vm  = re.search(r'_(v\d+)$', construct) if _grp else None
         records.append({
             'exp':       str(row.get('experiment_name', '') or ''),
             'construct': construct,
@@ -949,6 +958,18 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     if(winner) b+='<span style="'+BDG+'background:#EAF3DE;color:#3B6D11;border:0.5px solid #97C459;">&#10003; clone</span>';
     return b;
   }}
+  // Request-level seq status: the request row sums colony numbers across ALL designs
+  // but the overall request status (e.g. IN_PROGRESS, kept alive by still-WAITING
+  // designs) doesn't reflect the seq outcome of the designs that actually produced
+  // those colonies. If every design that picked colonies is terminal and none are
+  // seq-confirmed, the picked colonies FAILED sequencing — not PENDING. Only report a
+  // non-terminal (PENDING-eligible) status when a colony-producing design is still
+  // active and could yet yield a seq result.
+  function reqSeqStatus(r){{
+    var term=function(s){{return s==='FAILED'||s==='CANCELED'||s==='SUCCEEDED'||s==='FULFILLED';}};
+    var anyActivePicked=(r.designs||[]).some(function(d){{return (d.picked||0)>0 && !term(d.status);}});
+    return anyActivePicked ? r.status : 'FAILED';
+  }}
   // MM/DD/YYYY (no time) for date columns
   function fmtMDY(s){{if(!s)return'<span class="if-cz">—</span>';var p=s.split('-');return p.length===3?(p[1]+'/'+p[2]+'/'+p[0]):esc(s);}}
   function agarLink(u,l){{return u?'<a href="'+esc(u)+'" target="_blank" class="if-plate-link" style="font-size:10px;">'+esc(l)+'</a>':'';}}
@@ -1041,7 +1062,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       + '<td style="'+TD+'white-space:nowrap;">'+rwarn+'</td>'
       + '<td style="'+TD+'">'+num(c.pickable)+'</td>'
       + '<td style="'+TD+'">'+num(c.picked)+'</td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(c.seq,c.tot,c.has_winner,r.status,c.picked)+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(c.seq,c.tot,c.has_winner,reqSeqStatus(r),c.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(r.status)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;font-size:9px;color:#64748b;">'+fmtMDY(r.assembly)+'</td>'
       + '</tr>';
