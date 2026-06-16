@@ -9,6 +9,7 @@ so filtering and sorting work without round-trips.
 
 from __future__ import annotations
 import json
+import re
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -529,9 +530,16 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
             flags.append('STALLED')
         op_display = '' if is_stalled else op
         _cr = colony_roll.get(req_id, {})
+        # Variant grouping: a redo of the same design carries a trailing `_vN`
+        # suffix on the construct name (e.g. "...(CO 1.5)" vs "...(CO 1.5)_v2").
+        # Strip it to a shared base so the original + its v2/v3 group together.
+        construct = str(row.get('construct_name', '') or '')
+        _vm = re.search(r'_(v\d+)$', construct)
         records.append({
             'exp':       str(row.get('experiment_name', '') or ''),
-            'construct': str(row.get('construct_name', '') or ''),
+            'construct': construct,
+            'base':      construct[:_vm.start()] if _vm else construct,
+            'variant':   _vm.group(1) if _vm else '',
             'pAI':       pai_map.get(req_id, ''),
             'fp':        fp,
             'customer':  str(row.get('customer', '') or ''),
@@ -556,13 +564,33 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     # sort last via the '9999-99-99' sentinel.
     _DUE_LAST = '9999-99-99'
     _exp_due = {}
+    _base_due = {}
+    _base_cnt = {}
     for r in records:
         due = r['due_date'] or _DUE_LAST
         _exp_due[r['exp']] = min(_exp_due.get(r['exp'], _DUE_LAST), due)
+        _bk = (r['exp'], r['base'])
+        _base_due[_bk] = min(_base_due.get(_bk, _DUE_LAST), due)
+        _base_cnt[_bk] = _base_cnt.get(_bk, 0) + 1
+
+    def _vrank(v):
+        try:
+            return int(v[1:]) if v else 0
+        except Exception:
+            return 99
+
+    # Within each experiment, cluster the multi-variant groups (original + v2/v3)
+    # first so the lone, ungrouped constructs don't interleave between them; then
+    # keep each base-construct group contiguous (by the group's earliest due) and
+    # order the original before its v2/v3.
     records.sort(key=lambda r: (
         1 if r['pinned'] else 0,
         _exp_due.get(r['exp'], _DUE_LAST),
         r['exp'],
+        0 if _base_cnt.get((r['exp'], r['base']), 0) > 1 else 1,
+        _base_due.get((r['exp'], r['base']), _DUE_LAST),
+        r['base'],
+        _vrank(r['variant']),
         r['due_date'] or _DUE_LAST,
         r['assembly'],
     ))
@@ -670,6 +698,11 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
 .if-att-row td:first-child,
 .if-attempt td:first-child,
 .if-strain-row td:first-child{{border-left:4px solid #e3e5ea;}}
+/* Variant group: original + its v2/v3 redo share one construct header and a
+   common spine so they read as a single grouped section — kept neutral/quiet. */
+.if-cgrp td{{background:#fafafa;border-top:1px solid #ededed;}}
+.if-cgrp td:first-child{{border-left:3px solid #cbd5e1;}}
+.if-cgrp-mem td:first-child{{border-left:3px solid #e8e8ee;}}
 </style>
 <div style="padding:12px 16px;background:#fff;min-height:100%;">
 
@@ -943,7 +976,28 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   // ── Render (rebuilds tbody from _IFD using _flt) ──────────────────────────
   // Buckets passing rows by experiment before rendering so column sorts never
   // produce duplicate experiment headers or scattered rows.
-  function _rowHtml(r) {{
+  // Variant pill: 'orig' (no suffix) vs 'v2'/'v3' redo — shown in the construct
+  // cell of a grouped member, since the full construct name lives in the header.
+  function variantPill(v){{
+    var lbl=v?v:'orig';
+    var st=v?'background:#eef1f6;color:#566077;border:1px solid #dde2ec;'
+            :'background:#f4f4f5;color:#6b7280;border:1px solid #e6e6e9;';
+    return '<span style="display:inline-block;font-size:8px;font-weight:600;padding:1px 6px;border-radius:3px;'+st+'">'+esc(lbl)+'</span>';
+  }}
+  // Construct cell — wraps the full name (no ellipsis truncation). For a grouped
+  // variant member, the base name is in the header, so show just the variant pill.
+  function constructCell(r, grouped){{
+    if(grouped) return '<td title="'+esc(r.construct)+'" style="'+TD+'max-width:240px;">'+variantPill(r.variant)+'</td>';
+    return '<td title="'+esc(r.construct)+'" style="'+TD+'max-width:260px;white-space:normal;word-break:break-word;">'+esc(r.construct)+'</td>';
+  }}
+  // Construct-group header: one full base-construct name spanning the row, shown
+  // above the original + v2/v3 members that share it.
+  function _constructHeader(base, ncol){{
+    return '<tr class="if-cgrp"><td colspan="'+ncol+'" style="padding:3px 14px 3px 20px;font-size:10px;'
+         + 'font-weight:600;color:#475569;white-space:normal;word-break:break-word;line-height:1.3;">'
+         + esc(base) + '</td></tr>';
+  }}
+  function _rowHtml(r, grouped) {{
     var bg='';
     for(var fi=0;fi<r.flags.length;fi++){{if(F_BG[r.flags[fi]]){{bg='background:'+F_BG[r.flags[fi]]+';';break;}}}}
     var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
@@ -953,10 +1007,10 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       if(f==='COLONY_RISK') return colRiskFlag(r._colRisk, r._colPick);
       return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);
     }}).join('');
-    return '<tr style="'+bg+'">'
+    return '<tr class="'+(grouped?'if-cgrp-mem':'')+'" style="'+bg+'">'
           + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
-          + '<td title="'+esc(r.construct)+'" style="'+TD+'max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+esc(r.construct)+'</td>'
+          + constructCell(r, grouped)
           + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
           + '<td style="'+TD+'max-width:110px;">'+fmtSubmitter(r.submitter)+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+st+'</td>'
@@ -971,17 +1025,17 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   }}
   // ── Colony Tracking row builders (L1 request → L2 design → L3 attempt → L4 wo) ──
   function _dash(){{ return '<span style="display:block;text-align:right;color:#cbd5e1;font-size:11px;">&mdash;</span>'; }}
-  function _colReqRow(r) {{
+  function _colReqRow(r, grouped) {{
     var open = !!_expR[r.req_id], c = r.col;
     var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
     var ph  = phaseBdg(r.phase);
     var _lv = (r.designs||[]).map(designRisk);
     var rwarn = riskBadge(_lv.indexOf('HIGH')!==-1 ? 'HIGH' : (_lv.indexOf('MED')!==-1 ? 'MED' : ''));
-    return '<tr class="if-cardtop" style="cursor:pointer;font-weight:600;" onclick="ifToggleReq(\\''+r.req_id+'\\')">'
+    return '<tr class="if-cardtop'+(grouped?' if-cgrp-mem':'')+'" style="cursor:pointer;font-weight:600;" onclick="ifToggleReq(\\''+r.req_id+'\\')">'
       + '<td style="'+TD+'"><span class="if-caret'+(open?' open':'')+'">&#9654;</span></td>'
       + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
-      + '<td style="'+TD+'max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+esc(r.construct)+'</td>'
+      + constructCell(r, grouped)
       + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+rwarn+'</td>'
@@ -1074,8 +1128,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     if(!rows.length) rows=(a.rows||[]);
     return rows.map(_colWoRow).join('');
   }}
-  function _colonyRows(r) {{
-    var html = '<tr class="if-cardgap"><td colspan="12"></td></tr>' + _colReqRow(r);
+  function _colonyRows(r, grouped, suppressGap) {{
+    var html = (suppressGap ? '' : '<tr class="if-cardgap"><td colspan="12"></td></tr>') + _colReqRow(r, grouped);
     if (_expR[r.req_id]) {{
       (r.designs||[]).forEach(function(d, di) {{
         html += _colDesignRow(r, d, di);
@@ -1132,7 +1186,23 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       html += '<tr class="if-grp"><td colspan="'+NCOL+'" style="padding:16px 14px 7px;font-size:13px;'
             + 'font-weight:700;color:#111827;background:#fff;border-top:1px solid #e5e7eb;">'
             + esc(exp) + partnerPill + '</td></tr>';
-      g.rows.forEach(function(r) {{ html += COLONY ? _colonyRows(r) : _rowHtml(r); }});
+      // Sub-group rows by base construct so an original + its v2/v3 redo render as
+      // one section (shared header). Grouping is by base regardless of adjacency,
+      // so it survives column re-sorts; singletons render exactly as before.
+      var vgroups = [], vidx = {{}};
+      g.rows.forEach(function(r) {{
+        var b = r.base || r.construct;
+        if (!vidx.hasOwnProperty(b)) {{ vidx[b] = vgroups.length; vgroups.push([]); }}
+        vgroups[vidx[b]].push(r);
+      }});
+      vgroups.forEach(function(rows) {{
+        if (rows.length > 1) {{
+          html += _constructHeader(rows[0].base || rows[0].construct, NCOL);
+          rows.forEach(function(r) {{ html += COLONY ? _colonyRows(r, true, true) : _rowHtml(r, true); }});
+        }} else {{
+          html += COLONY ? _colonyRows(rows[0]) : _rowHtml(rows[0]);
+        }}
+      }});
     }});
     if (!html) html = '<tr><td colspan="'+NCOL+'" style="padding:20px;color:#6b7280;font-size:11px;text-align:center;">No matching requests.</td></tr>';
     tbody.innerHTML = html;
