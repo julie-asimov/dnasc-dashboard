@@ -228,7 +228,12 @@ class EnrichmentTransformer:
         to every row. All are deterministic from existing df columns.
         """
         log.info("Computing request enrichment fields...")
-        df = df.copy()
+        # Shallow copy only — this function exclusively ADDS new columns (never
+        # mutates existing ones), and the sole caller reassigns its result, so we
+        # don't need to deep-copy the 48k-row object arrays.  A deep copy here was
+        # a needless memory spike that destabilized this step under memory
+        # pressure on the server.
+        df = df.copy(deep=False)
 
         # ── status_rank (per row) ─────────────────────────────────────
         df['status_rank'] = df['visual_status'].map(_STATUS_PRIORITY).fillna(99).astype(int)
