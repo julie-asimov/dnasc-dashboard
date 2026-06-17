@@ -40,3 +40,4 @@ dnasc/renderer/lsp_capacity.py
 slideshow/node_modules/
 slideshow/package-lock.json
 slideshow/decks/
+replay_cache/

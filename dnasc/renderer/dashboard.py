@@ -510,6 +510,19 @@ def render_all_projects_dashboard(
         for rid, grp in df[df['type'].isin(_global_parts_types)].groupby('root_work_order_id')
     }
 
+    # Plate-popover dedup pool. The ~88k plate/colony hover popovers are ~91%
+    # duplicates and were inlined in full (~21 MB). Intern each unique popover
+    # body once; build sites emit an EMPTY <div class="plate-popover" data-pop="N">
+    # and the pool (window.PLATE_POP) is emitted once in the tail. JS fills each
+    # popover from the pool on first hover/click — CSS hover + click-pin unchanged.
+    _popover_pool: dict[str, int] = {}
+    def _intern_popover(content: str) -> int:
+        idx = _popover_pool.get(content)
+        if idx is None:
+            idx = len(_popover_pool)
+            _popover_pool[content] = idx
+        return idx
+
     # =========================================================================
     # HTML CSS WITH TABS
     # =========================================================================
@@ -1110,12 +1123,24 @@ def render_all_projects_dashboard(
         if (firstExp) { firstExp.style.display = 'block'; }
         if (firstExpIcon) { firstExpIcon.classList.add('open'); }
         setTimeout(function() { _hideOverlay(); }, 0);
+        // Lazy-fill deduped plate popovers from window.PLATE_POP on first hover/click.
+        function _fillPop(p) {
+            if (p && p.dataset.pop !== undefined && !p._filled) {
+                p.innerHTML = (window.PLATE_POP && window.PLATE_POP[+p.dataset.pop]) || '';
+                p._filled = 1;
+            }
+        }
+        document.addEventListener('mouseover', function(e) {
+            var c = e.target.closest('.plate-hover-container');
+            if (c) { _fillPop(c.querySelector('.plate-popover')); }
+        });
         document.addEventListener('click', function(e) {
             var trigger = e.target.closest('.colony-badge, .plate-trigger');
             if (trigger) {
                 e.stopPropagation();
                 var container = trigger.closest('.plate-hover-container');
                 var popover = container.querySelector('.plate-popover');
+                _fillPop(popover);
                 if (popover.classList.contains('sticky')) { popover.classList.remove('sticky'); }
                 else { document.querySelectorAll('.plate-popover.sticky').forEach(function(p) { p.classList.remove('sticky'); }); popover.classList.add('sticky'); }
                 return;
@@ -2222,7 +2247,7 @@ def render_all_projects_dashboard(
                                     tooltip_html += f'<a href="https://bios.asimov.io/inventory/plates/{pid}" target="_blank" class="popover-link">Plate {pid}</a>'
                                     if (i + 1) % 3 == 0 and i < len(sorted_plates) - 1: tooltip_html += '<br>'
                                 tooltip_html += '</div></div>'
-                            details_pills += f"""<div class="plate-hover-container"><span class="plate-trigger">{total_plates} Plates</span><div class="plate-popover">{tooltip_html}</div></div>"""
+                            details_pills += f"""<div class="plate-hover-container"><span class="plate-trigger">{total_plates} Plates</span><div class="plate-popover" data-pop="{_intern_popover(tooltip_html)}"></div></div>"""
                         _dot_cls = "repick" if item['queue'] == proto.REPICK else item['class']
                         pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot {_dot_cls}"></div><div class="t-content"><div class="t-header"><span class="t-name">{item['queue']}</span><span class="t-time">{time_str}</span></div><div class="t-details">{details_pills}</div></div></div>""")
                 else:
@@ -2239,7 +2264,7 @@ def render_all_projects_dashboard(
                                 tooltip_html += f'<a href="https://bios.asimov.io/inventory/plates/{pid}" target="_blank" class="popover-link">Plate {pid}</a>'
                                 if (i + 1) % 3 == 0 and i < len(pids_sorted) - 1: tooltip_html += '<br>'
                             tooltip_html += '</div></div>'
-                        lims_pills = f'<div class="plate-hover-container"><span class="plate-trigger">{len(all_pids)} Plates</span><div class="plate-popover">{tooltip_html}</div></div>'
+                        lims_pills = f'<div class="plate-hover-container"><span class="plate-trigger">{len(all_pids)} Plates</span><div class="plate-popover" data-pop="{_intern_popover(tooltip_html)}"></div></div>'
                         _fallback_labels = {
                             'pcr_workorder': 'PCR',
                             'oligo_synthesis_workorder': 'Oligo Synthesis',
@@ -2741,7 +2766,7 @@ def render_all_projects_dashboard(
                                         if col_num == selected_col_num: links += f'<a href="{url}" target="_blank" class="popover-link" style="color:#0891b2;">★ {label}</a>'
                                         else: links += f'<a href="{url}" target="_blank" class="popover-link">{label}</a>'
                                     popover_content += f'<div class="popover-group"><div class="popover-title">{protocol_name}</div>{links}</div>'
-                            if popover_content: details_info.append(f'<br><div class="plate-hover-container"><span class="colony-badge" style="background: {bg}; color: {color}; cursor:pointer;">{seq}/{tot} colonies seq confirmed</span><div class="plate-popover">{popover_content}</div></div>')
+                            if popover_content: details_info.append(f'<br><div class="plate-hover-container"><span class="colony-badge" style="background: {bg}; color: {color}; cursor:pointer;">{seq}/{tot} colonies seq confirmed</span><div class="plate-popover" data-pop="{_intern_popover(popover_content)}"></div></div>')
                             else: details_info.append(f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>')
                             if _n_repick > 0:
                                 details_info.append(f'<br><span class="colony-badge" style="background:#ede9fe;color:#7c3aed;">Repick: 0/{_n_repick} colonies seq confirmed</span>')
@@ -3939,6 +3964,14 @@ def render_all_projects_dashboard(
     """
     html = html.replace("__LSP_CAPACITY_TAB_CONTENT__", lsp_capacity_html)
     html = html.replace("__INFLIGHT_FRAGMENT__", _inflight_fragment)
+    # Deduped plate-popover pool, emitted once after the body. Build sites emitted
+    # empty <div class="plate-popover" data-pop="N">; JS fills each from PLATE_POP
+    # on first hover/click. ~91% of popovers are dupes, so this replaces ~21 MB of
+    # inlined content with a ~2 MB pool.
+    _pool_list = [None] * len(_popover_pool)
+    for _content, _idx in _popover_pool.items():
+        _pool_list[_idx] = _content
+    html += f"\n<script>window.PLATE_POP={json.dumps(_pool_list).replace('</', '<\\/')};</script>\n"
     _flush()  # stream the document tail (LSP + inflight tabs) to disk
 
     _uniq_missing = sorted(set(_missing_partner_exps))
