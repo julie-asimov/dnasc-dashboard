@@ -101,7 +101,10 @@ _WELL_MAP_384 = {
 _WELL_MAP_AGAR = {'1':'A1','2':'B1','3':'A2','4':'B2','5':'A3','6':'B3','7':'A4','8':'B4'}
 try:
     from dnasc.renderer.lsp_capacity import render_lsp_capacity_tab
-except ImportError:
+except (ImportError, SyntaxError):
+    # SyntaxError too: lsp_capacity.py is an optional, separately-developed tab.
+    # A syntax error there (e.g. a 3.12-only f-string on the 3.9 server) must
+    # degrade to the stub, not crash the whole dashboard render.
     def render_lsp_capacity_tab(_df):
         return "<p style='color:#6b7280;padding:1rem;'>LSP capacity view not available.</p>"
 
