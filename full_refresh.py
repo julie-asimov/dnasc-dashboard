@@ -65,10 +65,9 @@ def main():
     # 4. Render HTML
     print("\n🎨 Rendering dashboard...")
     exp_active_map = BIOSExtractor.get_experiment_active_map()
-    html = render_dashboard(final_df, experiment_active_map=exp_active_map)
-
-    # 4. Write to www/
-    HTML_OUT.write_text(html, encoding="utf-8")
+    # Stream the HTML straight to disk (out_path) so the full ~160 MB document
+    # is never held in memory — this is what keeps render from OOM-killing.
+    render_dashboard(final_df, experiment_active_map=exp_active_map, out_path=HTML_OUT)
     VERSION_TS = WWW_DIR / "dnasc_version.txt"
     VERSION_TS.write_text(str(int(time.time())))
     print(f"   ✅ Dashboard written → {HTML_OUT}")

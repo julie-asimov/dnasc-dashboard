@@ -47,10 +47,10 @@ def main():
     exp_active_map = BIOSExtractor.get_experiment_active_map()
 
     print("Rendering dashboard...")
-    html = render_dashboard(df, experiment_active_map=exp_active_map)
-
     WWW_DIR.mkdir(parents=True, exist_ok=True)
-    HTML_OUT.write_text(html, encoding="utf-8")
+    # Stream straight to disk so the full ~160 MB document is never held in
+    # memory (prevents the render OOM seen on the server).
+    render_dashboard(df, experiment_active_map=exp_active_map, out_path=HTML_OUT)
     (WWW_DIR / "dnasc_version.txt").write_text(str(int(time.time())))
     print(f"  Written → {HTML_OUT}  ({time.time() - start:.1f}s)")
 

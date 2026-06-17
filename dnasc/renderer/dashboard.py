@@ -335,9 +335,13 @@ def render_all_projects_dashboard(
     cost_icon_b64: str = "",
     generated_at: str = "",
     experiment_active_map: dict | None = None,
+    out_fh=None,
 ) -> str:
 
     if df.empty:
+        if out_fh is not None:
+            out_fh.write("<h3>No data found.</h3>")
+            return ""
         return "<h3>No data found.</h3>"
 
     # =========================================================================
@@ -2959,6 +2963,17 @@ def render_all_projects_dashboard(
         if not _exp_vals.empty:
             _req_canon_exp[_rc_rid] = _exp_vals.mode().iloc[0]
 
+    # Stream mode (out_fh set): flush completed HTML to disk and reset the
+    # buffer so the full ~160 MB document is never resident at once. In the
+    # default mode (out_fh is None) every _flush() is a no-op and `html`
+    # accumulates exactly as before.
+    def _flush():
+        nonlocal html
+        if out_fh is not None and html:
+            out_fh.write(html)
+            html = ""
+    _flush()  # write the document head before the per-project loop
+
     for experiment_name, project_df in df.groupby('experiment_name', sort=False):
         # FIX: Filter out Canceled requests that have no real workorders
         # (This prevents 'Ghost' requests from inflating the count)
@@ -3877,6 +3892,7 @@ def render_all_projects_dashboard(
             html += "</details>"
 
         html += "</div>"
+        _flush()  # stream this project's HTML to disk; reset the buffer
 
     html += """
                 </div>
@@ -3923,6 +3939,7 @@ def render_all_projects_dashboard(
     """
     html = html.replace("__LSP_CAPACITY_TAB_CONTENT__", lsp_capacity_html)
     html = html.replace("__INFLIGHT_FRAGMENT__", _inflight_fragment)
+    _flush()  # stream the document tail (LSP + inflight tabs) to disk
 
     _uniq_missing = sorted(set(_missing_partner_exps))
     if _uniq_missing:
@@ -3942,7 +3959,7 @@ def render_all_projects_dashboard(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None) -> str:
+def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None, out_path=None):
     """
     Render the full dashboard HTML for `df`.
     Assets are loaded automatically from the scripts/ directory.
@@ -3959,18 +3976,10 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     generated_ts = int(time.time())
 
-    html = render_all_projects_dashboard(
-        df,
-        logo_b64               = _ASSETS["logo"],
-        tracking_icon_b64      = _ASSETS["tracking"],
-        metrics_icon_b64       = _ASSETS["metrics"],
-        cost_icon_b64          = _ASSETS["cost"],
-        generated_at           = generated_at,
-        experiment_active_map  = experiment_active_map,
-    )
-
-    # Wrap in full HTML document with UTF-8 charset + auto-refresh
-    html = f"""<!DOCTYPE html>
+    # Full HTML document template. The __INNER_BODY__ sentinel is replaced with
+    # the rendered per-project body below (default mode), or split on so the
+    # body can be streamed straight to disk between the head and tail.
+    _doc_template = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -4025,9 +4034,33 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
 </head>
 <body>
 <div id="_loading_overlay"><div class="spinner"></div><div class="label">Loading dashboard…</div></div>
-{html}
+__INNER_BODY__
 </body>
 </html>"""
 
+    _render_kwargs = dict(
+        logo_b64               = _ASSETS["logo"],
+        tracking_icon_b64      = _ASSETS["tracking"],
+        metrics_icon_b64       = _ASSETS["metrics"],
+        cost_icon_b64          = _ASSETS["cost"],
+        generated_at           = generated_at,
+        experiment_active_map  = experiment_active_map,
+    )
+
+    if out_path is not None:
+        # Stream the document straight to disk: head, then each project's body
+        # (flushed and freed as it renders), then tail. The full ~160 MB string
+        # is never held in memory at once — this is what keeps render under the
+        # server's RAM limit.
+        _head, _tail = _doc_template.split("__INNER_BODY__")
+        with open(out_path, "w", encoding="utf-8") as _fh:
+            _fh.write(_head)
+            render_all_projects_dashboard(df, out_fh=_fh, **_render_kwargs)
+            _fh.write(_tail)
+        log.info("Dashboard rendered successfully")
+        return None
+
+    inner = render_all_projects_dashboard(df, **_render_kwargs)
+    html = _doc_template.replace("__INNER_BODY__", inner)
     log.info("Dashboard rendered successfully")
     return html
