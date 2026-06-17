@@ -494,6 +494,17 @@ def render_all_projects_dashboard(
         if _cat_col in df.columns:
             df[_cat_col] = df[_cat_col].astype('category')
 
+    # Pre-group parts-type rows by root_work_order_id once, AFTER df is final
+    # (sorted, all columns added, categoricals applied) so these slices match
+    # exactly what a live df[...] scan would return.  render_single_request_html
+    # fans cross-request parts into each root section; doing that via a full-df
+    # scan per root per request (df[df['root_work_order_id']==root_id & ...]) was
+    # an O(requests × roots × rows) hot spot (object== + isin over all 48k rows).
+    _parts_by_root_dfs = {
+        rid: grp
+        for rid, grp in df[df['type'].isin(_global_parts_types)].groupby('root_work_order_id')
+    }
+
     # =========================================================================
     # HTML CSS WITH TABS
     # =========================================================================
@@ -1576,13 +1587,13 @@ def render_all_projects_dashboard(
             # (e.g. LSP sourced from another request's Gibson) must not pull in that
             # Gibson's unrelated parts from other requests.
             if str(root_id) in _req_wid_set:
-                _xreq_parts = df[
-                    (df['root_work_order_id'] == root_id) &
-                    ~df['workorder_id'].isin(req_df['workorder_id']) &
-                    df['type'].isin(_parts_types_dfs)
-                ]
-                if not _xreq_parts.empty:
-                    root_df = pd.concat([root_df, _xreq_parts]).drop_duplicates(subset='workorder_id')
+                _cand_parts = _parts_by_root_dfs.get(root_id)
+                if _cand_parts is not None:
+                    _xreq_parts = _cand_parts[
+                        ~_cand_parts['workorder_id'].isin(req_df['workorder_id'])
+                    ]
+                    if not _xreq_parts.empty:
+                        root_df = pd.concat([root_df, _xreq_parts]).drop_duplicates(subset='workorder_id')
             # Skip parts-only roots whose rows will appear fanned under assembly sections
             if root_id in _suppress_part_root_ids:
                 if not root_df['type'].isin(_asm_types_dfs | {'transformation_workorder', 'lsp_workorder'}).any():
