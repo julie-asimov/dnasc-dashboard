@@ -79,11 +79,30 @@ STATUS = {
     "DRAFT":       ("#f1f5f9", "#64748b", "#cbd5e1"),
     "UNKNOWN":     ("#f5f5f7", "#6b7280", "#d1d5db"),
 }
-STATUS_ICON = {
-    "SUCCEEDED": "✓", "FULFILLED": "★", "RUNNING": "⟳",
-    "LSP_RUNNING": "⟳", "REPICK": "↺", "IN_PROGRESS": "▶︎",
-    "READY": "◷", "WAITING": "⌛", "BLOCKED": "⊘",
-    "FAILED": "✕", "CANCELED": "⊗", "DRAFT": "✎", "UNKNOWN": "",
+# Status icons are Lucide line-glyphs (1.5–2px stroke, currentColor), defined
+# ONCE here and consumed by BOTH tabs so a status looks identical everywhere:
+#   * Tracking tab (dashboard.py) bakes each path into a CSS ::before SVG
+#     data-URI (stroke colored to match the status text).
+#   * Requests-In-Flight tab (inflight.py) injects these maps into its inline
+#     lucide() helper (stroke = currentColor).
+# LUCIDE_PATHS: icon name -> inner SVG markup.  STATUS_LUCIDE: status -> icon.
+LUCIDE_PATHS = {
+    "check":     '<path d="M20 6 9 17l-5-5"/>',
+    "x":         '<path d="M18 6 6 18M6 6l12 12"/>',
+    "refresh":   '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/>',
+    "clock":     '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "hourglass": '<path d="M5 22h14M5 2h14M17 22v-4.2a2 2 0 0 0-.6-1.4L12 12l-4.4 4.4a2 2 0 0 0-.6 1.4V22M7 2v4.2a2 2 0 0 0 .6 1.4L12 12l4.4-4.4A2 2 0 0 0 17 6.2V2"/>',
+    "ban":       '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+    "slash":     '<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/>',
+    "pencil":    '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+    "star":      '<path d="M12 2l3 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.9 21l1.2-6.8-5-4.9 6.9-1z"/>',
+    "play":      '<path d="M7 4v16l13-8z"/>',
+}
+STATUS_LUCIDE = {
+    "SUCCEEDED": "check", "FULFILLED": "star", "FAILED": "x",
+    "RUNNING": "refresh", "LSP_RUNNING": "refresh", "REPICK": "refresh",
+    "IN_PROGRESS": "play", "READY": "clock", "WAITING": "hourglass",
+    "BLOCKED": "ban", "CANCELED": "slash", "DRAFT": "pencil", "UNKNOWN": "",
 }
 
 # ───────────────────────────────────────────────────────────────────────────

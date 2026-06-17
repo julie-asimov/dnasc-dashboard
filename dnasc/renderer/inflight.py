@@ -642,7 +642,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     _status_map["PLANNED"] = tok.STATUS["RUNNING"]   # design done, no work -> in-progress purple
     _status_map["NEW"]     = ("#f1f5f9", "#475569", "#cbd5e1")  # NEW = "In Design" — slate (matches dashboard In Design stage)
     JS_S_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in _status_map.items()) + "}"
-    JS_S_ICON  = "{" + ",".join(f"'{k}':'{ic}'" for k, ic in tok.STATUS_ICON.items()) + "}"
+    JS_LU      = json.dumps(tok.LUCIDE_PATHS)            # icon name -> SVG path (single source)
+    JS_STAT_LU = json.dumps(tok.STATUS_LUCIDE)           # status -> icon name (single source)
     JS_ST_GRAY = _tint(tok.STATUS["CANCELED"])
     JS_P_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in tok.PHASE.items()) + "}"
     JS_F_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in tok.FLAG.items()) + "}"
@@ -791,7 +792,6 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   // ── Color maps — generated from renderer/tokens.py (single source of truth) ─
   var _ST_GRAY  ='{JS_ST_GRAY}';        // fallback (CANCELED gray)
   var S_ST   = {JS_S_ST};               // status tint fragments
-  var S_ICON = {JS_S_ICON};             // colorblind icon per status
   var P_ST   = {JS_P_ST};               // phase solid fragments (brand sweep)
   var F_ST   = {JS_F_ST};               // flag tint fragments
   var F_BG = {{}};
@@ -808,21 +808,10 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function lucide(p,sz){{var s=sz||12;return '<svg width="'+s+'" height="'+s+'" viewBox="0 0 24 24" fill="none" '
     +'stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" '
     +'style="display:inline-block;vertical-align:-2px;flex-shrink:0;">'+p+'</svg>';}}
-  var LU = {{
-    check:'<path d="M20 6 9 17l-5-5"/>',
-    x:'<path d="M18 6 6 18M6 6l12 12"/>',
-    refresh:'<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/>',
-    clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
-    hourglass:'<path d="M5 22h14M5 2h14M17 22v-4.2a2 2 0 0 0-.6-1.4L12 12l-4.4 4.4a2 2 0 0 0-.6 1.4V22M7 2v4.2a2 2 0 0 0 .6 1.4L12 12l4.4-4.4A2 2 0 0 0 17 6.2V2"/>',
-    ban:'<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
-    slash:'<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/>',
-    pencil:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
-    star:'<path d="M12 2l3 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.9 21l1.2-6.8-5-4.9 6.9-1z"/>',
-    ext:'<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"/>',
-    chevron:'<path d="m9 18 6-6-6-6"/>'
-  }};
-  var STATUS_LU = {{SUCCEEDED:'check',FULFILLED:'star',FAILED:'x',RUNNING:'refresh',LSP_RUNNING:'refresh',
-    REPICK:'refresh',READY:'clock',WAITING:'hourglass',BLOCKED:'ban',CANCELED:'slash',DRAFT:'pencil'}};
+  // Lucide paths + status->icon map come from renderer/tokens.py (single source
+  // shared with the Tracking tab).
+  var LU = {JS_LU};
+  var STATUS_LU = {JS_STAT_LU};
   // status badge: Lucide icon (colorblind cue, inherits text color) + label + tint.
   function statusBdg(s){{var k=STATUS_LU[s];var ic=k?lucide(LU[k])+'&nbsp;':'';
     var lbl=(s==='NEW')?'In Design':String(s).replace(/_/g,' ');   // NEW request = actively being designed
@@ -950,6 +939,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       if(picked<=0) return '<span style="color:#cbd5e1;">&mdash;</span>';
       return '<span style="'+SEQPILL+'background:#F0FDF4;color:#166534;border:0.5px solid #BBF7D0;">PENDING</span>';
     }}
+    // Terminal (CANCELED/FAILED) with no colonies ever sequenced: "0/0" is meaningless
+    // — the design never produced sequencing data, so show a neutral dash.
+    if(seq===0 && tot===0) return '<span style="color:#cbd5e1;">&mdash;</span>';
     var pct=tot>0?(seq/tot):0, sty;
     if(seq===0)        sty='background:#FCEBEB;color:#A32D2D;';
     else if(pct<0.20)  sty='background:#FAEEDA;color:#633806;';
@@ -1081,7 +1073,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var click = hasAtt ? ' style="cursor:pointer;" onclick="ifToggleDesign(\\''+r.req_id+'\\',\\''+d.anchor+'\\')"' : '';
     // Single-attempt design: the design row IS that attempt, so band it here. Multi-
     // attempt designs band each attempt row instead (the design total is a sum).
-    var band = ((d.attempts||[]).length <= 1) ? pickBand(d.pickable) : '';
+    // Zero-attempt designs (WAITING/CANCELED with no colony work) have no pickable
+    // data to band — pickBand(0) would falsely read "LOW", so suppress it.
+    var band = ((d.attempts||[]).length === 1) ? pickBand(d.pickable) : '';
     var warn = riskBadge(designRisk(d));
     return '<tr class="if-att-row"'+click+'>'
       + '<td style="'+TD+'padding-left:20px;">'+caret+'</td>'

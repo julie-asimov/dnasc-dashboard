@@ -20,6 +20,7 @@ import re
 import json
 import random
 import hashlib
+import urllib.parse
 from collections import defaultdict
 from datetime import datetime
 
@@ -516,12 +517,27 @@ def render_all_projects_dashboard(
         f"font-size:{_g['size']}; font-weight:{_g['weight']}; text-transform:uppercase; "
         f"white-space:nowrap; }}\n"
     )
+    # Status icon = Lucide SVG (tokens.LUCIDE_PATHS), baked into the ::before as a
+    # data-URI with the stroke colored to match the status text. Same paths the
+    # Requests-In-Flight tab renders inline, so icons are identical across tabs.
+    def _status_icon_uri(_path: str, _color: str) -> str:
+        _svg = (
+            "<svg xmlns='http://www.w3.org/2000/svg' width='11' height='11' "
+            "viewBox='0 0 24 24' fill='none' stroke='" + _color + "' "
+            "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+            + _path + "</svg>"
+        )
+        return "data:image/svg+xml," + urllib.parse.quote(_svg, safe="")
     for _k, (_bg, _txt, _bd) in tok.STATUS.items():
         _border = "none" if _k == "BLOCKED" and _bd is None else f"1px solid {_bd}"
         _status_css += f"    .status-{_k} {{ background:{_bg}; color:{_txt}; border:{_border}; }}\n"
-        _ic = tok.STATUS_ICON.get(_k)
-        if _ic:
-            _status_css += f"    .status-{_k}::before {{ content:'{_ic}\\00a0'; }}\n"
+        _icname = tok.STATUS_LUCIDE.get(_k)
+        if _icname:
+            _uri = _status_icon_uri(tok.LUCIDE_PATHS[_icname], _txt)
+            _status_css += (
+                f"    .status-{_k}::before {{ content:url(\"{_uri}\") '\\00a0'; "
+                f"vertical-align:-1.5px; }}\n"
+            )
     _tdot_css = ""
     for _state, _color in tok.TIMELINE_DOT.items():
         _anim = " animation: pulse 2s infinite;" if _state == "running" else ""
@@ -1184,7 +1200,7 @@ def render_all_projects_dashboard(
                     </div>
                 </div>
                 <div id="projects-container" style="padding: 10px; display: flex; flex-direction: column;">
-                  <div style="display:flex; gap:16px; align-items:center; justify-content:center; flex-wrap:wrap; padding:9px 14px; margin:0 0 12px 0; background:#fff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 1px 3px rgba(15,23,42,0.06); font-size:10px; font-weight:600; color:#374151;"><span style="color:#6b7280;">IN PROGRESS:</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#0891b2;border-radius:50%;"></span>On Track</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#f97316;border-radius:50%;"></span>Warning</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#be185d;border-radius:50%;"></span>Overdue</span><span style="width:1px;height:12px;background:#cbd5e1;"></span><span style="color:#6b7280;">FULFILLED:</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#0891b2;border-radius:2px;transform:rotate(45deg);"></span>On Time</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#be185d;border-radius:2px;transform:rotate(45deg);"></span>Late</span><span style="width:1px;height:12px;background:#cbd5e1;"></span><span style="display:flex;align-items:center;gap:5px;"><span style="width:16px;height:9px;border-radius:3px;background:linear-gradient(90deg,#7461b8,#a05f8a);"></span>Partner</span><span style="display:flex;align-items:center;gap:5px;"><span style="width:16px;height:9px;border-radius:3px;background:linear-gradient(90deg,#3a5c7a,#3d8aa2);"></span>R&amp;D</span></div>
+                  <div style="display:flex; gap:16px; align-items:center; justify-content:center; flex-wrap:wrap; padding:9px 14px; margin:0 0 12px 0; background:#fff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 1px 3px rgba(15,23,42,0.06); font-size:10px; font-weight:600; color:#374151;"><span style="color:#6b7280;">IN PROGRESS:</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#0891b2;border-radius:50%;"></span>On Track</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#f97316;border-radius:50%;"></span>Warning</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#be185d;border-radius:50%;"></span>Overdue</span><span style="width:1px;height:12px;background:#cbd5e1;"></span><span style="color:#6b7280;">FULFILLED:</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#0891b2;border-radius:2px;transform:rotate(45deg);"></span>On Time</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#be185d;border-radius:2px;transform:rotate(45deg);"></span>Late</span><span style="width:1px;height:12px;background:#cbd5e1;"></span><span style="display:flex;align-items:center;gap:5px;"><span style="width:16px;height:9px;border-radius:3px;background:linear-gradient(90deg,#7461b8,#a05f8a);"></span>Partner</span><span style="display:flex;align-items:center;gap:5px;"><span style="width:16px;height:9px;border-radius:3px;background:linear-gradient(90deg,#3a5c7a,#3d8aa2);"></span>R&amp;D</span><span style="width:1px;height:12px;background:#cbd5e1;"></span><span style="color:#6b7280;">TIMELINE:</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:16px;height:9px;background:repeating-linear-gradient(45deg,#64748b,#64748b 3px,#cbd5e1 3px,#cbd5e1 6px);border:1px solid #cbd5e1;"></span>upstream seq&rarr;dnasc (not in TAT)</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:3px;height:11px;background:#334155;display:inline-block;"></span>0w = dnasc created (entry)</span><span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;background:#10b981;border-radius:50%;"></span>now</span></div>
     """
 
     # =========================================================================
@@ -3034,13 +3050,16 @@ def render_all_projects_dashboard(
         # For partner experiments with a seq-transfer date, the left edge = seq and the
         # axis is PROPORTIONAL: a longer upstream lead → a longer hatched band (0w/dnasc
         # sits further right). R&D / no-seq: linear 8-week axis from dnasc-created.
+        # `<=` (not `<`): a same-day seq (lead = 0, e.g. sequences delivered the day dnasc
+        # opened the work) still gets the rich axis — the "now" dot and the 0w·dnasc start
+        # marker — just with no hatched band (there's no lead to draw).
         _tl_origin_dt = exp_created_dt
         _tl_days      = 56.0
         _tl_weeks     = 8
         _show_dnasc_start = False
         _dnasc_pct    = 0.0
         _lead_days    = 0
-        if has_ptr and exp_created_dt and _seq_exp_dt and _seq_exp_dt.date() < exp_created_dt.date():
+        if has_ptr and exp_created_dt and _seq_exp_dt and _seq_exp_dt.date() <= exp_created_dt.date():
             _show_dnasc_start = True
             _tl_origin_dt = _seq_exp_dt
             _lead_days = (exp_created_dt.date() - _seq_exp_dt.date()).days
@@ -3067,12 +3086,18 @@ def render_all_projects_dashboard(
                     _tot_txt = f" · {_tot_days}d total to due (incl. lead)"
             except Exception:
                 _tot_txt = ""
+            # lead = 0 (seq delivered the same day dnasc opened): no upstream window, so
+            # show "= dnasc start" instead of a meaningless "+0d upstream".
+            _lead_txt = (f'+{_lead_days}d upstream (not in TAT)' if _lead_days > 0
+                         else '= dnasc start (same day)')
+            _lead_title = (f'{_lead_days}d before dnasc opened the work; upstream, not counted in dnasc TAT.'
+                           if _lead_days > 0 else 'same day dnasc opened the work — no upstream lead.')
             _seq_note_html = (
                 f'<span class="kpill" style="background:#fff7ed;border:1px solid #fed7aa;" '
                 f'title="Sequences transferred (experiment start) {_seq_exp_dt:%a %b %-d} — '
-                f'{_lead_days}d before dnasc opened the work; upstream, not counted in dnasc TAT.{_tot_txt}">'
+                f'{_lead_title}{_tot_txt}">'
                 f'<span class="kk" style="color:#9a3412;">Seq transferred {_seq_exp_dt:%-m/%-d}</span> '
-                f'<b style="color:#c2410c;">+{_lead_days}d upstream (not in TAT)</b></span>'
+                f'<b style="color:#c2410c;">{_lead_txt}</b></span>'
             )
 
         dots_html = ""; stage_counts = {}; stage_items = {}; fulfilled_week_counts = {}
@@ -3655,8 +3680,13 @@ def render_all_projects_dashboard(
         _grad = ("linear-gradient(90deg, #7461b8 0%, #a05f8a 100%)" if has_ptr
                  else "linear-gradient(90deg, #3a5c7a 0%, #3d8aa2 100%)")
         # Elapsed-time progress fill (origin -> now), as a fraction of the track.
+        # When the experiment is done (nothing active), the clock has stopped — freeze
+        # the reference at the last fulfillment so the fill ends there and the live
+        # "now" dot is dropped (it'd otherwise keep drifting right forever post-delivery).
+        _exp_done = bool(_exp_end_times) and not _exp_any_active
+        _now_ref  = max(_exp_end_times) if _exp_done else now
         try:
-            _now_pct = _axpos(datetime.now(pytz.UTC))
+            _now_pct = _axpos(_now_ref)
         except Exception:
             _now_pct = 0.0
 
@@ -3665,16 +3695,22 @@ def render_all_projects_dashboard(
         _seq_marker_html = ""
         if _show_dnasc_start:
             _now_lbl = now.strftime("%-m/%-d")
+            # White 0w line (dnasc entry) always shows. The green "now" dot + label only
+            # show while the experiment is live — once done the clock is frozen, so a
+            # drifting "now" would misrepresent a finished project.
             _seq_marker_html = (
                 f'<div title="0w — dnasc created (entry); dnasc TAT starts here" '
                 f'style="position:absolute;left:{_dnasc_pct:.2f}%;top:0;width:3px;height:100%;'
                 f'background:#ffffff;z-index:6;transform:translateX(-50%);box-shadow:0 0 6px rgba(0,0,0,0.55);"></div>'
-                f'<div title="now {_now_lbl}" style="position:absolute;left:{_now_pct:.2f}%;top:50%;transform:translate(-50%,-50%);'
-                f'width:12px;height:12px;border-radius:50%;background:#10b981;border:2px solid #fff;z-index:8;box-shadow:0 1px 3px rgba(0,0,0,0.4);"></div>'
-                f'<div style="position:absolute;left:{_now_pct:.2f}%;top:44px;transform:translateX(-50%);'
-                f'background:#ecfdf5;color:#047857;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;'
-                f'white-space:nowrap;line-height:1;border:1px solid #10b981;z-index:7;pointer-events:none;">now {_now_lbl}</div>'
             )
+            if not _exp_done:
+                _seq_marker_html += (
+                    f'<div title="now {_now_lbl}" style="position:absolute;left:{_now_pct:.2f}%;top:50%;transform:translate(-50%,-50%);'
+                    f'width:12px;height:12px;border-radius:50%;background:#10b981;border:2px solid #fff;z-index:8;box-shadow:0 1px 3px rgba(0,0,0,0.4);"></div>'
+                    f'<div style="position:absolute;left:{_now_pct:.2f}%;top:44px;transform:translateX(-50%);'
+                    f'background:#ecfdf5;color:#047857;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;'
+                    f'white-space:nowrap;line-height:1;border:1px solid #10b981;z-index:7;pointer-events:none;">now {_now_lbl}</div>'
+                )
         # Greyed hatched band over the pre-dnasc lead (seq → dnasc start) = upstream.
         _upstream_band = ""
         if _show_dnasc_start and _dnasc_pct > 0:
@@ -3708,17 +3744,23 @@ def render_all_projects_dashboard(
             _gridlines_html = "".join(
                 f'<div style="position:absolute; left:{(w/_tl_weeks)*100:.2f}%; top:0; width:1px; height:100%; background:rgba(255,255,255,0.25); z-index:1;"></div>'
                 for w in range(1, _tl_weeks))
-        # Legend (seq-extended axis only).
+        # Legend (seq-extended axis only). Only list keys actually drawn: drop the
+        # upstream-band item when there's no lead, and the "now" dot when the clock is
+        # frozen (experiment done).
         _tl_legend = ""
         if _show_dnasc_start:
+            _legend_items = []
+            if _lead_days > 0:
+                _legend_items.append('<span style="display:flex;align-items:center;gap:5px;"><span style="width:18px;height:9px;background:repeating-linear-gradient(45deg,rgba(255,255,255,0.55),rgba(255,255,255,0.55) 3px,rgba(255,255,255,0.15) 3px,rgba(255,255,255,0.15) 6px);border:1px solid rgba(255,255,255,0.5);"></span>upstream seq→dnasc (not in TAT)</span>')
+            _legend_items.append('<span style="display:flex;align-items:center;gap:5px;"><span style="width:3px;height:11px;background:#ffffff;"></span>0w = dnasc created (entry)</span>')
+            if not _exp_done:
+                _legend_items.append('<span style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#10b981;border:1px solid #fff;"></span>now</span>')
             _tl_legend = (
                 '<div style="display:flex;gap:16px;align-items:center;margin-top:8px;font-size:9px;color:rgba(255,255,255,0.92);flex-wrap:wrap;">'
-                '<span style="display:flex;align-items:center;gap:5px;"><span style="width:18px;height:9px;background:repeating-linear-gradient(45deg,rgba(255,255,255,0.55),rgba(255,255,255,0.55) 3px,rgba(255,255,255,0.15) 3px,rgba(255,255,255,0.15) 6px);border:1px solid rgba(255,255,255,0.5);"></span>upstream seq→dnasc (not in TAT)</span>'
-                '<span style="display:flex;align-items:center;gap:5px;"><span style="width:3px;height:11px;background:#ffffff;"></span>0w = dnasc created (entry)</span>'
-                '<span style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#10b981;border:1px solid #fff;"></span>now</span>'
-                '</div>'
+                + "".join(_legend_items)
+                + '</div>'
             )
-        timeline_bar = f"""<div style="margin:8px 0 4px 0; padding:12px 14px; border-radius:8px; background:{_grad}; box-shadow:0 1px 3px rgba(15,23,42,0.18);"><div style="position:relative; width:100%; height:42px; margin-bottom:6px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:46px; background:rgba(255,255,255,0.14); border-radius:11px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.25); border:1px solid #cbd5e1;"><div style="position:absolute;left:{_nowfill_left:.1f}%;top:0;height:100%;width:{_nowfill_width:.1f}%;background:rgba(255,255,255,0.33);z-index:1;"></div>{_upstream_band}{_gridlines_html}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}{_seq_marker_html}</div>{_tl_legend}</div>"""
+        timeline_bar = f"""<div style="margin:8px 0 4px 0; padding:12px 14px; border-radius:8px; background:{_grad}; box-shadow:0 1px 3px rgba(15,23,42,0.18);"><div style="position:relative; width:100%; height:42px; margin-bottom:6px;">{_weeks_header_html}</div><div style="position:relative; width:100%; height:22px; margin-bottom:46px; background:rgba(255,255,255,0.14); border-radius:11px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.25); border:1px solid #cbd5e1;"><div style="position:absolute;left:{_nowfill_left:.1f}%;top:0;height:100%;width:{_nowfill_width:.1f}%;background:rgba(255,255,255,0.33);z-index:1;"></div>{_upstream_band}{_gridlines_html}{_orange_html}{_red_html}<div style="position:absolute; width:100%; height:100%; top:50%; left:0; z-index:10;">{dots_html}</div>{_default_bracket_html}{_due_marker_html}{_asm_markers_html}{_seq_marker_html}</div></div>"""
 
         if experiment_active_map is not None:
             db_active = experiment_active_map.get(experiment_name, True)
