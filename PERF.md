@@ -77,6 +77,17 @@ bug). Verify by **comparing data, not HTML**:
   run old vs new on `baseline.parquet` and assert the output columns are equal.
 - **BigQuery query rewrites:** verify with an in-BQ `FULL OUTER JOIN` diff of old
   vs new on the key column (well-mapping: 0 mismatches over 699k rows).
+- **Mid-pipeline transforms** (repair.py steps that query BQ internally and can't
+  be isolated on baseline.parquet): use `pipeline_replay.py`. It caches every BQ
+  result so the pipeline replays offline + deterministically (it pins
+  `PYTHONHASHSEED=0`). Workflow: `record` once (hits BQ) → change code → `replay`
+  (offline, fast) → `compare` (per-column diff, ignoring now()-stamped fields).
+  All non-volatile columns identical = output-equivalent.
+
+> Determinism note: with a random hash seed, two identical pipeline runs differ in
+> ~6k `root_work_order_id` / `req_id` assignments (set-iteration order). The replay
+> harness pins the seed; production does not — root/req grouping is unstable
+> run-to-run. Sorting those sets in lineage/repair would fix it (separate task).
 
 Always bump `config.py PIPELINE_VERSION` on a shipped change. Run `pytest tests/`
 (294 tests) before committing.
