@@ -34,31 +34,34 @@ class LIMSExtractor:
         client = bigquery.Client(project=proj)
         log.info("Querying LIMS colony data for %d workorders...", len(clean_ids))
 
-        # ── Batched raw pull ──────────────────────────────────────────────────
-        raw_dfs: list[pd.DataFrame] = []
-        for i in range(0, len(clean_ids), _BATCH_SIZE):
-            batch = clean_ids[i : i + _BATCH_SIZE]
-            ids_str = "', '".join(batch)
-            query = f"""
-            SELECT
-                COALESCE(d.process_id, g.process_id, a.process_id) AS workorder_id,
-                COALESCE(d.colony_number, g.colony_number) AS colony_number,
-                a.available,
-                COALESCE(d.seq_confirmed, g.seq_confirmed) AS seq_confirmed,
-                a.id AS well_id,
-                b.id AS plate_id,
-                b.protocol AS plate_protocol
-            FROM `{proj}.lims__src.well` a
-            LEFT JOIN `{proj}.lims__src.plate` b ON a.plate_id = b.id
-            LEFT JOIN `{proj}.lims__src.well_content` c ON c.well_id = a.id
-            LEFT JOIN `{proj}.lims__src.plasmid_stock` d ON d.id = c.plasmid_stock_id
-            LEFT JOIN `{proj}.lims__src.strain` g ON g.id = c.strain_id
-            WHERE a.type != 'Empty'
-              AND COALESCE(d.process_id, g.process_id, a.process_id) IN ('{ids_str}')
-            """
-            raw_dfs.append(client.query(query).to_dataframe())
-
-        raw_df = pd.concat(raw_dfs, ignore_index=True)
+        # ── Single raw pull via array parameter ───────────────────────────────
+        # The COALESCE(...) IN (...) filter depends on JOINED columns, so it's
+        # non-sargable — BQ scans + 4-way-joins the full well table before it can
+        # filter. Batching the IN-list into 5k chunks therefore re-ran that full
+        # scan+join PER batch (7x). One query with IN UNNEST(@ids) does it once:
+        # ~10x faster (172s -> 18s), ~10x less slot time, identical rows (the
+        # union of the old batches == one query over the full id list).
+        query = f"""
+        SELECT
+            COALESCE(d.process_id, g.process_id, a.process_id) AS workorder_id,
+            COALESCE(d.colony_number, g.colony_number) AS colony_number,
+            a.available,
+            COALESCE(d.seq_confirmed, g.seq_confirmed) AS seq_confirmed,
+            a.id AS well_id,
+            b.id AS plate_id,
+            b.protocol AS plate_protocol
+        FROM `{proj}.lims__src.well` a
+        LEFT JOIN `{proj}.lims__src.plate` b ON a.plate_id = b.id
+        LEFT JOIN `{proj}.lims__src.well_content` c ON c.well_id = a.id
+        LEFT JOIN `{proj}.lims__src.plasmid_stock` d ON d.id = c.plasmid_stock_id
+        LEFT JOIN `{proj}.lims__src.strain` g ON g.id = c.strain_id
+        WHERE a.type != 'Empty'
+          AND COALESCE(d.process_id, g.process_id, a.process_id) IN UNNEST(@ids)
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", clean_ids)]
+        )
+        raw_df = client.query(query, job_config=job_config).to_dataframe()
         if raw_df.empty:
             log.info("No colony data found")
             return pd.DataFrame()
@@ -217,46 +220,46 @@ class LIMSExtractor:
         client = bigquery.Client(project=proj)
         log.info("Querying colony picking counts for %d workorders...", len(clean_ids))
 
-        raw_dfs: list[pd.DataFrame] = []
-        for i in range(0, len(clean_ids), _BATCH_SIZE):
-            batch = clean_ids[i : i + _BATCH_SIZE]
-            ids_str = "', '".join(batch)
-            query = f"""
-            WITH per_well AS (
-              -- Aggregate colonypickingcounts per (workorder, well) first,
-              -- so a workorder with multiple wells gets deterministic plate/position.
-              SELECT
-                w.process_id AS workorder_id,
-                w.plate_id, w.position, p.well_count,
-                SUM(cpc.imaged) AS well_imaged,
-                SUM(COALESCE(cpc.pickable_automated, 0) + COALESCE(cpc.pickable_manual, 0)) AS well_pickable,
-                SUM(COALESCE(cpc.picked_automated,   0) + COALESCE(cpc.picked_manual,   0)) AS well_picked
-              FROM `{proj}.bios__src.colonypickingcounts` cpc
-              JOIN `{proj}.lims__src.well`  w ON w.id = cpc.well_id
-              JOIN `{proj}.lims__src.plate` p ON p.id = w.plate_id
-              WHERE w.process_id IN ('{ids_str}')
-                AND cpc.deleted_at IS NULL
-              GROUP BY w.process_id, w.plate_id, w.position, p.well_count
-            )
-            SELECT
-              workorder_id,
-              -- Pick the well with the most imaged colonies as the display well.
-              ARRAY_AGG(plate_id    ORDER BY well_imaged DESC, plate_id ASC LIMIT 1)[OFFSET(0)] AS colony_plate_id,
-              ARRAY_AGG(position    ORDER BY well_imaged DESC, plate_id ASC LIMIT 1)[OFFSET(0)] AS colony_well_position,
-              ARRAY_AGG(well_count  ORDER BY well_imaged DESC, plate_id ASC LIMIT 1)[OFFSET(0)] AS colony_plate_well_count,
-              SUM(well_imaged)   AS imaged_colonies,
-              SUM(well_pickable) AS pickable_colonies,
-              SUM(well_picked)   AS picked_colonies
-            FROM per_well
-            GROUP BY workorder_id
-            """
-            raw_dfs.append(client.query(query).to_dataframe())
-
-        if not any(len(d) > 0 for d in raw_dfs):
+        # Single query via array param (was 5k-batched). Each workorder's wells
+        # are all matched within one query, and GROUP BY workorder_id aggregates
+        # them fully, so this is identical to the union of the old batches — and
+        # scans colonypickingcounts once instead of per batch.
+        query = f"""
+        WITH per_well AS (
+          -- Aggregate colonypickingcounts per (workorder, well) first,
+          -- so a workorder with multiple wells gets deterministic plate/position.
+          SELECT
+            w.process_id AS workorder_id,
+            w.plate_id, w.position, p.well_count,
+            SUM(cpc.imaged) AS well_imaged,
+            SUM(COALESCE(cpc.pickable_automated, 0) + COALESCE(cpc.pickable_manual, 0)) AS well_pickable,
+            SUM(COALESCE(cpc.picked_automated,   0) + COALESCE(cpc.picked_manual,   0)) AS well_picked
+          FROM `{proj}.bios__src.colonypickingcounts` cpc
+          JOIN `{proj}.lims__src.well`  w ON w.id = cpc.well_id
+          JOIN `{proj}.lims__src.plate` p ON p.id = w.plate_id
+          WHERE w.process_id IN UNNEST(@ids)
+            AND cpc.deleted_at IS NULL
+          GROUP BY w.process_id, w.plate_id, w.position, p.well_count
+        )
+        SELECT
+          workorder_id,
+          -- Pick the well with the most imaged colonies as the display well.
+          ARRAY_AGG(plate_id    ORDER BY well_imaged DESC, plate_id ASC LIMIT 1)[OFFSET(0)] AS colony_plate_id,
+          ARRAY_AGG(position    ORDER BY well_imaged DESC, plate_id ASC LIMIT 1)[OFFSET(0)] AS colony_well_position,
+          ARRAY_AGG(well_count  ORDER BY well_imaged DESC, plate_id ASC LIMIT 1)[OFFSET(0)] AS colony_plate_well_count,
+          SUM(well_imaged)   AS imaged_colonies,
+          SUM(well_pickable) AS pickable_colonies,
+          SUM(well_picked)   AS picked_colonies
+        FROM per_well
+        GROUP BY workorder_id
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", clean_ids)]
+        )
+        result = client.query(query, job_config=job_config).to_dataframe()
+        if result.empty:
             log.info("No colony picking count data found")
             return pd.DataFrame()
-
-        result = pd.concat(raw_dfs, ignore_index=True)
         log.info("Colony picking counts: %d workorders in %.2fs", len(result), time.time() - t0)
         return result
 
@@ -325,26 +328,24 @@ class LIMSExtractor:
         clean_ids = list(set(str(w) for w in workorder_ids))
         client = bigquery.Client(project=proj)
 
-        raw_dfs: list[pd.DataFrame] = []
-        for i in range(0, len(clean_ids), _BATCH_SIZE):
-            batch = clean_ids[i : i + _BATCH_SIZE]
-            ids_str = "', '".join(batch)
-            query = f"""
-            SELECT
-                w.process_id AS workorder_id,
-                STRING_AGG(DISTINCT w.comments, ' | ' ORDER BY w.comments) AS well_comments
-            FROM `{proj}.lims__src.well` w
-            WHERE w.process_id IN ('{ids_str}')
-              AND w.comments IS NOT NULL
-              AND TRIM(w.comments) != ''
-            GROUP BY w.process_id
-            """
-            raw_dfs.append(client.query(query).to_dataframe())
-
-        if not any(len(d) > 0 for d in raw_dfs):
+        # Single query via array param (was 5k-batched); GROUP BY workorder_id is
+        # complete within one query, so identical to the union of old batches.
+        query = f"""
+        SELECT
+            w.process_id AS workorder_id,
+            STRING_AGG(DISTINCT w.comments, ' | ' ORDER BY w.comments) AS well_comments
+        FROM `{proj}.lims__src.well` w
+        WHERE w.process_id IN UNNEST(@ids)
+          AND w.comments IS NOT NULL
+          AND TRIM(w.comments) != ''
+        GROUP BY w.process_id
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", clean_ids)]
+        )
+        result = client.query(query, job_config=job_config).to_dataframe()
+        if result.empty:
             log.info("No well comments found")
             return pd.DataFrame()
-
-        result = pd.concat(raw_dfs, ignore_index=True)
         log.info("Well comments: %d workorders in %.2fs", len(result), time.time() - t0)
         return result
