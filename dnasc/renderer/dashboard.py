@@ -3971,7 +3971,11 @@ def render_all_projects_dashboard(
     _pool_list = [None] * len(_popover_pool)
     for _content, _idx in _popover_pool.items():
         _pool_list[_idx] = _content
-    html += f"\n<script>window.PLATE_POP={json.dumps(_pool_list).replace('</', '<\\/')};</script>\n"
+    # Escape </ so popover HTML can't break out of the <script>. Kept on its own
+    # line (not inside the f-string expression) — Python < 3.12 forbids backslashes
+    # inside f-string replacement fields, and the server runs 3.9.
+    _pool_js = json.dumps(_pool_list).replace("</", "<\\/")
+    html += f"\n<script>window.PLATE_POP={_pool_js};</script>\n"
     _flush()  # stream the document tail (LSP + inflight tabs) to disk
 
     _uniq_missing = sorted(set(_missing_partner_exps))

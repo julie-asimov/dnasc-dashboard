@@ -49,7 +49,7 @@ class PipelineConfig:
     SEQ_STALL_DAYS: int = 7          # picked>0 & seq_confirmed=0 & days-since-last-op>this → red flag
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.10.50"
+    PIPELINE_VERSION: str = "1.10.51"
 
     @classmethod
     def get_date_filter(cls) -> str:
