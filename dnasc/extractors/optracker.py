@@ -10,6 +10,7 @@ import os
 import time
 
 import pandas as pd
+from google.cloud import bigquery
 
 from dnasc.config import PipelineConfig
 from dnasc.logger import get_logger
@@ -49,7 +50,12 @@ class OpTrackerExtractor:
         date_filter = PipelineConfig.get_date_filter()
         log.info("Querying OpTracker operations (since %s)...", date_filter)
 
+        # all_operations (4-table join + 25 MAX(CASE) pivots + GROUP BY) is
+        # referenced 9x by the CTEs below. BigQuery inlines CTEs, so it was
+        # recomputed 9 times (~3.1M slot-ms). Materialize it into a TEMP TABLE
+        # once; the downstream CTEs then read that table cheaply. Output identical.
         query = f"""
+        CREATE TEMP TABLE all_operations AS (
         WITH kicked_back_jobs AS (
           -- Pattern 1: Failed Precheck where user chose "Retry all Operations" (user_input=0).
           -- user_input=1 means "Continue with manual protocol" — PCR still ran, not a kickback.
@@ -97,8 +103,7 @@ class OpTrackerExtractor:
           SELECT id AS job_id
           FROM `{proj}.op_tracker__src.op_tracker_api_job`
           WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"gather-samples-success-or-fail-mode"[^}}]*"user_input":\\s*1')
-        ),
-        all_operations AS (
+        )
           SELECT
             o.id AS operation_id, o.job_id, o.plan_id, o.state,
             o.date_created, o.date_ready,
@@ -132,7 +137,9 @@ class OpTrackerExtractor:
           WHERE o.date_created >= '{date_filter}'
             AND (o.job_id IS NULL OR o.job_id NOT IN (SELECT job_id FROM kicked_back_jobs))
           GROUP BY o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready, p.name
-        ),
+        );
+
+        WITH
         successful_protocols AS (
           SELECT DISTINCT process_id, protocol_name FROM all_operations WHERE state = 'SC'
         ),
@@ -307,7 +314,8 @@ class OpTrackerExtractor:
         ORDER BY process_id, date_created
         """
 
-        df = pd.read_gbq(query, project_id=proj, dialect="standard")
+        client = bigquery.Client(project=proj)
+        df = client.query(query).to_dataframe()
 
         excluded_job_ids, pid_job_ids = _load_excluded_jobs()
 
