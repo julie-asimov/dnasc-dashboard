@@ -179,15 +179,81 @@ def to_est(dt_val):
     except: return None
 
 
+# Render-wide timestamp cache: raw value (str-normalized) → US/Eastern Timestamp.
+# Primed once per render by prime_est_cache() over every op-time cell in the frame,
+# so batch_to_est becomes O(1) dict lookups instead of constructing a DatetimeIndex
+# per call (the renderer makes ~110K such calls — the dominant render-time cost).
+_EST_CACHE: dict = {}
+_EST_MISS = object()
+
+
+def _est_key(t) -> str:
+    """Canonical cache key. Op timestamps reach batch_to_est as numpy.datetime64
+    (str uses 'T') from raw cells AND as python datetime (str uses ' ') from
+    .tolist()'d cells — normalize the separator so both forms collide."""
+    return str(t).replace('T', ' ')
+
+
+def prime_est_cache(df: pd.DataFrame,
+                    columns=("operation_start", "operation_ready")) -> None:
+    """Convert every distinct timestamp in the given list-valued columns once and
+    store it str-keyed in _EST_CACHE. Subsequent batch_to_est() calls are lookups."""
+    _EST_CACHE.clear()
+    vals: set = set()
+    for col in columns:
+        if col not in df.columns:
+            continue
+        for cell in df[col].values:
+            if cell is None:
+                continue
+            if isinstance(cell, np.ndarray):
+                it = cell.tolist()
+            elif isinstance(cell, (list, tuple)):
+                it = cell
+            else:
+                it = (cell,)
+            for x in it:
+                if x is None:
+                    continue
+                try:
+                    if pd.isna(x):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                vals.add(_est_key(x))
+    if not vals:
+        return
+    keys = list(vals)
+    converted = pd.to_datetime(keys, errors="coerce", utc=True).tz_convert("US/Eastern")
+    for k, v in zip(keys, converted):
+        _EST_CACHE[k] = (v if not pd.isnull(v) else None)
+
+
 def batch_to_est(times: list) -> list:
-    """Vectorized list-of-timestamps → US/Eastern. ~10x faster than calling to_est per item."""
+    """List-of-timestamps → US/Eastern. Uses the primed _EST_CACHE when available
+    (O(1) lookups); otherwise falls back to a single vectorized conversion."""
     if not times:
         return []
-    try:
-        converted = pd.to_datetime(times, errors='coerce', utc=True).tz_convert('US/Eastern')
-        return [x if not pd.isnull(x) else None for x in converted]
-    except Exception:
-        return [to_est(t) for t in times]
+    if not _EST_CACHE:
+        # Cache not primed (e.g. called outside a full render) — original path.
+        try:
+            converted = pd.to_datetime(times, errors='coerce', utc=True).tz_convert('US/Eastern')
+            return [x if not pd.isnull(x) else None for x in converted]
+        except Exception:
+            return [to_est(t) for t in times]
+    out = []
+    for t in times:
+        if t is None:
+            out.append(None)
+            continue
+        k = _est_key(t)
+        v = _EST_CACHE.get(k, _EST_MISS)
+        if v is _EST_MISS:
+            # Value not seen during priming — convert once and memoize (self-heals).
+            v = to_est(t)
+            _EST_CACHE[k] = v
+        out.append(v)
+    return out
 
 
 def parse_pipeline_operations(protocol_names, operation_states, operation_starts, job_ids, well_locations_list, operation_ready_times, ngs_run_numbers=None):
@@ -346,6 +412,11 @@ def render_all_projects_dashboard(
             out_fh.write("<h3>No data found.</h3>")
             return ""
         return "<h3>No data found.</h3>"
+
+    # Convert every op timestamp in the frame to US/Eastern once up front so the
+    # ~110K downstream batch_to_est() calls are O(1) cache lookups, not per-call
+    # DatetimeIndex construction.
+    prime_est_cache(df)
 
     # =========================================================================
     # 1. HELPERS
@@ -512,6 +583,32 @@ def render_all_projects_dashboard(
         rid: grp
         for rid, grp in df[df['type'].isin(_global_parts_types)].groupby('root_work_order_id')
     }
+
+    # First-match workorder_id → source fields, built over the FINAL (sorted) df so
+    # it returns exactly what a live `df[df['workorder_id']==x].iloc[0]` scan would.
+    # Replaces that full-48K-row boolean mask in the per-row section build loop.
+    _global_src_lookup: dict = {}
+    _gsl_wids = df['workorder_id'].tolist()
+    _gsl_exp = df['experiment_name'].tolist() if 'experiment_name' in df.columns else [None] * len(_gsl_wids)
+    _gsl_req = df['req_id'].tolist() if 'req_id' in df.columns else [None] * len(_gsl_wids)
+    _gsl_rst = df['request_status'].tolist() if 'request_status' in df.columns else [None] * len(_gsl_wids)
+    for _gi in range(len(_gsl_wids)):
+        _gw = str(_gsl_wids[_gi])
+        if _gw not in _global_src_lookup:
+            _global_src_lookup[_gw] = {
+                'experiment_name': _gsl_exp[_gi],
+                'req_id': _gsl_req[_gi],
+                'request_status': _gsl_rst[_gi],
+            }
+
+    # DataFrame index → full row record, built once via a SINGLE to_dict over the
+    # final sorted df (~2s). Per-section row_map was rebuilt with root_df.to_dict
+    # ('records') — ~3980 small to_dict calls whose per-call block-manager overhead
+    # dominated (~35s). df.index is unique, and every section slice (req_df, fan-in
+    # parts, cross-plan subs) is a slice of df, so its rows resolve by index here —
+    # a shallow dict() copy per row keeps per-section mutations (visual_suffix,
+    # _attempt_*) isolated, exactly as fresh to_dict records were.
+    _rec_by_index = dict(zip(df.index, df.to_dict('records')))
 
     # Plate-popover dedup pool. The ~88k plate/colony hover popovers are ~91%
     # duplicates and were inlined in full (~21 MB). Intern each unique popover
@@ -1307,6 +1404,23 @@ def render_all_projects_dashboard(
         # (e.g. streakout with colonies but no seq → RUNNING) are reflected in phase
         # detection, not just in the per-row display.
         req_df = req_df.copy()
+
+        # First-match workorder_id → row dict (only the columns read by scalar
+        # lookups below), built once via columnar zip. Replaces repeated
+        # `req_df[req_df['workorder_id']==x].iloc[0]` boolean-mask scans.
+        _RBW_COLS = ('construct_name', 'experiment_name', 'job_id', 'type',
+                     'wo_status', 'root_work_order_id', 'assembly_plan_id',
+                     'wo_created_at', 'STOCK_ID', 'backbone', 'parts',
+                     'attempt_anchor_id', 'attempt_number')
+        _rbw_cols = [c for c in _RBW_COLS if c in req_df.columns]
+        _rbw_wids = req_df['workorder_id'].tolist()
+        _rbw_data = {c: req_df[c].tolist() for c in _rbw_cols}
+        record_by_wid: dict = {}
+        for _i in range(len(_rbw_wids)):
+            _w = _rbw_wids[_i]
+            if _w not in record_by_wid:
+                record_by_wid[_w] = {c: _rbw_data[c][_i] for c in _rbw_cols}
+
         status_badge_html = ""
 
         phase_label  = str(req_df['req_phase'].iloc[0]     or '') if 'req_phase'     in req_df.columns else ''
@@ -1535,10 +1649,9 @@ def render_all_projects_dashboard(
         _req_asm_attempt_map: dict = {}  # root_id → (attempt_number, attempt_total, attempt_kind)
         _req_asm_roots_info = []  # (root_id, plan, wo_created_at, stock_id, backbone, parts)
         for _r in sorted_roots:
-            _rrows = req_df[req_df['workorder_id'] == _r]
-            if _rrows.empty:
+            _rrow = record_by_wid.get(_r)
+            if _rrow is None:
                 continue
-            _rrow = _rrows.iloc[0]
             if _rrow.get('type', '') not in _asm_types_req:
                 continue
             if str(_rrow.get('wo_status', '') or '') in ('DRAFT',):
@@ -1568,11 +1681,11 @@ def render_all_projects_dashboard(
             # New path: read BQ-pre-computed grouping — single pass, no design-key logic
             _anchor_rows: dict = {}
             for _r, _rplan, _rts, _rstock, _rbb, _rparts in _req_asm_roots_info:
-                _rrows = req_df[req_df["workorder_id"] == _r]
-                if _rrows.empty: continue
-                _anchor = str(_rrows.iloc[0].get("attempt_anchor_id") or _r)
+                _rrow = record_by_wid.get(_r)
+                if _rrow is None: continue
+                _anchor = str(_rrow.get("attempt_anchor_id") or _r)
                 if _anchor in ("nan", "None", ""): _anchor = _r
-                _anum = _rrows.iloc[0].get("attempt_number")
+                _anum = _rrow.get("attempt_number")
                 _anum = int(_anum) if pd.notna(_anum) else 1
                 _anchor_rows.setdefault(_anchor, []).append((_anum, _r))
             for _anchor, _pairs in _anchor_rows.items():
@@ -1649,7 +1762,17 @@ def render_all_projects_dashboard(
             is_this_winner = root_status_map[root_id]['is_winner']
             section_class = "assembly-section"
             if is_req_fulfilled and has_winner and not is_this_winner: section_class += " dimmed"
-            row_map = {row['workorder_id']: row for row in root_df.to_dict('records')}
+            # Serve each row from the prebuilt index→record map (shallow-copied so
+            # later per-section mutations stay isolated). Iterating root_df.index in
+            # order preserves the dict-comprehension's last-wins-per-wid semantics.
+            try:
+                row_map = {}
+                for _ridx in root_df.index:
+                    _rec = dict(_rec_by_index[_ridx])
+                    row_map[_rec['workorder_id']] = _rec
+            except KeyError:
+                # Any row not sourced from df (shouldn't happen) — exact fallback.
+                row_map = {row['workorder_id']: row for row in root_df.to_dict('records')}
             adj = defaultdict(list)
             roots_in_view = []
             # Fan in parts rows from other roots that share the same assembly plan
@@ -2428,15 +2551,15 @@ def render_all_projects_dashboard(
                     # Fallback: if construct_name looks like a UUID, source_material_link was unpopulated
                     # — look up the source row directly from req_df
                     if re.match(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', construct_name):
-                        source_row = req_df[req_df['workorder_id'] == proc_id]
-                        if not source_row.empty:
-                            resolved_construct = source_row['construct_name'].iloc[0]
+                        source_row = record_by_wid.get(proc_id)
+                        if source_row is not None:
+                            resolved_construct = source_row.get('construct_name')
                             if pd.notna(resolved_construct) and str(resolved_construct) not in ('nan', ''):
                                 construct_name = str(resolved_construct)
-                            resolved_exp = source_row['experiment_name'].iloc[0] if 'experiment_name' in source_row.columns else None
+                            resolved_exp = source_row.get('experiment_name')
                             if pd.notna(resolved_exp) and str(resolved_exp) not in ('nan', ''):
                                 exp_name = str(resolved_exp)
-                            job_val = source_row['job_id'].iloc[0]
+                            job_val = source_row.get('job_id')
                             if isinstance(job_val, list) and len(job_val) > 0 and pd.notna(job_val[0]):
                                 proc_id = f"job__{int(job_val[0])}"
 
@@ -2445,9 +2568,8 @@ def render_all_projects_dashboard(
                     # Look up source workorder for full experiment name, req_id, request_status
                     src_req_id, src_req_status, src_exp_name = "N/A", "", exp_name
                     if proc_id and proc_id != "N/A" and not proc_id.startswith("job__"):
-                        _src = df[df["workorder_id"] == proc_id]
-                        if not _src.empty:
-                            _r = _src.iloc[0]
+                        _r = _global_src_lookup.get(proc_id)
+                        if _r is not None:
                             _e = str(_r.get("experiment_name") or "")
                             if _e and _e not in ("nan", ""):
                                 src_exp_name = _e
