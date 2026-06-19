@@ -23,6 +23,7 @@ import hashlib
 import urllib.parse
 from collections import defaultdict
 from datetime import datetime
+from html import unescape as _html_unescape
 
 import numpy as np
 import pandas as pd
@@ -169,6 +170,25 @@ except FileNotFoundError as e:
 
 
 # ── Module-level helpers (extracted from render_all_projects_dashboard) ───────
+
+_TAG_RE = re.compile(r'<[^>]+>')
+_WS_RE = re.compile(r'\s+')
+
+
+def _searchable_text(html_str: str) -> str:
+    """Lowercased, tag-stripped, whitespace-collapsed text of an HTML fragment,
+    HTML-attribute-escaped for use in a data-search="" index. Mirrors what the
+    DOM-textContent search used to scan, so deferring DOM nodes (lazy timelines /
+    tooltips) no longer changes what is searchable."""
+    # Strip tags with NO separator so adjacent inline elements concatenate exactly
+    # as browser textContent does (the old search scanned textContent); inserting a
+    # space would break substring matches that span element boundaries.
+    t = _TAG_RE.sub('', html_str)
+    t = _html_unescape(t)
+    t = _WS_RE.sub(' ', t).strip().lower()
+    # escape for an HTML double-quoted attribute
+    return t.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+
 
 def to_est(dt_val):
     if pd.isna(dt_val) or dt_val == '': return None
@@ -904,15 +924,20 @@ def render_all_projects_dashboard(
         }
     }
     // Lazily build the heavy Queue/timeline cells the first time an assembly
-    // content-pane is opened. Until then they live in inert <template>s (out of
-    // the render tree), so the initial DOM is ~60% smaller.
+    // content-pane is opened. Until then they live as inert TEXT inside
+    // <script type="text/html" class="qtpl"> — never parsed into DOM nodes at
+    // load — so the initial document allocates ~1.3M fewer nodes.
     function _buildQueues(el) {
         if (!el || !el.classList || !el.classList.contains('content-pane')) return;
         var cells = el.querySelectorAll('td.queue-cell:not([data-built])');
         for (var i = 0; i < cells.length; i++) {
             var td = cells[i];
-            var tpl = td.querySelector('template.qtpl');
-            if (tpl) { td.appendChild(tpl.content.cloneNode(true)); }
+            var s = td.querySelector('script.qtpl');
+            if (s) {
+                var qhtml = s.textContent.split('</scr_ipt').join('</script');
+                s.remove();
+                td.insertAdjacentHTML('beforeend', qhtml);
+            }
             td.setAttribute('data-built', '1');
         }
     }
@@ -968,14 +993,18 @@ def render_all_projects_dashboard(
             var isActive = project.getAttribute('data-active') === 'true';
             if (activeOnly && !isActive) { project.style.display = 'none'; continue; }
             if (searchTerm) {
-                if (!project.textContent.toLowerCase().includes(searchTerm)) { project.style.display = 'none'; continue; }
-                project.style.display = 'block';
+                // Match against precomputed data-search indexes (lowercased, tag-
+                // stripped) rather than walking textContent — so deferred DOM
+                // (lazy timelines/tooltips) no longer affects what is searchable,
+                // and we avoid building multi-MB textContent strings per keystroke.
                 var headerBanner = project.querySelector('.header-banner');
                 var headerMatches = headerBanner && headerBanner.textContent.toLowerCase().includes(searchTerm);
+                var anyCard = false;
                 project.querySelectorAll('.req-card').forEach(function(reqCard) {
-                    if (!headerMatches && !reqCard.textContent.toLowerCase().includes(searchTerm)) {
+                    if (!headerMatches && !(reqCard.getAttribute('data-search') || '').includes(searchTerm)) {
                         reqCard.style.display = 'none'; return;
                     }
+                    anyCard = true;
                     reqCard.style.display = 'block';
                     // Open the parent <details> so the card is actually visible.
                     var parentDetails = reqCard.closest('details');
@@ -987,12 +1016,13 @@ def render_all_projects_dashboard(
                         if (!firstTarget) firstTarget = reqCard;
                     }
                     // Pre-mark matching rows inside so they're highlighted when opened manually.
-                    reqCard.querySelectorAll('tr').forEach(function(row) {
-                        if (row.textContent.toLowerCase().includes(searchTerm)) {
+                    reqCard.querySelectorAll('tr[data-search]').forEach(function(row) {
+                        if ((row.getAttribute('data-search') || '').includes(searchTerm)) {
                             row.classList.add('search-match');
                         }
                     });
                 });
+                project.style.display = (headerMatches || anyCard) ? 'block' : 'none';
             } else {
                 project.style.display = 'block';
                 project.querySelectorAll('.req-card').forEach(function(reqCard) {
@@ -1251,6 +1281,11 @@ def render_all_projects_dashboard(
             if (e.target.closest('.ci-wrap')) {
                 e.stopPropagation();
                 var tip = e.target.closest('.ci-wrap').querySelector('.ci-tip');
+                if (tip && !tip._filled) {
+                    var sc = tip.querySelector('script');
+                    if (sc) { tip.innerHTML = sc.textContent.split('</scr_ipt').join('</script'); }
+                    tip._filled = 1;
+                }
                 var isOpen = tip.classList.contains('ci-open');
                 document.querySelectorAll('.ci-tip.ci-open').forEach(function(t) { t.classList.remove('ci-open'); });
                 if (!isOpen) tip.classList.add('ci-open');
@@ -2477,10 +2512,16 @@ def render_all_projects_dashboard(
                             f'{"<span class=ci-tip-pid>well " + _wid + "</span>" if _wid else ""}'
                             f'</div>'
                         )
+                    # Defer the tooltip body: park it as inert <script> text (built
+                    # into DOM on first click by the .ci-wrap handler) so its ~3
+                    # nodes/row aren't allocated at load. The text stays inside
+                    # details_info, so data-search still indexes it (strip-tags keeps
+                    # script text) — plate/well stay searchable.
+                    _tip_inner = (f'<div class="ci-tip-header">Input Wells</div>{"".join(_tip_rows)}'
+                                  ).replace('</script', '</scr_ipt')
                     _tip_html = (
                         f'<span class="ci-tip">'
-                        f'<div class="ci-tip-header">Input Wells</div>'
-                        f'{"".join(_tip_rows)}'
+                        f'<script type="text/html">{_tip_inner}</script>'
                         f'</span>'
                     )
                     inputs_html = f'<div class="parts-container ci-wrap">{_tags_html}{_tip_html}</div>'
@@ -2914,15 +2955,35 @@ def render_all_projects_dashboard(
                     _status_cell += '<div style="font-size:9px;font-weight:700;color:#b91c1c;margin-top:2px;">🚨 ANTIBIOTIC</div>'
                 _fulfills_attr = "1" if row.get('fulfills_request') else "0"
                 _partner_attr = "1" if str(row.get('for_partner', '')).lower() == 'true' else "0"
-                # Defer the heavy Queue/timeline cell: park its HTML in an inert
-                # <template> (built on pane-open by _buildQueues) so it stays out of
-                # the render tree until needed. Queue content is not full-text
-                # searchable while collapsed (stock/workorder IDs live in other cells).
-                _queue_cell = f'<td class="queue-cell"><template class="qtpl">{"".join(pipeline_html)}</template></td>'
-                html.append(f"""<tr class="{row_class}"{_row_order_style} data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{"".join(details_info)}</td>{_queue_cell}</tr>""")
+                # Defer the heavy Queue/timeline cell as inert TEXT inside a
+                # <script type="text/html">. Unlike a <template> (whose ~1.3M child
+                # nodes are still built into the DOM tree at load), script text is not
+                # parsed into nodes until _buildQueues innerHTMLs it on pane-open.
+                # Not searchable (search reads data-search, which excludes this); the
+                # '</scr_ipt' sentinel guards the (never-seen) literal </script from
+                # closing the block early — _buildQueues restores it.
+                _qtpl_body = "".join(pipeline_html).replace('</script', '</scr_ipt')
+                _queue_cell = f'<td class="queue-cell"><script type="text/html" class="qtpl">{_qtpl_body}</script></td>'
+                _date_str = pd.to_datetime(row['wo_created_at']).strftime('%Y-%m-%d') if pd.notna(row['wo_created_at']) else ''
+                # Row-level search index drives only the cosmetic per-row highlight.
+                # Keep it to the compact identifier fields (type, wo-id, status, stock,
+                # date, TAT); the bulky details cell (part tags + the deferred ci-tip
+                # tooltip text) is intentionally excluded to keep the attribute small —
+                # full details/tooltip text still lives in the card-level data-search,
+                # which drives card visibility/matching.
+                _row_search = _searchable_text(f"{type_display} {row['workorder_id']} {_status_cell} {_sid} {_date_str} {tat_display}")
+                html.append(f"""<tr class="{row_class}"{_row_order_style} data-wo-type="{row['type']}" data-wo-stock="{(_sid or '').lower()}" data-wo-fulfills="{_fulfills_attr}" data-wo-id="{row['workorder_id']}" data-wo-partner="{_partner_attr}" data-search="{_row_search}"><td><span class="type-label">{type_display}</span></td><td><code class="wo-id-tag" title="{row['workorder_id']}">{row['workorder_id']}</code></td><td>{_status_cell}</td><td><span class="{_sid_class}">{_sid}</span></td><td><div class="date-tag">{_date_str}</div></td><td class="tat-cell">{tat_display}</td><td class="details-cell">{"".join(details_info)}</td>{_queue_cell}</tr>""")
             html.append("</tbody></table></div></div>")
         html.append("</div></div>")
-        return "".join(html)
+        card_html = "".join(html)
+        # Card-level search index: all card text (section headers, banners, badges,
+        # rows) EXCLUDING the deferred queue/timeline content — matching what the
+        # old textContent search scanned (it never saw the timeline). The filter
+        # reads this attribute.
+        _card_no_tpl = re.sub(r'<script type="text/html" class="qtpl">.*?</script>', ' ', card_html, flags=re.S)
+        _card_search = _searchable_text(_card_no_tpl)
+        return card_html.replace('<div class="req-card">',
+                                 f'<div class="req-card" data-search="{_card_search}">', 1)
 
     # =========================================================================
     # 4. MAIN RENDER LOOP
