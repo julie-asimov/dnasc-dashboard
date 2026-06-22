@@ -3186,7 +3186,7 @@ def render_all_projects_dashboard(
             if exp_created_dt:
                 exp_created_str = exp_created_dt.strftime('%Y-%m-%d · %-I:%M %p EST')
 
-        _NO_TIMELINE_MARKERS = {"LSP Refill Requests", "A469-Build DNASC CHO Destination Vectors"}
+        _NO_TIMELINE_MARKERS = {"LSP Refill Requests", "A469-Build DNASC CHO Destination Vectors", "A385-DNASC_RD"}
         _is_infra_exp = experiment_name in _NO_TIMELINE_MARKERS
         _due_raw         = None if _is_infra_exp else _due_date_map.get(experiment_name)
         _due_badge_html  = ""
