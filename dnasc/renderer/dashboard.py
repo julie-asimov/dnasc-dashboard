@@ -2096,13 +2096,13 @@ def render_all_projects_dashboard(
             if target_row['type'] == 'lsp_workorder':
                 if active_info:
                     if 'Ready' in active_info and status == 'RUNNING': status = 'READY'
-                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:50%; color:#059669; text-align:center;'>{active_info}</div>"
+                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:4px; color:#059669; text-align:center;'>{active_info}</div>"
                 s_class = f"status-LSP_{status}" if status == 'RUNNING' else f"status-{status}"
             else:
                 if active_info:
                     if 'Ready' in active_info and status == 'RUNNING': status = 'READY'
                     _ei_color = '#ea580c' if target_row['type'] in _parts_types_set else '#2563eb'
-                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:50%; color:{_ei_color}; text-align:center;'>{active_info}</div>"
+                    header_extra_info = f"<div style='font-size:10px; font-weight:800; margin-top:4px; color:{_ei_color}; text-align:center;'>{active_info}</div>"
                 s_class = f"status-{status}"
             badges_html += f'<div style="text-align:right"><span class="badge {s_class}"><b>{f_type}: {status}</b></span>{header_extra_info}</div>'
             if 'antibiotic_mismatch' in root_df.columns:
