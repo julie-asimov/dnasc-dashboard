@@ -460,7 +460,7 @@ _DEFAULT_HIDDEN_STATUS = frozenset(['FULFILLED', 'CANCELED'])
 # designed) -> PLANNED (design done, no work yet) -> IN_PROGRESS (work started)
 # -> REMEDIATION. All four count as in progress.
 _ACTIVE_REQ_STATUS = frozenset(['NEW', 'PLANNED', 'IN_PROGRESS', 'REMEDIATION'])
-_PINNED_EXPS           = frozenset(['LSP Refill Requests', 'A469-Build DNASC CHO Destination Vectors', 'A385-DNASC_RD'])
+_PINNED_EXPS           = PipelineConfig.PINNED_INFRA_EXPERIMENTS
 # Experiments where a trailing _vN construct suffix marks a redo variant that
 # should group under its original. `_v2` is overloaded elsewhere (e.g. dep_rep
 # and other uses), so this grouping is opt-in per experiment — match is a

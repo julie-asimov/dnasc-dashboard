@@ -48,8 +48,20 @@ class PipelineConfig:
     MIN_PICKABLE_COLONIES: int = 3   # request-level pickable sum below this → red flag
     SEQ_STALL_DAYS: int = 7          # picked>0 & seq_confirmed=0 & days-since-last-op>this → red flag
 
+    # ── Pinned infrastructure experiments ────────────────────────────────────
+    # Ongoing reference/infra projects (not normal customer experiments). Single
+    # source of truth — used by the In-Flight tab (_PINNED_EXPS: sort to bottom,
+    # hide their terminal requests) AND the Tracking tab (_NO_TIMELINE_MARKERS:
+    # no timeline markers, exempt from the "missing Asana date" flag + due-date
+    # sheet append). Keep this list authoritative; both tabs read it.
+    PINNED_INFRA_EXPERIMENTS: frozenset = frozenset({
+        "LSP Refill Requests",
+        "A469-Build DNASC CHO Destination Vectors",
+        "A385-DNASC_RD",
+    })
+
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.10.64"
+    PIPELINE_VERSION: str = "1.10.65"
 
     @classmethod
     def get_date_filter(cls) -> str:
