@@ -695,13 +695,16 @@ def render_all_projects_dashboard(
     .tab-btn:last-child { border-right: none; }
     .tab-btn:hover { color: #374151; }
     .tab-btn.active { color: #1d4ed8; border-bottom: 2px solid #2563eb; background: transparent; }
-    /* Hide inactive tabs with visibility (not display:none) so their render tree
-       and computed layout are retained. Switching back to a large tab (Tracking)
-       becomes a repaint instead of a full render-tree rebuild + style recalc +
-       reflow of ~1.37M nodes. position:absolute keeps hidden tabs out of flow so
-       the active tab isn't pushed down. */
-    .tab-content { position: absolute; visibility: hidden; }
-    .tab-content.active { position: static; visibility: visible; }
+    /* Hide inactive tabs with content-visibility (not display:none) so their
+       render state is cached. Switching back to a large tab (Tracking) becomes a
+       repaint instead of a full render-tree rebuild + style recalc + reflow of
+       ~1.37M nodes. content-visibility:hidden ALSO drops the offscreen tab from
+       painting/compositing entirely — visibility:hidden still kept the giant
+       Tracking layer painted, which checkerboarded (grey-on-scroll) the active
+       tab. position:absolute keeps hidden tabs out of flow so the active tab
+       isn't pushed down. */
+    .tab-content { position: absolute; content-visibility: hidden; }
+    .tab-content.active { position: static; content-visibility: visible; }
     .tab-icon-img { height: 24px; width: 24px; border-radius: 4px; }
     /* Kernel text tabs: hide the leading icon (img or emoji), show the text label. */
     .tab-btn > :first-child { display: none; }
