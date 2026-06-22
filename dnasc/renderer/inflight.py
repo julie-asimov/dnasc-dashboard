@@ -460,7 +460,7 @@ _DEFAULT_HIDDEN_STATUS = frozenset(['FULFILLED', 'CANCELED'])
 # designed) -> PLANNED (design done, no work yet) -> IN_PROGRESS (work started)
 # -> REMEDIATION. All four count as in progress.
 _ACTIVE_REQ_STATUS = frozenset(['NEW', 'PLANNED', 'IN_PROGRESS', 'REMEDIATION'])
-_PINNED_EXPS           = frozenset(['LSP Refill Requests', 'A469-Build DNASC CHO Destination Vectors'])
+_PINNED_EXPS           = frozenset(['LSP Refill Requests', 'A469-Build DNASC CHO Destination Vectors', 'A385-DNASC_RD'])
 # Experiments where a trailing _vN construct suffix marks a redo variant that
 # should group under its original. `_v2` is overloaded elsewhere (e.g. dep_rep
 # and other uses), so this grouping is opt-in per experiment — match is a
@@ -501,6 +501,13 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         req_rows[req_rows['request_status'].isin(_ACTIVE_REQ_STATUS)]['experiment_name'].dropna().unique()
     )
     req_rows = req_rows[req_rows['experiment_name'].isin(active_exps)].copy()
+    # For the pinned reference projects (LSP Refill / DV / A385 RD) only, drop
+    # terminal requests so their large FULFILLED/CANCELED history doesn't clutter
+    # the in-flight tab. Other experiments still show all their requests.
+    req_rows = req_rows[~(
+        req_rows['experiment_name'].isin(_PINNED_EXPS)
+        & req_rows['request_status'].isin(_DEFAULT_HIDDEN_STATUS)
+    )].copy()
 
     # Colony Tracking rollup — built from ALL workorder rows of the active requests
     # so the 3-level (request → design → workorder) structure survives.
