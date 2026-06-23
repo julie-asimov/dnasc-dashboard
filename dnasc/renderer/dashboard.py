@@ -12,6 +12,7 @@ Public API:
 from __future__ import annotations
 import base64
 import io
+import os
 import time
 import warnings
 from pathlib import Path
@@ -4214,15 +4215,27 @@ __INNER_BODY__
     )
 
     if out_path is not None:
-        # Stream the document straight to disk: head, then each project's body
-        # (flushed and freed as it renders), then tail. The full ~160 MB string
-        # is never held in memory at once — this is what keeps render under the
-        # server's RAM limit.
+        # Stream the document to disk: head, then each project's body (flushed and
+        # freed as it renders), then tail. The full ~160 MB string is never held in
+        # memory at once — this is what keeps render under the server's RAM limit.
+        #
+        # Write to a sibling temp file, then atomically os.replace() it onto the
+        # served path. The previous approach opened the served file itself in "w"
+        # mode, which truncates it instantly and leaves it half-written for the
+        # many seconds the ~160 MB stream takes. Any browser fetch during that
+        # window (10-min auto-refresh, manual reload, or a concurrent re-run) got a
+        # truncated document — and since the metrics/costs/capacity/inflight tabs
+        # are emitted last (after the giant Tracking body), those tabs were the
+        # ones that came up blank. os.replace() is atomic on POSIX, so a reader
+        # always sees either the complete old file or the complete new one.
         _head, _tail = _doc_template.split("__INNER_BODY__")
-        with open(out_path, "w", encoding="utf-8") as _fh:
+        out_path = Path(out_path)
+        tmp_path = out_path.with_name(out_path.name + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as _fh:
             _fh.write(_head)
             render_all_projects_dashboard(df, out_fh=_fh, **_render_kwargs)
             _fh.write(_tail)
+        os.replace(tmp_path, out_path)
         log.info("Dashboard rendered successfully")
         return None
 
