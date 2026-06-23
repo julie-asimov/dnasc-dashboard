@@ -892,26 +892,27 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       : 'Best attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one.';
     return '<span title="'+tip+'" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">&#9888; '+level+' RISK</span>';
   }}
-  // Worst colony risk across a request's designs + the pickable count driving it.
+  // Worst colony risk across a request's designs + the pickable/picked counts driving it.
   function reqColRisk(r){{
-    var lv='', pk=0;
+    var lv='', pk=0, pd=0;
     (r.designs||[]).forEach(function(d){{
       var rk=designRisk(d);
-      if(rk==='HIGH' && lv!=='HIGH'){{ lv='HIGH'; pk=d.pickable||0; }}
-      else if(rk==='MED' && lv===''){{ lv='MED'; pk=d.pickable||0; }}
+      if(rk==='HIGH' && lv!=='HIGH'){{ lv='HIGH'; pk=d.pickable||0; pd=d.picked||0; }}
+      else if(rk==='MED' && lv===''){{ lv='MED'; pk=d.pickable||0; pd=d.picked||0; }}
     }});
-    return {{level:lv, pick:pk}};
+    return {{level:lv, pick:pk, picked:pd}};
   }}
   // Colony-risk flag badge (for the standard-view Flags column) — shows severity AND
-  // the pickable colony count so the standard view carries the colony info too.
-  function colRiskFlag(level,pick){{
+  // the pickable + total-picked colony counts so the standard view carries the colony info too.
+  function colRiskFlag(level,pick,picked){{
     if(level!=='HIGH' && level!=='MED') return '';
+    picked=picked||0;
     var st = level==='HIGH' ? 'background:#FEE2E2;color:#991B1B;border:1px solid #FCA5A5;'
                             : 'background:#FEF3C7;color:#92400E;border:1px solid #FCD34D;';
     var tip = level==='HIGH'
-      ? 'Colony at risk: every attempt LOW (0–'+PICK_LOW_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable.'
-      : 'Colony watch: best attempt only MEDIUM (≤'+PICK_MED_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable.';
-    return '<span title="'+tip+'" style="'+BDG+st+'">'+level+' RISK &middot; '+pick+'pk</span>';
+      ? 'Colony at risk: every attempt LOW (0–'+PICK_LOW_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked.'
+      : 'Colony watch: best attempt only MEDIUM (≤'+PICK_MED_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked.';
+    return '<span title="'+tip+'" style="'+BDG+st+'">'+level+' RISK &middot; '+pick+'pk &middot; '+picked+' picked</span>';
   }}
   // One-time: fold colony risk into each record's flags so it filters/sorts like the
   // other flags (and "All Flags" includes it). Idempotent via the indexOf guard.
@@ -921,8 +922,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       r.flags = r.flags || [];
       // Colony risk only applies while the request is in assembly (ASM). Past that
       // (LSP/PARTS/etc.) the colony picture is no longer the actionable signal.
-      var cr = (r.phase === 'ASM') ? reqColRisk(r) : {{level:'', pick:0}};
-      r._colRisk = cr.level; r._colPick = cr.pick;
+      var cr = (r.phase === 'ASM') ? reqColRisk(r) : {{level:'', pick:0, picked:0}};
+      r._colRisk = cr.level; r._colPick = cr.pick; r._colPicked = cr.picked;
       if(cr.level && r.flags.indexOf('COLONY_RISK')===-1) {{ r.flags.push('COLONY_RISK'); _crCt++; }}
     }});
     var _el = document.getElementById('if-colrisk-ct');
@@ -1024,7 +1025,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var st  = statusBdg(r.status);
     var ph  = phaseBdg(r.phase);
     var fl  = r.flags.map(function(f){{
-      if(f==='COLONY_RISK') return colRiskFlag(r._colRisk, r._colPick);
+      if(f==='COLONY_RISK') return colRiskFlag(r._colRisk, r._colPick, r._colPicked);
       return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);
     }}).join('');
     return '<tr class="'+(grouped?'if-cgrp-mem':'')+'" style="'+bg+'">'
