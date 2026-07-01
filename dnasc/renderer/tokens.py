@@ -50,9 +50,9 @@ BRAND_GRADIENT  = "linear-gradient(135deg,#7c3aed 0%,#be185d 100%)"  # tab nav /
 # ───────────────────────────────────────────────────────────────────────────
 # 2. SURFACE & INK — soft, AA-compliant (no pure black/white)
 # ───────────────────────────────────────────────────────────────────────────
-SURFACE_PAGE   = "#f0f0f2"    # page background
+SURFACE_PAGE   = "#f1f5f9"    # page background
 SURFACE_CARD   = "#fdfdfd"    # cards (off-white, NOT pure #fff)
-SURFACE_SUNKEN = "#f5f5f7"    # headers / controls
+SURFACE_SUNKEN = "#f8fafc"    # headers / controls
 INK            = "#1d1d1f"    # primary text (not #000)
 INK_SECONDARY  = "#4b5563"
 INK_MUTED      = "#6b7280"
@@ -75,9 +75,9 @@ STATUS = {
     "WAITING":     ("#fffbeb", "#b45309", "#fde68a"),   # AA-darkened from #d97706
     "BLOCKED":     ("#fef2f2", "#b91c1c", "#fca5a5"),   # split from FAILED -> true red
     "FAILED":      ("#fff1f5", "#be185d", "#fecdd3"),   # the ONLY magenta-red status
-    "CANCELED":    ("#f5f5f7", "#6b7280", "#d1d5db"),
+    "CANCELED":    ("#f8fafc", "#6b7280", "#cbd5e1"),
     "DRAFT":       ("#f1f5f9", "#64748b", "#cbd5e1"),
-    "UNKNOWN":     ("#f5f5f7", "#6b7280", "#d1d5db"),
+    "UNKNOWN":     ("#f8fafc", "#6b7280", "#cbd5e1"),
 }
 # Status icons are Lucide line-glyphs (1.5–2px stroke, currentColor), defined
 # ONCE here and consumed by BOTH tabs so a status looks identical everywhere:
@@ -115,7 +115,7 @@ CUSTOMER = {
     "TECH_OUT":          ("Tech Out",    "#ffedd5", "#9a3412"),   # AA-darkened
     "EXTERNAL_TECH_OUT": ("Ext TechOut", "#fce7f3", "#9d174d"),   # AA; distinct from FAILED
 }
-CUSTOMER_FALLBACK = ("—", "#f3f4f6", "#6b7280")
+CUSTOMER_FALLBACK = ("—", "#f1f5f9", "#6b7280")
 CUSTOMER_DOT = ""    # leading marker before customer label (empty = none). Single
                      # source of truth — consumers render {CUSTOMER_DOT}{label} with no
                      # manual space, so set e.g. "• " (with trailing space) to re-add.

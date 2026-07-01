@@ -672,14 +672,41 @@ def render_all_projects_dashboard(
       --text-base: 11px;  /* detail content */
       --text-md:   12px;  /* req names, section headers */
       --text-lg:   13px;  /* dashboard title */
+      /* NEUTRAL SCALE — single cool-gray (slate) family for all chrome */
+      --c-border:        #e5e7eb;  /* hairline borders */
+      --c-border-strong: #cbd5e1;  /* emphasized dividers */
+      --c-surface:       #ffffff;
+      --c-surface-1:     #f8fafc;  /* subtle fill */
+      --c-surface-2:     #f1f5f9;  /* muted fill / code pills */
+      --c-accent:        #2563eb;
+      /* RADII */
+      --r-sm: 4px;
+      --r-md: 6px;
+      --r-lg: 8px;
+      /* ELEVATION */
+      --shadow-sm: 0 1px 2px rgba(15,23,42,0.05);
+      --shadow-md: 0 1px 3px rgba(15,23,42,0.06);
+      --shadow-lg: 0 4px 14px rgba(15,23,42,0.10);
     }
     /* BASE */
     * { -webkit-font-smoothing: antialiased; box-sizing: border-box; }
     body { background: #e9ecf2; padding: 10px; margin: 0; }
+    /* RESPONSIVE — tighten chrome padding as the viewport narrows so dense
+       content keeps room before it has to wrap (laptop vs. external monitor). */
+    @media (max-width: 1400px) {
+      body { padding: 7px; }
+      .project-wrapper { padding: 10px 11px; }
+    }
+    @media (max-width: 1100px) {
+      body { padding: 5px; }
+      .project-wrapper { padding: 8px; margin-bottom: 8px; }
+      .req-title-bar { padding: 3px 5px; }
+      .controls-container { gap: 7px; padding: 5px 8px; }
+    }
     .dashboard-container { max-width: 100%; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 11px; line-height: 1.45; color: #1d1d1f; letter-spacing: 0.05px; }
 
     /* LOGO HEADER */
-    .dashboard-header { display: flex; align-items: center; padding: 8px 12px; background: white; border-bottom: 1px solid #ececf1; gap: 12px; border-radius: 5px 5px 0 0; }
+    .dashboard-header { display: flex; align-items: center; padding: 8px 12px; background: white; border-bottom: 1px solid #e5e7eb; gap: 12px; border-radius: 5px 5px 0 0; }
     .dashboard-logo { height: 32px; width: auto; }
     .dashboard-title { font-size: 13px; font-weight: 800; color: #1d1d1f; }
     .dashboard-updated { margin-left: auto; display: inline-flex; align-items: baseline; gap: 5px;
@@ -720,12 +747,12 @@ def render_all_projects_dashboard(
     .uc-badge { background: #eff4ff; color: #1d4ed8; border: 1px solid #bcd0fb; padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 600; margin-top: 10px; }
 
     /* CONTROLS */
-    .controls-container { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: #f5f5f7; border-bottom: 1px solid #e4e4ea; }
+    .controls-container { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: #f8fafc; border-bottom: 1px solid #e5e7eb; }
     .toggle-wrapper { display: flex; align-items: center; gap: 5px; }
     .toggle-label { font-size: 10px; font-weight: 600; color: #86868b; white-space: nowrap; }
     .switch { position: relative; display: inline-block; width: 28px; height: 16px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #e4e4ea; border-radius: 16px; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #e5e7eb; border-radius: 16px; }
     .slider:before { position: absolute; content: ""; height: 12px; width: 12px; left: 2px; bottom: 2px; background-color: white; border-radius: 50%; }
     input:checked + .slider { background: #2563eb; }
     input:checked + .slider:before { left: 14px; }
@@ -736,25 +763,25 @@ def render_all_projects_dashboard(
     .header-banner:hover { filter: brightness(0.98); }
     .header-title { font-size: 14px; font-weight: 700; color: #0f172a; white-space: nowrap; padding-right: 16px; }
     /* Kernel metadata pill (shared with inflight tab) */
-    .kpill { display:inline-flex; align-items:center; gap:5px; background:#f3f4f6; border:1px solid #e5e7eb; border-radius:6px; padding:3px 9px; font-size:11px; color:#1f2937; font-weight:500; white-space:nowrap; }
+    .kpill { display:inline-flex; align-items:center; gap:5px; background:#f1f5f9; border:1px solid #e5e7eb; border-radius:6px; padding:3px 9px; font-size:11px; color:#1f2937; font-weight:500; white-space:nowrap; }
     .kpill .kk { color:#6b7280; font-weight:500; }
     .kpill b { font-weight:700; color:#1e2937; }
-    .header-main-stat { font-size: 10px; font-weight: 700; color: #374151; background: #f3f4f6; border: 1px solid #e5e7eb; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
-    .stat-item { background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb; padding: 2px 7px; border-radius: 6px; font-size: 8px; font-weight: 600; white-space: nowrap; }
+    .header-main-stat { font-size: 10px; font-weight: 700; color: #374151; background: #f1f5f9; border: 1px solid #e5e7eb; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+    .stat-item { background: #f1f5f9; color: #374151; border: 1px solid #e5e7eb; padding: 2px 7px; border-radius: 6px; font-size: 8px; font-weight: 600; white-space: nowrap; }
     .stat-label { font-weight: 800; color: #111827; margin-right: 3px; font-size: 9px; }
 
     /* REQUEST CARDS */
-    .req-card { border: 1px solid #e9e9ef; background: #fdfdfd; margin-top: 4px; border-radius: 7px; box-shadow: 0 1px 3px rgba(20,20,40,0.05); }
-    .req-title-bar { padding: 3px 6px; border-bottom: 1px solid #ececf1; display: flex; justify-content: space-between; align-items: center; border-left-width: 3px; border-left-style: solid; gap: 4px; min-height: 20px; }
+    .req-card { border: 1px solid var(--c-border); background: var(--c-surface); margin-top: 4px; border-radius: var(--r-lg); box-shadow: var(--shadow-md); }
+    .req-title-bar { padding: 3px 6px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; border-left-width: 3px; border-left-style: solid; gap: 4px; min-height: 20px; }
     .req-name { font-size: 10px; font-weight: 700; color: #1d1d1f; white-space: nowrap; }
     .req-meta { font-size: 7px; color: #86868b; margin-top: 0px; }
 
     /* ASSEMBLY SECTIONS */
-    .assembly-section { margin: 5px 6px; border: 1px solid #ececf1; border-radius: 6px; overflow: hidden; }
+    .assembly-section { margin: 5px 6px; border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden; }
     .assembly-section.dimmed { opacity: 0.5; }
-    .dropdown-btn { width: 100%; background: #f7f7fa; border: none; padding: 5px 8px; text-align: left; cursor: pointer; display: flex; align-items: center; font-size: 9px; }
-    .dropdown-btn:hover { background: #f0f0f5; }
-    .dropdown-btn.active-header { background: #ececf1; }
+    .dropdown-btn { width: 100%; background: var(--c-surface-1); border: none; padding: 5px 8px; text-align: left; cursor: pointer; display: flex; align-items: center; font-size: 9px; }
+    .dropdown-btn:hover { background: var(--c-surface-2); }
+    .dropdown-btn.active-header { background: #e5e7eb; }
     .dropdown-icon { color: #86868b; margin-right: 5px; font-size: 8px; }
     .dropdown-icon.open { transform: rotate(90deg); }
     .assembly-info { flex-grow: 1; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
@@ -766,37 +793,37 @@ def render_all_projects_dashboard(
     /*__STATUS_CSS__*/
 
     /* STOCK TAG */
-    .stock-tag { background: #f3f4f6; color: #4b5563; border: 1px solid #d1d5db; padding: 1px 4px; border-radius: 2px; font-family: monospace; font-weight: 700; font-size: 9px; white-space: nowrap; }
+    .stock-tag { background: #f1f5f9; color: #4b5563; border: 1px solid #cbd5e1; padding: 1px 4px; border-radius: 2px; font-family: monospace; font-weight: 700; font-size: 9px; white-space: nowrap; }
     .dropdown-btn .stock-tag { font-size: 8px; padding: 1px 3px; }
-    .stock-id-badge { background: #f3f4f6; color: #4b5563; border: 1px solid #d1d5db; padding: 1px 4px; border-radius: 2px; font-family: monospace; font-weight: 700; font-size: 9px; white-space: nowrap; }
+    .stock-id-badge { background: #f1f5f9; color: #4b5563; border: 1px solid #cbd5e1; padding: 1px 4px; border-radius: 2px; font-family: monospace; font-weight: 700; font-size: 9px; white-space: nowrap; }
     .stock-id-badge.matches-root { background: #ede9fe; color: #6d28d9; border: 1px solid #c4b5fd; }
     .stock-id-badge.secondary-root { background: #ddd6fe; color: #4c1d95; border: 1px solid #7c3aed; }
     .wo-id-tag { background: none; color: #374151; padding: 1px 3px; font-family: monospace; font-size: 7px; }
 
     /* TABLE */
-    .content-pane { display: none; padding: 0; background: #fff; }
+    .content-pane { display: none; padding: 0; background: #fff; overflow-x: auto; }
     .wo-table { width: 100%; border-collapse: collapse; font-size: 9px !important; }
-    .wo-table th { text-align: left; color: #0f172a; padding: 5px 8px; border-bottom: 1px solid #cbd5e1; font-size: 8px; font-weight: 700; background: #f3f4f6; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
-    .wo-table td { padding: 4px 8px; border-bottom: 1px solid #f3f3f6; vertical-align: top; font-weight: 600; color: #1d1d1f; line-height: 1.4; }
+    .wo-table th { text-align: left; color: #0f172a; padding: 5px 8px; border-bottom: 1px solid #cbd5e1; font-size: 8px; font-weight: 700; background: #f1f5f9; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+    .wo-table td { padding: 4px 8px; border-bottom: 1px solid #f1f5f9; vertical-align: top; font-weight: 600; color: #1d1d1f; line-height: 1.4; }
     .wo-table tbody tr:hover { background: #f5f3ff; box-shadow: inset 2px 0 0 #7c3aed; }
     .wo-table .stock-tag { font-size: 8px; padding: 1px 3px; }
 
     /* TREE ROWS */
-    .tree-row-0 { border-left: 3px solid #e4e4ea !important; background: #ffffff !important; }
-    .tree-row-1 { border-left: 3px solid #e4e4ea !important; background: #f9f9fb !important; }
-    .tree-row-2 { border-left: 3px solid #e4e4ea !important; background: #f4f4f6 !important; }
-    .tree-line-icon { color: #e4e4ea; margin-right: 2px; font-family: monospace; font-size: 9px; }
-    .source-badge { font-size: 7px; padding: 0px 2px; border-radius: 2px; background: #f0f0f2; color: #86868b; margin-left: 2px; }
+    .tree-row-0 { border-left: 3px solid #e5e7eb !important; background: #ffffff !important; }
+    .tree-row-1 { border-left: 3px solid #e5e7eb !important; background: #f8fafc !important; }
+    .tree-row-2 { border-left: 3px solid #e5e7eb !important; background: #f1f5f9 !important; }
+    .tree-line-icon { color: #e5e7eb; margin-right: 2px; font-family: monospace; font-size: 9px; }
+    .source-badge { font-size: 7px; padding: 0px 2px; border-radius: 2px; background: #f1f5f9; color: #86868b; margin-left: 2px; }
 
     /* Hoisted high-frequency styles (was ~16MB of repeated inline style="" attrs) */
-    .u1 { color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f3f4f6; }
+    .u1 { color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;padding:4px 0;border-bottom:1px solid #f1f5f9; }
     .u2 { margin-left: 8px; }
     .u3 { color:#6b7280;font-size:9px;font-weight:700;text-transform:uppercase; }
-    .u4 { font-size:11px;color:#1f2937;padding:4px 0;border-bottom:1px solid #f3f4f6; }
-    .u5 { display: flex; align-items: center; background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 4px; border-radius: 2px; gap: 3px; height: 16px; }
+    .u4 { font-size:11px;color:#1f2937;padding:4px 0;border-bottom:1px solid #f1f5f9; }
+    .u5 { display: flex; align-items: center; background: #f1f5f9; border: 1px solid #cbd5e1; padding: 1px 4px; border-radius: 2px; gap: 3px; height: 16px; }
     .u6 { border-bottom: 1px solid #e5e7eb; margin-bottom: 10px; padding-bottom: 5px; font-weight: 800; color: #4b5563; text-transform: uppercase; font-size: 11px; }
     .u7 { font-size:10px;color:#1e293b; }
-    .u8 { font-family: monospace; font-size: 11px; color: #4b5563; background: #f3f4f6; padding: 2px 6px; border-radius: 3px; text-decoration: underline; border: 1px solid #d1d5db; }
+    .u8 { font-family: monospace; font-size: 11px; color: #4b5563; background: #f1f5f9; padding: 2px 6px; border-radius: 3px; text-decoration: underline; border: 1px solid #cbd5e1; }
     .u9 { font-size: 9px; color: #6b7280; font-weight: 700; text-transform: uppercase; }
     .u10 { font-size: 10px; font-weight: 700; color: #4b5563; font-family: monospace; }
     .u11 { color:#16a34a;font-size:11px;margin-right:4px; }
@@ -815,21 +842,21 @@ def render_all_projects_dashboard(
     .t-name { font-weight: 700; color: #1d1d1f; white-space: nowrap; font-size: 9px; }
     .t-time { font-family: monospace; color: #86868b; font-size: 8px; white-space: nowrap; }
     .t-details { font-size: 7px; color: #86868b; margin-top: 0px; display: flex; flex-wrap: wrap; gap: 2px; }
-    .t-pill { background: #f0f0f2; color: #86868b; border: 1px solid #e4e4ea; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; text-decoration: none; }
-    .t-pill:hover { background: #ececf1; }
+    .t-pill { background: #f1f5f9; color: #86868b; border: 1px solid #e5e7eb; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; text-decoration: none; }
+    .t-pill:hover { background: #e5e7eb; }
 
     /* PLATE HOVER */
     .plate-hover-container { position: relative; display: inline-block; }
-    .plate-trigger { cursor: pointer; background: #f0f0f2; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 7px; border: 1px solid #e4e4ea; text-decoration: none; }
-    .plate-trigger:hover { background: #ececf1; }
-    .plate-popover { display: none; position: absolute; top: 100%; left: 0; background: white; border: 1px solid #e4e4ea; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 4px 6px; border-radius: 3px; z-index: 9999; min-width: 150px; margin-top: 2px; }
+    .plate-trigger { cursor: pointer; background: #f1f5f9; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 7px; border: 1px solid #e5e7eb; text-decoration: none; }
+    .plate-trigger:hover { background: #e5e7eb; }
+    .plate-popover { display: none; position: absolute; top: 100%; left: 0; background: white; border: 1px solid #e5e7eb; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 4px 6px; border-radius: 3px; z-index: 9999; min-width: 150px; margin-top: 2px; }
     .plate-hover-container:hover .plate-popover { display: block; }
     .popover-title { font-weight: 700; font-size: 7px; color: #86868b; text-transform: uppercase; margin-bottom: 2px; font-family: monospace; }
     .popover-link { font-size: 7px; color: #86868b; text-decoration: none; padding: 0px 2px; font-family: monospace; }
     .popover-link:hover { text-decoration: underline; }
 
     /* PART TAGS */
-    .part-tag { background: #f0f0f2; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; margin-right: 2px; border: 1px solid #ececf1; }
+    .part-tag { background: #f1f5f9; color: #86868b; padding: 0px 2px; border-radius: 2px; font-family: monospace; font-size: 8px; margin-right: 2px; border: 1px solid #e5e7eb; }
     .part-tag.in-production { background: #fffbeb; color: #d97706; border: 1px dashed #fcd34d; }
     .part-tag.missing { background: #fdf2f8; color: #be185d; border: 1px solid #f9a8d4; font-weight: 700; cursor: default; }
     .ci-wrap { position: relative; display: inline-block; cursor: pointer; }
@@ -862,8 +889,8 @@ def render_all_projects_dashboard(
     .tat-cell { font-family: monospace; color: #86868b; font-size: 8px; white-space: nowrap; }
 
     /* GROUP HEADERS */
-    .group-header { padding: 5px 8px; font-size: 10px; font-weight: 700; background: #f0f0f2; color: #1d1d1f; border: 1px solid #e4e4ea; cursor: pointer; display: flex; align-items: center; border-radius: 3px; margin: 6px 0 3px 0; }
-    .group-header:hover { background: #ececf1; }
+    .group-header { padding: 5px 8px; font-size: 10px; font-weight: 700; background: #f1f5f9; color: #1d1d1f; border: 1px solid #e5e7eb; cursor: pointer; display: flex; align-items: center; border-radius: 3px; margin: 6px 0 3px 0; }
+    .group-header:hover { background: #e5e7eb; }
     .group-header.in-progress { background: #f9fafb; border-color: #e5e7eb; border-left: 3px solid #2563eb; color: #374151; }
     .group-header.new { background: #f9fafb; border-color: #e5e7eb; border-left: 3px solid #7c3aed; color: #374151; }
     .group-header.fulfilled { background: #f9fafb; border-color: #e5e7eb; border-left: 3px solid #16a34a; color: #374151; }
@@ -877,7 +904,7 @@ def render_all_projects_dashboard(
 
     /* WARNING & SEARCH */
     .warning-note { background: #fdf2f8; border: 1px solid #f9a8d4; color: #be185d; padding: 2px 5px; margin: 3px 6px; border-radius: 2px; font-weight: 600; font-size: 8px; }
-    #search_box { width: 280px; padding: 4px 8px; border: 1px solid #e4e4ea; border-radius: 4px; font-size: 10px; background: white; }
+    #search_box { width: 280px; padding: 4px 8px; border: 1px solid #e5e7eb; border-radius: 4px; font-size: 10px; background: white; }
     #search_box:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.1); }
     .search-match td { background: #fef9c3 !important; }
     .search-match-section { outline: 2px solid #f59e0b !important; outline-offset: 1px; border-radius: 3px; }
@@ -948,7 +975,7 @@ def render_all_projects_dashboard(
             _sortedByDue = false;
             document.getElementById('sort_due_btn').textContent = 'Sort: Due Date';
             document.getElementById('sort_due_btn').style.background = '#fff';
-            document.getElementById('sort_due_btn').style.borderColor = '#e4e4ea';
+            document.getElementById('sort_due_btn').style.borderColor = '#e5e7eb';
             document.getElementById('sort_due_btn').style.color = '#1d1d1f';
         }
     }
@@ -1148,11 +1175,11 @@ def render_all_projects_dashboard(
         if (!rows.length) return '';
         var cols = ['Type','Workorder ID','Stock ID','Status','Created','Partner','Experiment'];
         var thStyle = 'padding:2px 8px;text-align:left;white-space:nowrap;cursor:pointer;user-select:none;';
-        thStyle += 'border-bottom:2px solid #d1d5db;font-size:10px;color:#374151;';
+        thStyle += 'border-bottom:2px solid #cbd5e1;font-size:10px;color:#374151;';
         var html = '<div style="font-size:10px;font-weight:700;color:#374151;margin:8px 0 3px;">' + title + '</div>';
         var tid = 'sl_' + title.toLowerCase().replace(/[^a-z]/g,'_');
         html += '<table id="' + tid + '" style="width:100%;border-collapse:collapse;font-size:10px;">';
-        html += '<thead><tr style="background:#f3f4f6;">';
+        html += '<thead><tr style="background:#f1f5f9;">';
         cols.forEach(function(c) { html += '<th data-label="' + c + '" style="' + thStyle + '">' + c + '</th>'; });
         html += '</tr></thead><tbody>';
         rows.forEach(function(r) {
@@ -1191,7 +1218,7 @@ def render_all_projects_dashboard(
         var filterInput = document.createElement('input');
         filterInput.type = 'text';
         filterInput.placeholder = 'Filter rows…';
-        filterInput.style.cssText = 'width:100%;box-sizing:border-box;padding:3px 7px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;';
+        filterInput.style.cssText = 'width:100%;box-sizing:border-box;padding:3px 7px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;';
         filterInput.oninput = function() { _slApplyFilter(this.value); };
         filterRow.appendChild(filterInput);
         pop.innerHTML = (src ? src.html : '') + (inp ? inp.html : '');
@@ -1317,10 +1344,10 @@ def render_all_projects_dashboard(
                         <input type="text" id="search_box" placeholder="Search Stock ID, Experiment, or Construct..." oninput="filterDashboardDebounced()">
                         <span id="search_count" style="font-size:10px;color:#64748b;white-space:nowrap;display:none;padding-left:2px;"></span>
                         <div style="display:flex;gap:4px;align-items:center;">
-                            <button id="search_download" onclick="downloadSearchCSV()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #e4e4ea;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#8595; CSV</button>
-                            <button id="search_list_btn" onclick="toggleSearchList()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #e4e4ea;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#9776; List</button>
+                            <button id="search_download" onclick="downloadSearchCSV()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #e5e7eb;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#8595; CSV</button>
+                            <button id="search_list_btn" onclick="toggleSearchList()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #e5e7eb;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#9776; List</button>
                         </div>
-                        <div id="search_list_popup" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #e4e4ea;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:10px 12px;z-index:999;min-width:700px;max-width:90vw;max-height:60vh;overflow-y:auto;font-family:inherit;"></div>
+                        <div id="search_list_popup" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #e5e7eb;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:10px 12px;z-index:999;min-width:700px;max-width:90vw;max-height:60vh;overflow-y:auto;font-family:inherit;"></div>
                     </div>
                     <div class="toggle-wrapper">
                         <span class="toggle-label">Active Projects Only</span>
@@ -1330,7 +1357,7 @@ def render_all_projects_dashboard(
                         </label>
                     </div>
                     <div class="toggle-wrapper">
-                        <button id="sort_due_btn" onclick="sortByDueDate()" style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:4px;border:1px solid #e4e4ea;background:#fff;color:#1d1d1f;cursor:pointer;white-space:nowrap;">Sort: Due Date</button>
+                        <button id="sort_due_btn" onclick="sortByDueDate()" style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:4px;border:1px solid #e5e7eb;background:#fff;color:#1d1d1f;cursor:pointer;white-space:nowrap;">Sort: Due Date</button>
                     </div>
                 </div>
                 <div id="projects-container" style="padding: 10px; display: flex; flex-direction: column;">
@@ -1441,7 +1468,7 @@ def render_all_projects_dashboard(
 
             # Phase pills — Kernel palette (LSP=blue, ASM=orange, PARTS=teal),
             # AA-safe tint + accent border, 9px. Sourced from renderer/tokens.py.
-            phase_bg, phase_color, phase_border = tok.PHASE.get(phase_label, ('#f5f5f7', '#6b7280', '#e5e7eb'))
+            phase_bg, phase_color, phase_border = tok.PHASE.get(phase_label, ('#f8fafc', '#6b7280', '#e5e7eb'))
             _pg = tok.GEOM['phase']
 
             phase_html = f'''
@@ -1497,7 +1524,7 @@ def render_all_projects_dashboard(
                         if name == proto.LSP_RELEASING and state == 'SC': final_release_time = to_est(start)
 
         time_badges_html = ""
-        shared_time_style = "display: flex; align-items: center; background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 4px; border-radius: 2px; gap: 3px; height: 16px;"
+        shared_time_style = "display: flex; align-items: center; background: #f1f5f9; border: 1px solid #cbd5e1; padding: 1px 4px; border-radius: 2px; gap: 3px; height: 16px;"
         if req_created:
             if is_done:
                 production_end = ready_to_ship_time if ready_to_ship_time else now
@@ -1531,7 +1558,7 @@ def render_all_projects_dashboard(
         html.append(f"""
         <div class="req-card">
             <div class="req-title-bar" style="background: {req_bg_color}; border-left-color: {req_border_left};">
-                <div style="flex-grow: 1; min-width: 0;">
+                <div style="flex-grow: 1;">
                     <div style="display: flex; align-items: center; gap: 6px; flex-wrap: nowrap;">
                         <div style="display: flex; align-items: center; gap: 8px;">
                             {pais_display}
@@ -1551,7 +1578,7 @@ def render_all_projects_dashboard(
                         {(f'<span style="color: #1e40af; font-size: 10px; font-family: monospace; font-weight: 600;">{_req_email}</span>') if _req_email else ''}
                     </div>
                 </div>
-                <div style="display: flex; gap: 8px; align-items: center;">
+                <div style="display: flex; gap: 8px; align-items: center; flex-shrink: 0; margin-left: auto;">
                     {customer_badge}{partner_badge}
                     <span class="badge status-{str(req_status).replace(" ", "_")}">{req_status}</span>
                     {status_badge_html}
@@ -1565,7 +1592,7 @@ def render_all_projects_dashboard(
         """)
 
         html.append(f"""
-        <div style="padding: 3px 6px; background: #fafafa; border-bottom: 1px solid #ececf1; cursor: pointer;" onclick="toggleSection('req_{req_id.replace("-", "_")}')">
+        <div style="padding: 3px 6px; background: #f8fafc; border-bottom: 1px solid #e5e7eb; cursor: pointer;" onclick="toggleSection('req_{req_id.replace("-", "_")}')">
             <span id="req_{req_id.replace("-", "_")}_icon" class="dropdown-icon">▶</span>
             <span style="font-size: 9px; font-weight: 600; color: #86868b;">Workorder Details</span>
         </div>
@@ -2588,7 +2615,7 @@ def render_all_projects_dashboard(
                     elif _st in ("FULFILLED", "COMPLETED"):
                         src_badge = f'<span style="background:#dcfce7;color:#15803d;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #86efac;margin-left:6px;">{src_req_status}</span>'
                     elif _st and _st not in ("", "NAN", "N/A"):
-                        src_badge = f'<span style="background:#f3f4f6;color:#6b7280;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #d1d5db;margin-left:6px;">{src_req_status}</span>'
+                        src_badge = f'<span style="background:#f1f5f9;color:#6b7280;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid #cbd5e1;margin-left:6px;">{src_req_status}</span>'
                     else:
                         src_badge = ""
 
@@ -2610,11 +2637,11 @@ def render_all_projects_dashboard(
                         _fid = _wm.group(1) if _wm else str(_input_well_raw)
                         _input_well_html = f"""
                                     <span class="u1">Input:</span>
-                                    <span style="font-size:11px;padding:4px 0;border-bottom:1px solid #f3f4f6;"><a href="https://bios.asimov.io/inventory/wells/{_fid}" target="_blank" class="u12">well{_fid}</a></span>"""
+                                    <span style="font-size:11px;padding:4px 0;border-bottom:1px solid #f1f5f9;"><a href="https://bios.asimov.io/inventory/wells/{_fid}" target="_blank" class="u12">well{_fid}</a></span>"""
 
                     lsp_parts.append(f"""
                         <div class="plate-hover-container" style="display: inline-block; margin-bottom: 6px;">
-                            <span class="plate-trigger" style="background: #e5e7eb; color: #4b5563; cursor: pointer; font-size: 9px; font-weight: 600; padding: 2px 6px; border-radius: 3px; border: 1px solid #d1d5db;">
+                            <span class="plate-trigger" style="background: #e5e7eb; color: #4b5563; cursor: pointer; font-size: 9px; font-weight: 600; padding: 2px 6px; border-radius: 3px; border: 1px solid #cbd5e1;">
                                 Source Info
                             </span>
                             <div class="plate-popover" style="width: 460px; white-space: normal; padding: 15px; border-top: 4px solid #6b7280; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
@@ -2623,14 +2650,14 @@ def render_all_projects_dashboard(
                                 </div>
                                 <div style="display: grid; grid-template-columns: 115px 1fr; gap: 0; font-size: 12px; line-height: 1.5; color: #1f2937;">
                                     <span class="u1">Experiment:</span>
-                                    <span style="padding:4px 0;border-bottom:1px solid #f3f4f6;">{src_exp_name}</span>
+                                    <span style="padding:4px 0;border-bottom:1px solid #f1f5f9;">{src_exp_name}</span>
                                     <span class="u1">Process ID:</span>
-                                    <div style="padding:4px 0;border-bottom:1px solid #f3f4f6;">
+                                    <div style="padding:4px 0;border-bottom:1px solid #f1f5f9;">
                                         <a href="{proc_href}" target="_blank" class="u8">{proc_label}</a>
                                         <div style="font-size: 9px; color: #9ca3af; margin-top: 4px; padding-left: 2px;">{construct_name} &nbsp;·&nbsp; <span style="font-family: monospace; color: #6b7280;">{pai_val}</span></div>
                                     </div>
                                     <span class="u1">Request ID:</span>
-                                    <span style="font-family: monospace; font-size: 11px; color: #4b5563; padding:4px 0;border-bottom:1px solid #f3f4f6;">{src_req_id}{src_badge}</span>
+                                    <span style="font-family: monospace; font-size: 11px; color: #4b5563; padding:4px 0;border-bottom:1px solid #f1f5f9;">{src_req_id}{src_badge}</span>
                                     {_input_well_html}
                                 </div>
                             </div>
@@ -2656,7 +2683,7 @@ def render_all_projects_dashboard(
                     elif _status_vals and all(v.lower() == "pass" for v in _status_vals):
                         _qc_btn_style = "background:#dcfce7;color:#15803d;border:1px solid #86efac;"
                     else:
-                        _qc_btn_style = "background:#e5e7eb;color:#4b5563;border:1px solid #d1d5db;"
+                        _qc_btn_style = "background:#e5e7eb;color:#4b5563;border:1px solid #cbd5e1;"
 
                     def _qc_dot(val):
                         v = str(val).lower()
@@ -3013,7 +3040,7 @@ def render_all_projects_dashboard(
             cnt = sum(wc.values())
             label_style = "color:#374151;font-weight:600;" if cnt > 0 else "color:#9ca3af;font-weight:400;"
             if cnt == 0:
-                bar_html = '<div style="flex:1;height:20px;background:#f3f4f6;border-radius:3px;border:1px dashed #e5e7eb;"></div>'
+                bar_html = '<div style="flex:1;height:20px;background:#f1f5f9;border-radius:3px;border:1px dashed #e5e7eb;"></div>'
             else:
                 bar_total_w = max(20, int((cnt / max_c) * 200))
                 segs = ''
@@ -4178,7 +4205,7 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
     <style>
     #_loading_overlay {{
         position: fixed; inset: 0; z-index: 99999;
-        background: #f5f5f7;
+        background: #f8fafc;
         display: flex; flex-direction: column;
         align-items: center; justify-content: center;
         gap: 14px;
@@ -4187,7 +4214,7 @@ def render_dashboard(df: pd.DataFrame, experiment_active_map: dict | None = None
     #_loading_overlay.fade-out {{ opacity: 0; pointer-events: none; }}
     #_loading_overlay .spinner {{
         width: 36px; height: 36px;
-        border: 3px solid #d1d5db;
+        border: 3px solid #cbd5e1;
         border-top-color: #6366f1;
         border-radius: 50%;
         animation: _spin 0.7s linear infinite;

@@ -680,14 +680,14 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
 .if-caret{{display:inline-block;width:13px;color:#9ca3af;font-size:11px;transition:transform .1s;cursor:pointer;}}
 .if-caret.open{{transform:rotate(90deg);color:#2563eb;}}
 /* Kernel metadata-cloud pill + workbench primitives */
-.kpill{{display:inline-flex;align-items:center;gap:5px;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:3px 9px;font-size:12px;line-height:1.3;color:#374151;font-weight:500;white-space:nowrap;}}
+.kpill{{display:inline-flex;align-items:center;gap:5px;background:#f1f5f9;border:1px solid #e5e7eb;border-radius:6px;padding:3px 9px;font-size:12px;line-height:1.3;color:#374151;font-weight:500;white-space:nowrap;}}
 .kpill .kk{{color:#6b7280;font-weight:500;}}
 .kpill b{{font-weight:700;color:#111827;}}
 .kbtn:hover{{background:#f9fafb;}}
 .iff-fbtn:hover,.if-vbtn:hover{{background:#f9fafb;}}
 /* Kernel dropdown overlay rows: muted grey hover, no heavy blue highlight. */
-#if-col-dd .if-dd-row:hover{{background:#f3f4f6;}}
-.if-att-row{{background:#fafafa;font-size:11px;}}
+#if-col-dd .if-dd-row:hover{{background:#f1f5f9;}}
+.if-att-row{{background:#f8fafc;font-size:11px;}}
 .if-att-row:hover{{background:#f5f3ff;box-shadow:inset 2px 0 0 #7c3aed;}}
 /* Attempt header: tinted band + divider line on top so each attempt reads as a
    distinct group rather than blurring into the strain rows beneath it. */
@@ -717,7 +717,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
 .if-strain-row td:first-child{{border-left:4px solid #e3e5ea;}}
 /* Variant group: original + its v2/v3 redo share one construct header and a
    common spine so they read as a single grouped section — kept neutral/quiet. */
-.if-cgrp td{{background:#fafafa;border-top:1px solid #ededed;}}
+.if-cgrp td{{background:#f8fafc;border-top:1px solid #ededed;}}
 .if-cgrp td:first-child{{border-left:3px solid #cbd5e1;}}
 .if-cgrp-mem td:first-child{{border-left:3px solid #e8e8ee;}}
 </style>
@@ -830,9 +830,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function paiBadges(s,cust){{if(!s)return'';var st=cust==='R_D'?PAI_STY_RD:PAI_STY;return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+st+'">'+esc(p)+'</span>':'';}}).join('');}}
   var CUST_MAP={JS_CUST};
   // customer badge: optional leading marker (CUST_DOT, from tokens) + label + tint.
-  function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f3f4f6','#6b7280'];return'<span style="'+GEO_CUST+'background:'+m[1]+';color:'+m[2]+';">{CUST_DOT}'+m[0]+'</span>';}}
+  function custBadge(s,fp){{var m=CUST_MAP[s]||['—','#f1f5f9','#6b7280'];return'<span style="'+GEO_CUST+'background:'+m[1]+';color:'+m[2]+';">{CUST_DOT}'+m[0]+'</span>';}}
   var _DPILL='display:inline-block;padding:0px 5px;border-radius:3px;font-size:9px;font-weight:600;white-space:nowrap;margin-top:2px;';
-  function fmtDate(s){{if(!s)return'';var diff=Math.round((new Date(s)-new Date(_TODAY))/(864e5));var bg,clr,lbl;if(diff<0){{bg='#fee2e2';clr='#991b1b';lbl=Math.abs(diff)+'d ago';}}else if(diff===0){{bg='#fef3c7';clr='#92400e';lbl='today';}}else if(diff<=7){{bg='#fef9c3';clr='#713f12';lbl='in '+diff+'d';}}else{{bg='#f3f4f6';clr='#6b7280';lbl='in '+diff+'d';}}return'<span style="color:#374151;">'+esc(s)+'</span><br><span style="background:'+bg+';color:'+clr+';'+_DPILL+'">'+lbl+'</span>';}}
+  function fmtDate(s){{if(!s)return'';var diff=Math.round((new Date(s)-new Date(_TODAY))/(864e5));var bg,clr,lbl;if(diff<0){{bg='#fee2e2';clr='#991b1b';lbl=Math.abs(diff)+'d ago';}}else if(diff===0){{bg='#fef3c7';clr='#92400e';lbl='today';}}else if(diff<=7){{bg='#fef9c3';clr='#713f12';lbl='in '+diff+'d';}}else{{bg='#f1f5f9';clr='#6b7280';lbl='in '+diff+'d';}}return'<span style="color:#374151;">'+esc(s)+'</span><br><span style="background:'+bg+';color:'+clr+';'+_DPILL+'">'+lbl+'</span>';}}
   function fmtSubmitter(s){{if(!s||s.indexOf('@')===-1)return esc(s);var parts=s.split('@');var local=parts[0];var domain=parts[1];var org=domain.split('.')[0];org=org.charAt(0).toUpperCase()+org.slice(1);var name=local.split('.').map(function(p){{return p.charAt(0).toUpperCase()+p.slice(1);}}).join(' ');var ext=!domain.toLowerCase().startsWith('asimov.');var orgSty=ext?'display:inline-block;font-size:9px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:1px 5px;margin-top:1px;':'display:block;color:#9ca3af;font-size:9px;';return'<span style="display:block;">'+esc(name)+'</span><span style="'+orgSty+'">'+esc(org)+'</span>';}}
 
   // ── Colony Tracking view state + helpers ──────────────────────────────────
@@ -1416,7 +1416,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     if (!thead) return;
     thead.innerHTML = '';
     var TH = 'padding:7px 8px;text-align:left;border-bottom:1px solid #cbd5e1;font-size:9px;color:#0f172a;letter-spacing:0.04em;'
-           + 'font-weight:700;text-transform:uppercase;background:#f3f4f6;position:sticky;top:0;z-index:2;'
+           + 'font-weight:700;text-transform:uppercase;background:#f1f5f9;position:sticky;top:0;z-index:2;'
            + 'white-space:nowrap;cursor:pointer;user-select:none;';
     var COLS = (_view === 'colony') ? _COLS_COL : _COLS_STD;
     var tr = document.createElement('tr');
