@@ -842,14 +842,15 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
 
   // Competent-cell / strain chips (item 7) — distinct, saturated hues so NEB vs EPI
   // are separable at a glance (were both pale pastels that read alike).
+  // Categorical (non-status) hues: strains are labels, not outcomes, so they must
+  // stay out of the red/amber/green lane used by status, risk band, and seq-conf.
   var STRAIN_STY = {{
-    'NEBV':    'background:#FBE0EB;color:#A82A5E;border:0.5px solid #ED90B5;',
-    'NEB_STBL':'background:#FBE0EB;color:#A82A5E;border:0.5px solid #ED90B5;',
-    'EPI400':  'background:#D6F0F2;color:#0E6E7A;border:0.5px solid #57BFCB;',
-    'STBL3':   'background:#FAE6C8;color:#8A4B05;border:0.5px solid #E8961B;',
+    'NEB_STBL':'background:#E7E9FD;color:#3730A3;border:0.5px solid #A5B4FC;',
+    'EPI400':  'background:#E0F2FE;color:#075985;border:0.5px solid #7DD3FC;',
+    'STBL3':   'background:#EEF2F7;color:#334155;border:0.5px solid #94A3B8;',
   }};
   var STRAIN_CHIP='display:inline-block;font-size:9px;padding:1px 5px;border-radius:4px;font-weight:600;white-space:nowrap;margin:0 1px;';
-  function strainBdg(s){{var st=STRAIN_STY[s]||'background:#F1EFE8;color:#5F5E5A;border:0.5px solid #D3D1C7;';return '<span style="'+STRAIN_CHIP+st+'">'+esc(s)+'</span>';}}
+  function strainBdg(s){{var st=STRAIN_STY[s]||'background:#F1F5F9;color:#475569;border:0.5px solid #CBD5E1;';return '<span style="'+STRAIN_CHIP+st+'">'+esc(s)+'</span>';}}
   // Flag chips (item 8) — muted, thin border.
   var CF_ST = {JS_CF_ST};
   var CF_LBL = {{'LOW_PICKABLE':'LOW COLONIES','SEQ_STALLED':'SEQ STALLED','PAST_DUE':'PAST DUE'}};
