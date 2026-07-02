@@ -4043,7 +4043,7 @@ def render_all_projects_dashboard(
         _cap_metric = ('Avg. Available <span style="color:#94a3b8;">(LSP delivered)</span>'
                        if _use_delivered else 'Avg. QC Confirmed')
         _timeline_note = (
-            '<div style="text-align:center; margin:5px 2px 0; font-size:9px;'
+            '<div style="text-align:right; margin:5px 2px 0; font-size:9px;'
             ' font-weight:600; color:#64748b; letter-spacing:.02em;">'
             '<span style="display:inline-block; width:8px; height:8px;'
             ' background:#94a3b8; border:1.5px solid #1e3a5f; transform:rotate(45deg);'
