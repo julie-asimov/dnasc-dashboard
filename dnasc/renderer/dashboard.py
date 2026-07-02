@@ -3209,11 +3209,18 @@ def render_all_projects_dashboard(
         # same axis, anchored to the dnasc-created (BIOS) date rather than week 0.
         exp_created_str = "N/A"
         exp_created_dt = None
+        # VRT002 (A748-1-AG_VRT002_Vector_Design, created 2026-06-02) is the first
+        # project whose timeline dot tracks Avg Available (LSP delivered). Every
+        # project created before it keeps tracking Avg QC Confirmed. Cutoff =
+        # VRT002's experiment creation timestamp (UTC).
+        _use_delivered = False
         if 'experiment_created_at' in project_df.columns:
             exp_created_raw = project_df['experiment_created_at'].iloc[0]
             exp_created_dt = to_est(exp_created_raw)
             if exp_created_dt:
                 exp_created_str = exp_created_dt.strftime('%Y-%m-%d · %-I:%M %p EST')
+            _ec_utc = pd.to_datetime(exp_created_raw, errors='coerce', utc=True)
+            _use_delivered = bool(pd.notna(_ec_utc) and _ec_utc >= pd.Timestamp('2026-06-02 17:55:14', tz='UTC'))
 
         _NO_TIMELINE_MARKERS = PipelineConfig.PINNED_INFRA_EXPERIMENTS
         _is_infra_exp = experiment_name in _NO_TIMELINE_MARKERS
@@ -3350,11 +3357,16 @@ def render_all_projects_dashboard(
             if is_finished:
                 production_end = ready_to_ship_time or now
                 total_end = final_release_time or production_end
-                age_weeks = (production_end - r_created).days / 7
+                # Timeline dot: VRT002-and-newer track Available/delivered (LSP
+                # Releasing = total_end); older projects track QC-confirmed (LSP
+                # Reviewing = production_end). Position + age-color key off the
+                # chosen end. TAT kpills below always report both regardless.
+                _dot_end = total_end if _use_delivered else production_end
+                age_weeks = (_dot_end - r_created).days / 7
                 production_tats.append((production_end - r_created).days)
                 total_tats.append((total_end - r_created).days)
                 dot_color = _age_color(age_weeks, yellow_limit, red_limit, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)
-                _dot_date = production_end
+                _dot_date = _dot_end
                 _exp_end_times.append(total_end)
             else:
                 age_weeks = (now - r_created).days / 7
@@ -3433,6 +3445,22 @@ def render_all_projects_dashboard(
                     else: count_active_waiting += 1
             else: count_new += 1; new_req_list.append((rid, r_df))
 
+            # Hover tooltip: the milestone this dot marks. Finished dots sit at
+            # Available (LSP delivered); active dots sit at "today" (current age).
+            _dc = str(r_df['construct_name'].iloc[0]) if 'construct_name' in r_df.columns and not r_df['construct_name'].dropna().empty else ''
+            _ds_l = r_df[r_df['STOCK_ID'].notna()]['STOCK_ID'].dropna().unique().tolist() if 'STOCK_ID' in r_df.columns else []
+            _dot_lbl = (f"{(str(_ds_l[0]) if _ds_l else '')}: {_dc}".strip(': ')) or str(rid)[:8]
+            if is_finished:
+                _milestone = "Available (LSP delivered)" if _use_delivered else "QC confirmed"
+                _dd = max(0, (_dot_date - r_created).days); _dw, _drem = divmod(_dd, 7)
+                _dot_title = f"{_dot_lbl} — {_milestone} · {_dot_date.strftime('%b %-d')} · {_dw}w {_drem}d"
+            elif status == 'CANCELED':
+                _dot_title = f"{_dot_lbl} — Canceled"
+            else:
+                _ad = max(0, (now - r_created).days); _aw, _arem = divmod(_ad, 7)
+                _dot_title = f"{_dot_lbl} — In progress · {_aw}w {_arem}d"
+            _dot_title = _dot_title.replace('"', '&quot;')
+
             if is_finished:
                 shape_css = "border-radius: 2px; transform: translate(-50%, -50%) rotate(45deg);"
                 dot_size, dot_opacity, z_idx, border_css = "12px", "1.0", 20, "border: 2px solid #1e3a5f;"
@@ -3444,7 +3472,7 @@ def render_all_projects_dashboard(
                 shape_css = "border-radius: 50%; transform: translate(-50%, -50%);"
                 dot_size, dot_opacity, z_idx, border_css = "14px", "1.0", 30, "border: 2px solid #1e3a5f;"
             v_jitter = random.uniform(-12, 12)
-            dots_html += f'''<div style="position:absolute; left:{pos}%; top:{v_jitter}px; width:{dot_size}; height:{dot_size}; background:{dot_color}; {shape_css} {border_css} z-index:{z_idx}; opacity:{dot_opacity};"></div>'''
+            dots_html += f'''<div title="{_dot_title}" style="position:absolute; left:{pos}%; top:{v_jitter}px; width:{dot_size}; height:{dot_size}; background:{dot_color}; {shape_css} {border_css} z-index:{z_idx}; opacity:{dot_opacity};"></div>'''
 
 
         avg_tat_html = ""
@@ -3464,8 +3492,12 @@ def render_all_projects_dashboard(
         # Partner project with no Asana due date in the sheet → flag it. Scoped to
         # ACTIVE experiments (≥1 in-progress request) so fulfilled/old partner work
         # isn't flagged. Infra experiments (refills, etc.) are exempt.
+        # Any non-terminal request counts as active — a brand-new partner project
+        # arrives as NEW/PLANNED (not yet IN_PROGRESS), and those are precisely the
+        # ones that still need an Asana due date added. Terminal = FULFILLED/CANCELED/NONE.
         _exp_has_active = (
-            project_df['request_status'].astype(str).str.upper() == 'IN_PROGRESS'
+            project_df['request_status'].astype(str).str.upper()
+            .isin({'IN_PROGRESS', 'NEW', 'PLANNED', 'RUNNING', 'READY', 'WAITING', 'BLOCKED'})
         ).any() if 'request_status' in project_df.columns else False
         _missing_asana = has_ptr and not _due_entry and not _is_infra_exp and _exp_has_active
         if _missing_asana:
@@ -4004,6 +4036,21 @@ def render_all_projects_dashboard(
                 f'<b style="color:{_run_fg};">{_run_dur}</b></span>'
             )
 
+        # Tiny centered caption under the timeline stating what the completion
+        # dots represent: Avg Available (VRT002-and-newer) or Avg QC Confirmed
+        # (older projects), matching _use_delivered. Hover a dot for the exact
+        # milestone + date + TAT.
+        _cap_metric = ('Avg. Available <span style="color:#94a3b8;">(LSP delivered)</span>'
+                       if _use_delivered else 'Avg. QC Confirmed')
+        _timeline_note = (
+            '<div style="text-align:center; margin:5px 2px 0; font-size:9px;'
+            ' font-weight:600; color:#64748b; letter-spacing:.02em;">'
+            '<span style="display:inline-block; width:8px; height:8px;'
+            ' background:#94a3b8; border:1.5px solid #1e3a5f; transform:rotate(45deg);'
+            ' vertical-align:middle; margin-right:6px;"></span>'
+            '= ' + _cap_metric + '</div>'
+        )
+
         html += f"""
             <div class="project-wrapper" data-active="{"true" if db_active else "false"}" data-due-date="{_sort_due_date}" style="border-left:4px solid {_card_accent};">
                 <div class="header-banner" style="background: {exp_header_gradient}; min-height: auto; padding: 12px 18px;" onclick="toggleSection('{safe_exp_id}')">
@@ -4020,6 +4067,7 @@ def render_all_projects_dashboard(
                     </div>
                     <div style="font-size:10px; color:#9ca3af; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Created: {exp_created_str}{(f' &nbsp;<span style="color:#2563eb; font-weight:600;">' + _exp_email_str + '</span>') if _exp_email_str else ''}</div>
                     <div id="timeline_{safe_exp_id}">{timeline_bar}</div>
+                    {_timeline_note}
                     <div id="bucket_{safe_exp_id}" style="display:none;background:#f8f9fa;border-radius:8px;border:1px solid #e5e7eb;margin-top:8px;">{_render_bucket_chart(stage_counts, fulfilled_week_counts, orange_week, red_week, stage_items, ramp=_BLUE_RAMP if has_ptr else _PURPLE_RAMP)}</div>
                     <div class="header-stats" style="margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap;">
                         {f'<span class="stat-item" title="Requests submitted but no work has started yet" style="background:rgba(217,119,6,0.6); border:1px solid rgba(255,255,255,0.4);"><span class="stat-label" style="font-size:11px;">{count_new}</span> <span style="font-size:10px;">New</span></span>' if count_new > 0 else ''}
