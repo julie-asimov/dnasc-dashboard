@@ -2834,6 +2834,16 @@ def render_all_projects_dashboard(
                                 f"<span style='font-size:9px;color:#9ca3af;margin-left:4px;'>"
                                 f"(LIMS: {_lims_ab})</span></div>"
                             )
+                        elif row.get('lims_double_marker') is True or row.get('lims_double_marker') == True:
+                            # Show every marker LIMS lists (raw set), not the neo-adjusted single value.
+                            _lims_ab = str(row.get('lims_all_markers') or row.get('lims_antibiotic') or '')
+                            details_info.append(
+                                f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>"
+                                f"Antibiotic: {_ab_str} "
+                                f"<span style='font-size:9px;color:#b45309;background:#fef3c7;"
+                                f"border-radius:3px;padding:0 4px;' title='LIMS records more than one "
+                                f"selection marker for this plasmid'>&#9888; LIMS: 2 markers ({_lims_ab})</span></div>"
+                            )
                         else:
                             details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Antibiotic: {_ab_str}</div>")
                     _imaged   = row.get('imaged_colonies')

@@ -53,16 +53,37 @@ def _norm_bios_ab(val):
         if re.search(r'\b' + re.escape(k) + r'\b', v): return canon
     return None
 
-def _lims_ab(r):
-    """Derive canonical antibiotic label from LIMS plasmid boolean flags on a row.
-    Skips anti_kan when the plasmid alias contains the word 'Neo' — those plasmids
-    carry neomycin as a mammalian selection marker; the bacterial resistance is Spec/Carb."""
-    _alias = str(r.get('lims_plasmid_alias') or '')
-    _has_neo = bool(re.search(r'\bNeo\b', _alias))
-    if r.get('lims_anti_kan') is True and not _has_neo: return 'Kan'
-    if r.get('lims_anti_spec') is True: return 'Spec'
-    if r.get('lims_anti_carb') is True: return 'Carb'
-    return None
+# Matches a neomycin-resistance marker (NeoR / Neo / Neomycin) as a standalone token,
+# tolerating '_' and '-' delimiters, while NOT matching fluorescent-protein names that
+# merely contain the letters "neo" (e.g. mNeonGreen, NeonGreen). The lookbehind/lookahead
+# require the "neo…" run to not be flanked by other letters.
+_NEO_MARKER_RE = re.compile(r'(?<![A-Za-z])neo(?:r|mycin)?(?![A-Za-z])', re.I)
+
+def _lims_ab_raw_set(r):
+    """Every bacterial-selection antibiotic LIMS flags on this plasmid, UNADJUSTED.
+    Used to surface the data-quality case where LIMS lists more than one antibiotic on a
+    single plasmid (see lims_double_marker) — independent of neo adjustment."""
+    out = set()
+    if r.get('lims_anti_kan')  is True: out.add('Kan')
+    if r.get('lims_anti_spec') is True: out.add('Spec')
+    if r.get('lims_anti_carb') is True: out.add('Carb')
+    return out
+
+def _lims_ab_set(r):
+    """Set of canonical bacterial-selection antibiotics LIMS records for this plasmid.
+
+    LIMS can flag more than one marker on a single plasmid. We drop Kan when the construct
+    name/alias carries a neomycin marker (NeoR/Neo/Neomycin) — in that case anti_kan reflects
+    the neo/kan-family cargo gene used for *mammalian* selection, not the bacterial cloning
+    marker (which is Spec/Carb). mNeonGreen and similar fluorescent proteins are NOT treated
+    as neomycin. Returns a set of {'Kan','Spec','Carb'}."""
+    _text = f"{r.get('lims_plasmid_alias') or ''} {r.get('construct_name') or ''}"
+    _has_neo = bool(_NEO_MARKER_RE.search(_text))
+    out = set()
+    if r.get('lims_anti_kan')  is True and not _has_neo: out.add('Kan')
+    if r.get('lims_anti_spec') is True: out.add('Spec')
+    if r.get('lims_anti_carb') is True: out.add('Carb')
+    return out
 
 log = get_logger(__name__)
 
@@ -245,13 +266,28 @@ def run_pipeline() -> pd.DataFrame:
 
     # ── Antibiotic mismatch detection ────────────────────────────────────────
     # lims_anti_kan/spec/carb come directly from the BIOS BQ query (lims__src.plasmid JOIN).
-    final_df['lims_antibiotic'] = final_df.apply(_lims_ab, axis=1)
+    # LIMS can flag multiple markers on one plasmid. We derive the *set* of bacterial
+    # selection antibiotics (dropping neo-derived Kan, see _lims_ab_set), then:
+    #   • flag a mismatch only when the BIOS antibiotic isn't among that set, and
+    #   • flag lims_double_marker when 2+ real markers remain (informational).
+    _raw_sets  = final_df.apply(_lims_ab_raw_set, axis=1)   # unadjusted LIMS flags
+    _lims_sets = final_df.apply(_lims_ab_set, axis=1)        # neo-adjusted → drives mismatch
+    final_df['lims_antibiotic']  = _lims_sets.apply(lambda s: ', '.join(sorted(s)) if s else None)
+    final_df['lims_all_markers'] = _raw_sets.apply(lambda s: ', '.join(sorted(s)) if s else None)
+    # Data-quality flag: LIMS lists 2+ antibiotics on ONE plasmid. Even when we can resolve the
+    # correct one (neo-derived Kan dropped so no actionable mismatch), the double-listing is a
+    # BIOS/LIMS source-record error that should still be surfaced for correction.
+    final_df['lims_double_marker'] = _raw_sets.apply(lambda s: len(s) >= 2)
+    # True when the double-listing is specifically the NeoR/neo artifact (a Kan we dropped).
+    final_df['lims_neo_kan_artifact'] = [
+        ('Kan' in raw) and ('Kan' not in eff)
+        for raw, eff in zip(_raw_sets, _lims_sets)
+    ]
     _bios_norm = final_df['antibiotic'].apply(_norm_bios_ab)
-    final_df['antibiotic_mismatch'] = (
-        final_df['lims_antibiotic'].notna()
-        & _bios_norm.notna()
-        & (_bios_norm != final_df['lims_antibiotic'])
-    )
+    final_df['antibiotic_mismatch'] = [
+        (b is not None) and bool(s) and (b not in s)
+        for b, s in zip(_bios_norm, _lims_sets)
+    ]
 
     final_df["join_key"] = (
         final_df["workorder_id"].astype(str)
