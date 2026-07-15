@@ -1693,6 +1693,10 @@ LEFT JOIN bios__src.oligosynthesisworkorder osw ON osw.id=wo.id
 LEFT JOIN bios__src.plasmidsynthesisworkorder psw ON psw.id=wo.id
 LEFT JOIN bios__src.synpartsynthesisworkorder ssw ON ssw.id=wo.id
 WHERE wo.type IN ('oligo_synthesis_workorder','plasmid_synthesis_workorder','syn_part_synthesis_workorder')
+  -- order_status() prefers ACTIVE orders and else the most recent; stale old-completed orders
+  -- can't win, so keep all active (any age) + anything from the last 2y and drop the rest.
+  AND (wo.status IN ('RUNNING','WAITING','READY','BLOCKED')
+       OR wo.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 730 DAY))
 """
     wod = client.query(Q_WOD).to_dataframe()
     blk = client.query(Q_BLK).to_dataframe()
