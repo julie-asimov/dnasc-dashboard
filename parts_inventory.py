@@ -20,6 +20,7 @@ Usage:
     /opt/anaconda3/bin/python3 parts_inventory.py
     /opt/anaconda3/bin/python3 parts_inventory.py --output parts.csv --html queues.html
 """
+from __future__ import annotations  # 3.9 server: lazy annotations so `X | None` unions parse
 
 import argparse
 import datetime as dt
