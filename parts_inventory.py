@@ -1627,6 +1627,11 @@ def render_action_queues_html(
 # Main
 # ---------------------------------------------------------------------------
 
+# Partner close-out is paused (Steve's R&D-shared annotations pending) and not rendered in the
+# tab, so its ~4-minute query is skipped in the pull. Flip to True to re-enable when it resumes.
+PULL_PARTNER_CLOSEOUT = False
+
+
 def _query_tab_inputs(client) -> dict:
     """Live workorder queries the Parts tab needs (active builds, blocked queue, orders).
     Run here in the PULL so the dashboard render is pure pkl->HTML with zero BigQuery."""
@@ -1738,10 +1743,17 @@ def run_parts_inventory() -> dict:
     print(f"  {len(lsp_plates)} LSP-linked 384 Echo plates")
     _lap("query LSP Echo plates")
 
-    print("Finding partner-project close-out products ...")
-    partner_closeout = client.query(_query_partner_closeout_products()).to_dataframe()
-    print(f"  {partner_closeout['eid'].nunique() if len(partner_closeout) else 0} inactive partner projects "
-          f"with {len(partner_closeout)} retirable products")
+    # Partner close-out is PAUSED (not rendered — SHOW_CLOSEOUT=False in the tab), yet this query
+    # was ~50% of the whole pull (~4 min). Skip it while paused; flip PULL_PARTNER_CLOSEOUT=True
+    # to re-enable when the feature resumes.
+    if PULL_PARTNER_CLOSEOUT:
+        print("Finding partner-project close-out products ...")
+        partner_closeout = client.query(_query_partner_closeout_products()).to_dataframe()
+        print(f"  {partner_closeout['eid'].nunique() if len(partner_closeout) else 0} inactive partner projects "
+              f"with {len(partner_closeout)} retirable products")
+    else:
+        partner_closeout = pd.DataFrame()
+        print("Skipping partner close-out query (paused / not rendered) — saves ~4 min")
     _lap("query partner close-out")
 
     print("Fetching Parts-tab render inputs (active WOs, blocked queue, orders) ...")
