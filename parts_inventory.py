@@ -1588,10 +1588,12 @@ def render_action_queues_html(
     if not no_source:
         q5 += '<div style="font-size:10px;color:#86868b;margin-top:4px">No parts in this state.</div>'
     else:
+        _ctl_badge = (' <span style="font-size:7px;background:#fef9c3;color:#854d0e;'
+                      'border:1px solid #fde68a;border-radius:3px;padding:0 3px">CTL</span>')
         ns_rows = "".join(
-            f'<tr>'
+            '<tr>'
             f'<td style="padding:2px 8px;font-family:monospace">{d["part"]}'
-            f'{" <span style=\"font-size:7px;background:#fef9c3;color:#854d0e;border:1px solid #fde68a;border-radius:3px;padding:0 3px\">CTL</span>" if d["is_control"] else ""}</td>'
+            f'{_ctl_badge if d["is_control"] else ""}</td>'
             f'<td style="padding:2px 8px;color:#6b7280;white-space:nowrap">{d["required"]} rxn</td></tr>'
             for d in no_source
         )
