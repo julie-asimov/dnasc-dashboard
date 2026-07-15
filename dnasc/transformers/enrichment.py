@@ -364,9 +364,22 @@ class EnrichmentTransformer:
             _asm_ph      = _phase_rows[_phase_rows['type'].isin(_ASM_TYPES) & _phase_rows['STOCK_ID'].astype(str).isin(_root_stocks)]
             _parts_ph    = _phase_rows[(_phase_rows['type'] != 'lsp_workorder') & ~_phase_rows['STOCK_ID'].astype(str).isin(_root_stocks)]
             _asm_progressing = _asm_ph[_asm_ph['visual_status'].isin({'RUNNING', 'READY', 'IN_PROGRESS', 'BLOCKED'})]
+            # A root-stock assembly that has already RUN (reached a terminal
+            # SUCCEEDED/FAILED state) means the request got to ASM — even if the
+            # only rows still active are dangling upstream parts. Without this,
+            # a finished Gibson drops out of _phase_rows and leftover READY PCRs
+            # would demote the label back to PARTS.
+            _asm_executed = r_df[
+                r_df['type'].isin(_ASM_TYPES)
+                & r_df['STOCK_ID'].astype(str).isin(_root_stocks)
+                & r_df['visual_status'].isin({'SUCCEEDED', 'FAILED'})
+                & (r_df['wo_status'].astype(str) != 'CANCELED')
+            ]
             if not _lsp_ph.empty:
                 req_phase[req_id] = 'LSP'
             elif not _asm_progressing.empty:
+                req_phase[req_id] = 'ASM'
+            elif not _asm_executed.empty:
                 req_phase[req_id] = 'ASM'
             elif not _asm_ph.empty or not _parts_ph.empty:
                 req_phase[req_id] = 'PARTS'
