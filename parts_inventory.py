@@ -1627,6 +1627,65 @@ def render_action_queues_html(
 # Main
 # ---------------------------------------------------------------------------
 
+def _query_tab_inputs(client) -> dict:
+    """Live workorder queries the Parts tab needs (active builds, blocked queue, orders).
+    Run here in the PULL so the dashboard render is pure pkl->HTML with zero BigQuery."""
+    Q_WOD = """
+SELECT COALESCE(JSON_VALUE(GG.product,'$.name'),JSON_VALUE(GIB.product,'$.name'),JSON_VALUE(PCR.product,'$.name')) AS PRODUCT,
+ COALESCE(GG.parts,GIB.parts) AS parts_json, COALESCE(GG.backbone,GIB.backbone) AS backbone_json,
+ PCR.templates AS pcr_templates, PCR.forward_primer AS pcr_forward_primer, PCR.reverse_primer AS pcr_reverse_primer,
+ wo.type AS WT, wo.status AS ST, exp.name AS EXP
+FROM bios__src.workorder wo
+LEFT JOIN bios__src.goldengateworkorder GG ON GG.id=wo.id
+LEFT JOIN bios__src.gibsonworkorder GIB ON GIB.id=wo.id
+LEFT JOIN bios__src.pcrworkorder PCR ON PCR.id=wo.id
+LEFT JOIN bios__src.assemblyplan ap ON ap.id=wo.assembly_plan_id
+LEFT JOIN bios__src.experiment exp ON exp.id=ap.experiment_id
+WHERE wo.status IN ('RUNNING','WAITING','READY','BLOCKED')
+ AND wo.type IN ('golden_gate_workorder','gibson_workorder','pcr_workorder')
+"""
+    _BLK_PROD = ("COALESCE(JSON_VALUE(GG.product,'$.name'),JSON_VALUE(GIB.product,'$.name'),"
+                 "JSON_VALUE(PCR.product,'$.name'),JSON_VALUE(PSY.plasmid,'$.name'),JSON_VALUE(SSY.syn_part,'$.name'))")
+    _BLK_JOINS = """
+ LEFT JOIN bios__src.goldengateworkorder GG ON GG.id=wo.id
+ LEFT JOIN bios__src.gibsonworkorder GIB ON GIB.id=wo.id
+ LEFT JOIN bios__src.pcrworkorder PCR ON PCR.id=wo.id
+ LEFT JOIN bios__src.plasmidsynthesisworkorder PSY ON PSY.id=wo.id
+ LEFT JOIN bios__src.synpartsynthesisworkorder SSY ON SSY.id=wo.id"""
+    Q_BLK = f"""
+WITH prod AS (
+  SELECT wo.id, wo.type, wo.status, DATE(wo.created_at) created, wo.warnings,
+    {_BLK_PROD} AS product, COALESCE(GG.parts,GIB.parts) parts, COALESCE(GG.backbone,GIB.backbone) backbone,
+    COALESCE(ap.experiment_id, pr.experiment_id) eid
+  FROM bios__src.workorder wo {_BLK_JOINS}
+  LEFT JOIN bios__src.assemblyplan ap ON ap.id=wo.assembly_plan_id
+  LEFT JOIN bios__src.plasmidrequest pr ON pr.id=wo.request_id
+  WHERE wo.deleted_at IS NULL
+),
+succ AS (SELECT DISTINCT product, id wid FROM prod WHERE status='SUCCEEDED' AND product IS NOT NULL)
+SELECT b.id wid, b.type, b.product, CAST(b.created AS STRING) created, b.warnings, b.parts, b.backbone,
+  e.name experiment, ARRAY_AGG(DISTINCT s.wid IGNORE NULLS) succeeded_wos
+FROM prod b LEFT JOIN bios__src.experiment e ON e.id=b.eid LEFT JOIN succ s ON s.product=b.product
+WHERE b.status='BLOCKED' GROUP BY 1,2,3,4,5,6,7,8
+"""
+    Q_SUCC = f"SELECT DISTINCT {_BLK_PROD} p FROM bios__src.workorder wo {_BLK_JOINS} WHERE wo.status='SUCCEEDED' AND wo.deleted_at IS NULL"
+    Q_ORD = """
+SELECT COALESCE(JSON_VALUE(osw.oligo,'$.name'),JSON_VALUE(psw.plasmid,'$.name'),JSON_VALUE(ssw.syn_part,'$.name')) AS NAME,
+  wo.status AS STATUS, COALESCE(osw.vendor,psw.vendor,ssw.vendor) AS VENDOR,
+  TRIM(COALESCE(osw.vendor_order_id,psw.vendor_order_id,ssw.vendor_order_id)) AS ORDER_ID, wo.created_at AS CREATED
+FROM bios__src.workorder wo
+LEFT JOIN bios__src.oligosynthesisworkorder osw ON osw.id=wo.id
+LEFT JOIN bios__src.plasmidsynthesisworkorder psw ON psw.id=wo.id
+LEFT JOIN bios__src.synpartsynthesisworkorder ssw ON ssw.id=wo.id
+WHERE wo.type IN ('oligo_synthesis_workorder','plasmid_synthesis_workorder','syn_part_synthesis_workorder')
+"""
+    wod = client.query(Q_WOD).to_dataframe()
+    blk = client.query(Q_BLK).to_dataframe()
+    succ_names = set(client.query(Q_SUCC).to_dataframe()["p"].dropna())
+    ordf = client.query(Q_ORD).to_dataframe()
+    return {"wod": wod, "blk": blk, "blk_succ_names": succ_names, "ord": ordf}
+
+
 def run_parts_inventory() -> dict:
     """
     Run the full pipeline and return everything the three action queues need:
@@ -1636,10 +1695,16 @@ def run_parts_inventory() -> dict:
     client = bigquery.Client(project=PROJECT)
     now = dt.datetime.now(tz=dt.timezone.utc)
 
+    # ── per-step profiling (like the dashboard) so slow steps are visible ──────
+    import time as _time
+    _t = [_time.perf_counter()]; _t0 = _t[0]
+    def _lap(label):
+        _n = _time.perf_counter(); print(f"  ⏱  {label}: {_n - _t[0]:.1f}s"); _t[0] = _n
+
     print("Loading data from BigQuery ...")
     all_plate_data, workorder_data, dpart_data = load_data(client)
-
     print(f"  {len(all_plate_data):,} well rows | {len(workorder_data):,} workorders | {len(dpart_data):,} dparts")
+    _lap("load BigQuery (plate inventory + workorders + dparts)")
 
     print("Extracting required parts from workorders ...")
     raw_parts = extract_required_parts(workorder_data)
@@ -1650,9 +1715,11 @@ def run_parts_inventory() -> dict:
 
     print("Computing inventory ...")
     parts_list = run_optimized_lab_workflow(parts_list, all_plate_data, dpart_data, now)
+    _lap("compute inventory")
 
     print("Classifying actions ...")
     parts_list = classify_actions(parts_list, workorder_data, all_plate_data, now)
+    _lap("classify actions")
 
     # In-flight builds: parts whose OWN assembly workorder is active (BLOCKED/READY/RUNNING/
     # WAITING) — net-new product being made that feeds downstream requests. build_output drops
@@ -1669,11 +1736,19 @@ def run_parts_inventory() -> dict:
     print("Finding LSP-linked Echo plates (for disposal) ...")
     lsp_plates = client.query(_query_lsp_echo_plates()).to_dataframe()
     print(f"  {len(lsp_plates)} LSP-linked 384 Echo plates")
+    _lap("query LSP Echo plates")
 
     print("Finding partner-project close-out products ...")
     partner_closeout = client.query(_query_partner_closeout_products()).to_dataframe()
     print(f"  {partner_closeout['eid'].nunique() if len(partner_closeout) else 0} inactive partner projects "
           f"with {len(partner_closeout)} retirable products")
+    _lap("query partner close-out")
+
+    print("Fetching Parts-tab render inputs (active WOs, blocked queue, orders) ...")
+    _tab = _query_tab_inputs(client)
+    print(f"  {len(_tab['wod'])} active WOs · {len(_tab['blk'])} blocked · {len(_tab['ord'])} orders")
+    _lap("query tab inputs (active WOs / blocked / orders)")
+    print(f"  ⏱  TOTAL run_parts_inventory: {_time.perf_counter() - _t0:.1f}s")
 
     return {
         "parts": output,
@@ -1682,6 +1757,10 @@ def run_parts_inventory() -> dict:
         "dpart_data": dpart_data,
         "lsp_plates": lsp_plates,
         "partner_closeout": partner_closeout,
+        "wod_df": _tab["wod"],
+        "blk_df": _tab["blk"],
+        "blk_succ_names": _tab["blk_succ_names"],
+        "ord_df": _tab["ord"],
         "generated_at": now,
     }
 

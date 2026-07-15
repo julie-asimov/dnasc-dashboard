@@ -116,6 +116,14 @@ except ImportError:
     def render_inflight_tab(_df):
         return "<p style='color:#6b7280;padding:1rem;'>Requests in flight view not available.</p>"
 
+try:
+    from dnasc.renderer.parts import render_parts_tab
+except (ImportError, SyntaxError):
+    # Optional, separately-developed tab with its own data pull (parts_result.pkl).
+    # Degrade to a stub rather than crash the whole dashboard render.
+    def render_parts_tab():
+        return "<p style='color:#6b7280;padding:1rem;'>Parts inventory view not available.</p>"
+
 log = get_logger(__name__)
 
 # ── Asset resolution ──────────────────────────────────────────────────────────
@@ -1303,6 +1311,9 @@ def render_all_projects_dashboard(
     # Requests In Flight tab — rendered as a plain HTML fragment, injected directly
     _inflight_fragment = render_inflight_tab(df)
 
+    # Parts inventory tab — plain HTML fragment; reads its own parts_result.pkl (separate pull)
+    _parts_fragment = render_parts_tab()
+
     # Part 2: HTML with variables (f-string)
     html += f"""
     <div class="dashboard-container">
@@ -1334,6 +1345,10 @@ def render_all_projects_dashboard(
                 <button class="tab-btn" data-tab="inflight" onclick="switchTab('inflight')">
                     <span style="font-size:16px;">🗂️</span>
                     <span class="tab-text">Requests In Flight</span>
+                </button>
+                <button class="tab-btn" data-tab="parts" onclick="switchTab('parts')">
+                    <span style="font-size:16px;">🧬</span>
+                    <span class="tab-text">Parts</span>
                 </button>
             </div>
             <script>(function(){{try{{var t=localStorage.getItem('dash_activeTab');if(t&&t!=='tracking'){{document.querySelector('[data-tab="tracking"]').classList.remove('active');var b=document.querySelector('[data-tab="'+t+'"]');if(b)b.classList.add('active');var s=document.createElement('style');s.id='_earlyhide';s.textContent='#tab-tracking{{display:none!important}}';document.head.appendChild(s);}}}}catch(e){{}}}}());</script>
@@ -4174,11 +4189,17 @@ def render_all_projects_dashboard(
                 __INFLIGHT_FRAGMENT__
             </div>
 
+            <!-- PARTS INVENTORY TAB -->
+            <div id="tab-parts" class="tab-content" style="padding:0;overflow-y:auto;height:calc(100vh - 130px);">
+                __PARTS_FRAGMENT__
+            </div>
+
         </div>
     </div>
     """
     html = html.replace("__LSP_CAPACITY_TAB_CONTENT__", lsp_capacity_html)
     html = html.replace("__INFLIGHT_FRAGMENT__", _inflight_fragment)
+    html = html.replace("__PARTS_FRAGMENT__", _parts_fragment)
     # Deduped plate-popover pool, emitted once after the body. Build sites emitted
     # empty <div class="plate-popover" data-pop="N">; JS fills each from PLATE_POP
     # on first hover/click. ~91% of popovers are dupes, so this replaces ~21 MB of
