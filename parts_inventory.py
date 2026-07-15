@@ -161,6 +161,16 @@ LEFT JOIN lims__src.plasmid             Strain_Plasmid_Plasmid ON Strain_Plasmid
 LEFT JOIN lims__src.oligo_stock         oligo_stock       ON oligo_stock.id        = well_content.oligo_stock_id
 LEFT JOIN lims__src.oligo               oligo             ON oligo.id              = oligo_stock.oligo_id
 WHERE well.type != 'Empty'
+-- Collapse the metadata-join fan-out (strain_plasmid → strain → plasmid chains multiply each
+-- well ~4.8×) to ONE row per well IN SQL, instead of downloading ~5.5M rows and deduping in
+-- pandas. Deterministic pick (prefer content-bearing rows) also kills the old run-to-run
+-- nondeterminism where an arbitrary fanned row won. Cuts the transfer ~4-5×.
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY well.id
+  ORDER BY strain_plasmid.plasmid_id NULLS LAST,
+           strain_plasmid_i.strain_id NULLS LAST,
+           well_content.id NULLS LAST
+) = 1
 ORDER BY well.id ASC
 """
 
