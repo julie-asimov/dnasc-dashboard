@@ -872,6 +872,7 @@ def render_all_projects_dashboard(
         border: 1px solid #334155; border-radius: 4px; padding: 6px 8px; z-index: 9999;
         box-shadow: 0 4px 12px rgba(0,0,0,0.4); white-space: nowrap; }
     .ci-tip.ci-open { display: block; }
+    .ci-tip.ci-flip { bottom: auto; top: calc(100% + 4px); }
     .ci-tip-header { font-family: monospace; font-size: 8px; font-weight: 700; color: #64748b;
         text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; padding-bottom: 3px;
         border-bottom: 1px solid #334155; }
@@ -1292,8 +1293,19 @@ def render_all_projects_dashboard(
                 e.stopPropagation();
                 var tip = e.target.closest('.ci-wrap').querySelector('.ci-tip');
                 var isOpen = tip.classList.contains('ci-open');
-                document.querySelectorAll('.ci-tip.ci-open').forEach(function(t) { t.classList.remove('ci-open'); });
-                if (!isOpen) tip.classList.add('ci-open');
+                document.querySelectorAll('.ci-tip.ci-open').forEach(function(t) { t.classList.remove('ci-open'); t.classList.remove('ci-flip'); });
+                if (!isOpen) {
+                    tip.classList.add('ci-open');
+                    // Default opens upward; flip downward if the top would be clipped
+                    // by a scrolling/overflow ancestor (e.g. .content-pane overflow-x:auto).
+                    var clipTop = 0, anc = tip.parentElement;
+                    while (anc) {
+                        var oy = getComputedStyle(anc).overflowY;
+                        if (oy === 'auto' || oy === 'scroll' || oy === 'hidden') { clipTop = anc.getBoundingClientRect().top; break; }
+                        anc = anc.parentElement;
+                    }
+                    if (tip.getBoundingClientRect().top < clipTop) tip.classList.add('ci-flip');
+                }
                 return;
             }
             document.querySelectorAll('.ci-tip.ci-open').forEach(function(t) { t.classList.remove('ci-open'); });
