@@ -61,7 +61,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.10.75"
+    PIPELINE_VERSION: str = "1.10.76"
 
     @classmethod
     def get_date_filter(cls) -> str:

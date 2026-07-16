@@ -381,6 +381,27 @@ def load_data(client: bigquery.Client) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     if "MOLARITY_NM" in all_plate_data.columns:
         all_plate_data["MOLARITY_NM"] = pd.to_numeric(all_plate_data["MOLARITY_NM"], errors="coerce")
 
+    # Downcast low-cardinality string columns to `category`. all_plate_data is ~1.1M
+    # rows; as plain object columns it needs ~1.1 GB in RAM, and the dashboard render
+    # loads the WHOLE frame (then .copy()s it in parts.py) just to emit a ~0.2 MB
+    # fragment — that transient spike OOM-killed the render on the 8 GB server. Category
+    # encoding cuts the frame ~63% (1,132 MB → 419 MB), verified byte-identical render
+    # output. We add "" as a category on each so the render's `.fillna("")` calls stay
+    # legal; NaNs are preserved (isna/notna semantics unchanged). Numeric / id / barcode
+    # / free-text / timestamp columns are left as-is (high cardinality or numeric).
+    _CAT_SKIP = {"WELL_ID", "PLATE_ID", "PLATE_BARCODE", "COMMENTS",
+                 "PLATE_COMMENTS", "CREATED_AT", "UPDATED_AT"}
+    _n_rows = len(all_plate_data)
+    for col in all_plate_data.columns:
+        if col in _CAT_SKIP or all_plate_data[col].dtype != object:
+            continue
+        _nu = all_plate_data[col].nunique(dropna=True)
+        if _nu <= 2000 and _nu < 0.02 * _n_rows:
+            _s = all_plate_data[col].astype("category")
+            if "" not in _s.cat.categories:
+                _s = _s.cat.add_categories([""])
+            all_plate_data[col] = _s
+
     return all_plate_data, workorder_data, dpart_data
 
 
