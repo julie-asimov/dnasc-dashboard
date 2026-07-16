@@ -9,6 +9,7 @@ is partsToggle() to avoid colliding with the host. Never raises to the host: on 
 from __future__ import annotations  # 3.9 server compat (lazy annotations)
 import os
 import sys
+import re
 import html
 import pickle
 import datetime
@@ -145,7 +146,9 @@ def _render() -> str:
         if succ_wos:
             note=f'<span style="color:#15803d;font-weight:600">✓ Another design already SUCCEEDED (wo {str(succ_wos[0])[:8]}) → safe to cancel this WO</span>'
         else:
-            warns="; ".join(b["warnings"]) if (b["warnings"] is not None and len(b["warnings"])) else ""
+            _w = b["warnings"]
+            _w = list(dict.fromkeys(str(x) for x in _w)) if (_w is not None and len(_w)) else []  # dedupe, keep order
+            warns = re.sub(r"(\d+\.\d)\d+", r"\1", "; ".join(_w))   # trim absurd float precision (51.7194… → 51.7)
             note=f'<span style="color:#b45309">{html.escape(warns) or "blocked — investigate"}</span>'
         feeds=builds_for(prod)
         feeds_chips="".join(f'<span class="chip" style="border-color:{_SC.get(s,"#9ca3af")};color:{_SC.get(s,"#6b7280")}">{html.escape(p)} <em>{t}·{s.lower()}</em></span>' for p,t,s,_e in feeds[:40])
@@ -360,9 +363,9 @@ def _render() -> str:
         if act in ("Refill","Transform"):
             st,age,proc,proto = refill_status(part)
             if st=="pre_ngs":
-                prog=f'<span style="color:#15803d;font-weight:700">⟳ Batch in progress</span> — plate map up, at <b>{html.escape(proto)}</b> (waiting before NGS), {age}d ago · {html.escape(proc)}'
+                prog=f'<span style="color:#15803d;font-weight:700">⟳ Batch in progress</span> — plate map up, at <b>{html.escape(proto)}</b> (pre-NGS), {age}d ago · {html.escape(proc)}'
             elif st=="ngs":
-                prog=f'<span style="color:#be185d;font-weight:700">⚠ Needs batching</span> <span style="color:#9ca3af">(last batch reached NGS {age}d ago · {html.escape(proc)})</span>'
+                prog=f'<span style="color:#15803d;font-weight:700">⟳ Batch in progress</span> — at <b>NGS</b> (sequencing), {age}d ago · {html.escape(proc)}'
             else:
                 prog='<span style="color:#be185d;font-weight:700">⚠ Needs batching</span> <span style="color:#9ca3af">— no refill on record</span>'
             blocks.append(_block("In progress?", f'<div style="font-size:11px">{prog}</div>'))
@@ -403,7 +406,9 @@ def _render() -> str:
     def batch_cell(part, act):
         if act in ("Refill","Transform"):
             st,age,proc,proto = refill_status(part)
-            if st=="pre_ngs": return '<span style="color:#15803d;font-weight:700">⟳ batch in progress</span>'
+            # pre_ngs (overnight/miniprep) AND ngs (sequencing) are both a live batch in flight;
+            # only "none" (no refill on record) actually needs a new batch.
+            if st in ("pre_ngs","ngs"): return '<span style="color:#15803d;font-weight:700">⟳ batch in progress</span>'
             return '<span style="color:#be185d;font-weight:700">⚠ needs batch</span>'
         if act=="True":
             o=order_status(part)
