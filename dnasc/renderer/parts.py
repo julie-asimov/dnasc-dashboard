@@ -320,10 +320,10 @@ def _render() -> str:
         if wl:
             hdr='<tr><td><b>Plate</b></td><td><b>Well</b></td><td><b>Well ID</b></td><td><b>Location</b></td><td><b>Vol</b></td><td><b>Conc</b></td><td><b>Age</b></td></tr>'
             rws="".join(f'<tr><td>plate {p}</td><td>{co or "?"}</td><td style="font-family:monospace">{wid}</td><td>{html.escape(loc)}</td><td>{_fmt(v)}µL</td><td>{_fmt(cc)} ng/µL</td><td>{a if a is not None else "?"}d</td></tr>' for p,loc,co,wid,v,cc,a in wl)
-            blocks.append(_block("On hand · 4B freezer",
+            blocks.append(_block("On hand · 4B fridge (4°C)",
                 f'<table class="d-tbl"><tbody>{hdr}{rws}</tbody></table>'))
         else:
-            blocks.append(_block("On hand · 4B freezer", '<span style="font-size:11px;color:#9ca3af">none in 4B freezer</span>'))
+            blocks.append(_block("On hand · 4B fridge (4°C)", '<span style="font-size:11px;color:#9ca3af">none in 4B fridge</span>'))
         gs=glycerol_streak(part)
         if gs:
             hdr='<tr><td><b>pAI</b></td><td><b>Antibiotic</b></td><td><b>Strain</b></td><td><b>Plate</b></td><td><b>Coord</b></td><td><b>Location</b></td><td><b>Well ID</b></td></tr>'
@@ -594,7 +594,7 @@ def _render() -> str:
               f'<span class="secdesc">every well drained to 0 µL (marked unusable) → confirm the plate is physically discarded and update its location to DISCARDED · some still show a stale/active location</span></div>'
               f'{exhbody}</div>')
 
-    # Trash by part type: STOCK plates in the 4B freezer, past expiration
+    # Trash by part type: STOCK plates in the 4B fridge (4°C), past expiration
     def _ptype(sid):
         sid=str(sid)
         if sid.startswith("pAI"): return "Plasmid"
