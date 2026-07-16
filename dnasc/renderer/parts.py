@@ -330,8 +330,21 @@ def _render() -> str:
             rws="".join(f'<tr><td style="font-family:monospace;font-weight:700">{part}</td><td>{html.escape(ab)}</td><td>{html.escape(strain or "?")}</td><td>plate {p}</td><td style="font-family:monospace">{co or "?"}</td><td>{html.escape(loc)}</td><td style="font-family:monospace">{wid}</td></tr>' for p,co,loc,ab,strain,wid in gs)
             blocks.append(_block(f"Streak from · glycerol ({len(gs)})",
                 f'<table class="d-tbl"><tbody>{hdr}{rws}</tbody></table>'))
-        # (Make-available / flip-ON block removed — we don't recommend flipping wells available
-        #  without partner-association + 5µL/rule confirmation.)
+        # Make-available (flip ON) — seq-confirmed wells eligible to be re-enabled in LIMS.
+        ma=make_avail_wells(part)
+        if ma:
+            hdr='<tr><td><b>Plate</b></td><td><b>Well</b></td><td><b>Well ID</b></td><td><b>Location</b></td><td><b>Vol</b></td><td><b>Conc</b></td><td><b>Age</b></td><td><b>Seq</b></td></tr>'
+            rws="".join(f'<tr><td>plate {p}</td><td>{co or "?"}</td><td style="font-family:monospace">{wid}</td><td>{html.escape(loc)}</td><td>{_fmt(v)}µL</td><td>{_fmt(cc)} ng/µL</td><td>{a if a is not None else "?"}d</td><td style="color:#15803d">✓</td></tr>' for p,co,wid,loc,v,cc,a in ma)
+            ids=",".join(f"well{int(r[2])}" for r in ma)
+            cb=(f'<div style="display:flex;gap:6px;margin-top:6px"><textarea readonly onclick="this.select()" '
+                f'style="flex:1;height:38px;font-family:monospace;font-size:10px;border:1px solid #bfdbfe;border-radius:4px;'
+                f'padding:4px 6px;background:#f8fafc;resize:vertical">{ids}</textarea>'
+                f'<button onclick="var t=this.previousElementSibling;t.select();navigator.clipboard.writeText(t.value)" '
+                f'style="font-size:10px;font-weight:600;padding:4px 10px;border:1px solid #93c5fd;border-radius:4px;'
+                f'background:#dbeafe;color:#1d4ed8;cursor:pointer;white-space:nowrap">Copy</button></div>')
+            blocks.append(_block(f"Make available &rarr; flip ON ({len(ma)})",
+                f'<div style="font-size:10px;color:#6b7280;margin-bottom:3px">seq-confirmed · &gt;25µL · &gt;5 ng/µL · fresh · not yet available</div>'
+                f'<table class="d-tbl"><tbody>{hdr}{rws}</tbody></table>{cb}'))
         if act=="Transform":
             ds=dna_stock(part)
             def _dna_tbl(fmt, wells):
