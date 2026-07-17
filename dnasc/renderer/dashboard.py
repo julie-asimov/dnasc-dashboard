@@ -885,6 +885,7 @@ def render_all_projects_dashboard(
         border: 1px solid #334155; border-radius: 4px; padding: 5px 8px; z-index: 9999; min-width: 220px;
         box-shadow: 0 4px 12px rgba(0,0,0,0.4); pointer-events: none; }
     .missing-tip-wrap:hover .missing-tip { display: block; }
+    .missing-tip.mt-flip { bottom: auto; top: calc(100% + 4px); }
     .badge-tip-wrap { position: relative; display: inline-block; }
     .badge-tip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
         background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; padding: 5px 10px;
@@ -894,6 +895,14 @@ def render_all_projects_dashboard(
     .missing-tip-req { font-family: monospace; font-size: 8px; color: #94a3b8; margin-bottom: 2px; }
     .missing-tip-exp { font-size: 9px; font-weight: 700; color: #e2e8f0; }
     .missing-tip-status { font-size: 8px; color: #be185d; font-weight: 600; margin-top: 2px; }
+    .wait-ops { font-size: 11px; }
+    .wait-ops-hd { font-weight: 700; color: #b45309; margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
+    .wait-ops-row { display: flex; gap: 8px; align-items: baseline; line-height: 1.65; }
+    .wait-part { font-family: monospace; font-weight: 700; color: #7c3aed; min-width: 78px; }
+    .wait-loc { color: #64748b; font-size: 10px; }
+    .wait-loc.elsewhere { color: #be185d; font-weight: 600; }
+    .wait-loc.here { color: #0d9488; }
+    .wait-loc.none { color: #9ca3af; font-style: italic; }
     .colony-badge { font-size: 7px; padding: 1px 3px; border-radius: 2px; font-weight: 600; }
     .tat-cell { font-family: monospace; color: #86868b; font-size: 8px; white-space: nowrap; }
 
@@ -1274,6 +1283,24 @@ def render_all_projects_dashboard(
         document.addEventListener('mouseover', function(e) {
             var c = e.target.closest('.plate-hover-container');
             if (c) { _fillPop(c.querySelector('.plate-popover')); }
+            // Missing-part tooltip opens upward by default; flip it downward when the
+            // top would be clipped by a scrolling/overflow ancestor (.content-pane).
+            // Measure the trigger (stable regardless of current flip state), not the tip.
+            var mw = e.target.closest('.missing-tip-wrap');
+            if (mw) {
+                var mt = mw.querySelector('.missing-tip');
+                if (mt) {
+                    var clipTop = 0, anc = mw.parentElement;
+                    while (anc) {
+                        var oy = getComputedStyle(anc).overflowY;
+                        if (oy === 'auto' || oy === 'scroll' || oy === 'hidden') { clipTop = anc.getBoundingClientRect().top; break; }
+                        anc = anc.parentElement;
+                    }
+                    var wr = mw.getBoundingClientRect();
+                    if (wr.top - mt.offsetHeight - 4 < clipTop) mt.classList.add('mt-flip');
+                    else mt.classList.remove('mt-flip');
+                }
+            }
         });
         document.addEventListener('click', function(e) {
             var trigger = e.target.closest('.colony-badge, .plate-trigger');
@@ -1394,7 +1421,7 @@ def render_all_projects_dashboard(
     # =========================================================================
     # 3. HELPER: RENDER SINGLE REQUEST
     # =========================================================================
-    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False, has_seq_winner=False, has_order_pending=False, has_antibiotic_mismatch=False):
+    def render_single_request_html(req_id, req_df, is_stalled=False, is_asm_review=False, has_seq_winner=False, has_order_pending=False, has_antibiotic_mismatch=False, has_dual_antibiotic=False):
         html = []
         construct = req_df['construct_name'].iloc[0] or "Unknown Construct"
         req_status = req_df['request_status'].iloc[0] if 'request_status' in req_df.columns else "Unknown"
@@ -1533,6 +1560,7 @@ def render_all_projects_dashboard(
         seq_winner_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#059669; color:white; border:2px solid #047857; font-size:12px; padding:4px 12px; font-weight:800;">🏆 SEQ WINNER</span><div class="badge-tip">A sequencing winner has been identified — ready for LSP</div></div>' if has_seq_winner else ""
         order_pending_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span><div class="badge-tip">Parts order submitted to synthesis vendor — waiting on delivery</div></div>' if has_order_pending else ""
         antibiotic_mismatch_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#dc2626; color:white; border:2px solid #b91c1c; font-size:12px; padding:4px 12px; font-weight:800;">🚨 ANTIBIOTIC MISMATCH</span><div class="badge-tip">An active workorder has an antibiotic that does not match LIMS — check and correct before proceeding</div></div>' if has_antibiotic_mismatch else ""
+        dual_antibiotic_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#fef3c7; color:#92400e; border:2px solid #f59e0b; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ DUAL ANTIBIOTIC (LIMS)</span><div class="badge-tip">LIMS lists two bacterial antibiotics on this plasmid — often the NeoR mammalian marker mis-flagged as Kan. The correct one is selected, but the BIOS/LIMS record should be corrected.</div></div>' if has_dual_antibiotic else ""
 
         ready_to_ship_time = None
         final_release_time = None
@@ -1614,6 +1642,7 @@ def render_all_projects_dashboard(
                     {seq_winner_badge}
                     {order_pending_badge}
                     {antibiotic_mismatch_badge}
+                    {dual_antibiotic_badge}
                 </div>
             </div>
         """)
@@ -2459,7 +2488,38 @@ def render_all_projects_dashboard(
                         _fallback_label = _fallback_labels.get(row['type'], 'Manual: Miniprep/Glycerol/Media created')
                         pipeline_html.append(f"""<div class="timeline-row"><div class="t-dot succeeded"></div><div class="t-content"><div class="t-header"><span class="t-name">{_fallback_label}</span><span class="t-time"></span></div><div class="t-details">{lims_pills}</div></div></div>""")
                     else:
-                        pipeline_html.append('<span style="color: #9ca3af; font-size: 11px;">No queue data</span>')
+                        # No OpTracker queue and no LIMS plates. If this workorder is
+                        # WAITING/BLOCKED on parts, say what it's waiting on (and where
+                        # each part is being made) instead of a bare "No queue data".
+                        _wraw = row.get('Waiting')
+                        _wl = ([x.strip() for x in str(_wraw).split(',') if x.strip()]
+                               if row.get('wo_status') in ('WAITING', 'BLOCKED') and pd.notna(_wraw) else [])
+                        _seen = set(); _wu = [w for w in _wl if not (w in _seen or _seen.add(w))]
+                        if _wu:
+                            _rows = []
+                            for _w in _wu:
+                                if _w in tree_stock_ids:
+                                    _loc, _cls, _pri = 'being made in this workflow', 'here', 2
+                                else:
+                                    _src = _stock_to_req.get(_w)
+                                    if _src and _src.get('exp_name'):
+                                        _loc, _cls, _pri = _src['exp_name'], 'elsewhere', 0
+                                    else:
+                                        _loc, _cls, _pri = 'not yet started', 'none', 1
+                                _rows.append((_pri, _w, _loc, _cls))
+                            _rows.sort(key=lambda t: (t[0], t[1]))  # external blockers first
+                            _lines = ''.join(
+                                f'<div class="wait-ops-row"><span class="wait-part">{_w}</span>'
+                                f'<span class="wait-loc {_cls}">{_loc}</span></div>'
+                                for _pri, _w, _loc, _cls in _rows
+                            )
+                            _n = len(_wu)
+                            pipeline_html.append(
+                                f'<div class="wait-ops"><div class="wait-ops-hd">'
+                                f'Waiting on {_n} part{"s" if _n != 1 else ""}</div>{_lines}</div>'
+                            )
+                        else:
+                            pipeline_html.append('<span style="color: #9ca3af; font-size: 11px;">No queue data</span>')
                 pipeline_html.append('</div>')
 
                 # --- DETAILS INFO ---
@@ -3206,8 +3266,9 @@ def render_all_projects_dashboard(
         count_blocked = 0; count_stalled = 0; count_in_lsp = 0; count_asm_review = 0; count_seq_winner = 0; count_order_pending = 0
         count_in_assembly = 0; count_active_waiting = 0; count_ship_ready = 0
         new_req_list = []; active_req_list = []; fulfilled_req_list = []; canceled_req_list = []
-        stalled_reqs = set(); asm_review_reqs = set(); seq_winner_reqs = set(); order_pending_reqs = set(); antibiotic_mismatch_reqs = set(); production_tats = []; total_tats = []
+        stalled_reqs = set(); asm_review_reqs = set(); seq_winner_reqs = set(); order_pending_reqs = set(); antibiotic_mismatch_reqs = set(); dual_antibiotic_reqs = set(); production_tats = []; total_tats = []
         count_antibiotic_mismatch = 0
+        count_dual_antibiotic = 0
         _root_only = project_df[project_df['workorder_id'] == project_df['root_work_order_id']]
         _ptr_source = _root_only if not _root_only.empty else project_df
         has_ptr = _ptr_source['for_partner'].astype(str).str.lower().str.contains('true').any()
@@ -3433,6 +3494,14 @@ def render_all_projects_dashboard(
                     & ~r_df['visual_status'].isin(['SUCCEEDED', 'FAILED', 'CANCELED'])
                 ]
                 has_antibiotic_mismatch = not _ab_active.empty
+            has_dual_antibiotic = False
+            if 'lims_double_marker' in r_df.columns:
+                _dual_active = r_df[
+                    r_df['type'].isin(['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder'])
+                    & r_df['lims_double_marker'].eq(True)
+                    & ~r_df['visual_status'].isin(['SUCCEEDED', 'FAILED', 'CANCELED'])
+                ]
+                has_dual_antibiotic = not _dual_active.empty
             _draft_mask        = r_df['data_source'].eq('BIOS_DRAFT') if 'data_source' in r_df.columns else pd.Series(False, index=r_df.index)
             has_real_workorders = not r_df[
                 r_df['workorder_id'].notna()
@@ -3464,6 +3533,7 @@ def render_all_projects_dashboard(
                 if is_asm_review: count_asm_review += 1; asm_review_reqs.add(rid)
                 if has_seq_winner: count_seq_winner += 1; seq_winner_reqs.add(rid)
                 if has_order_pending: count_order_pending += 1; order_pending_reqs.add(rid)
+                if has_dual_antibiotic: count_dual_antibiotic += 1; dual_antibiotic_reqs.add(rid)
                 if has_antibiotic_mismatch: count_antibiotic_mismatch += 1; antibiotic_mismatch_reqs.add(rid)
                 elif is_blocked: count_blocked += 1
                 else:

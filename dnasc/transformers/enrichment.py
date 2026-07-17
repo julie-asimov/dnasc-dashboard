@@ -475,7 +475,10 @@ class EnrichmentTransformer:
                 status, is_finished, global_parts_by_stock, stock_to_req,
             )
 
-        # ── PARTS-phase: fill blank req_operation with BB source info ────
+        # ── PARTS-phase: fill blank req_operation with what the assembly is
+        # waiting on. Consider the backbone AND the parts the workorder is
+        # waiting on (the real blocker is often a part, not the backbone), and
+        # prefer a blocker being built in ANOTHER project — the most actionable.
         _asm_types_set = {'golden_gate_workorder', 'gibson_workorder'}
         for _rid, _rph in req_phase.items():
             if _rph != 'PARTS' or req_operation.get(_rid):
@@ -489,14 +492,29 @@ class EnrichmentTransformer:
             ]
             if _asm_waiting.empty:
                 continue
-            _bb_raw = str(_asm_waiting.iloc[0].get('backbone', '') or '').split(':')[0].strip()
-            if not _bb_raw or _bb_raw in ('nan', 'None', ''):
-                continue
-            _inf = stock_to_req.get(_bb_raw)
-            if _inf and _inf.get('req_id') and _inf['req_id'] != _rid:
-                _exp = _inf.get('exp_name', '')
+            _arow = _asm_waiting.iloc[0]
+            _bb_raw = str(_arow.get('backbone', '') or '').split(':')[0].strip()
+            _wait_raw = _arow.get('Waiting')
+            _waits = ([x.strip() for x in str(_wait_raw).split(',') if x.strip()]
+                      if pd.notna(_wait_raw) else [])
+            _seen = set(); _waits = [w for w in _waits if not (w in _seen or _seen.add(w))]
+            _cands = ([_bb_raw] if _bb_raw and _bb_raw not in ('nan', 'None', '') else []) + _waits
+            # Prefer a blocker being built in another request/project.
+            _picked = None
+            for _c in _cands:
+                _inf = stock_to_req.get(_c)
+                if _inf and _inf.get('req_id') and _inf['req_id'] != _rid and _inf.get('exp_name'):
+                    _picked = (_c, _inf['exp_name'])
+                    break
+            if _picked:
+                _c, _exp = _picked
                 _exp_s = (_exp[:22] + '…') if len(_exp) > 22 else _exp
-                req_operation[_rid] = f"BB: {_bb_raw} · {_exp_s}"
+                req_operation[_rid] = f"Waiting: {_c} · {_exp_s}"
+                req_op_status[_rid] = 'WAITING'
+            elif _waits:
+                # Nothing external found — still name what it's waiting on.
+                _lbl = ", ".join(_waits[:3]) + (f" +{len(_waits) - 3}" if len(_waits) > 3 else "")
+                req_operation[_rid] = f"Waiting on {_lbl}"
                 req_op_status[_rid] = 'WAITING'
 
         # ── Broadcast back to all rows ────────────────────────────────
