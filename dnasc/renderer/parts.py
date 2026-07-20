@@ -201,6 +201,12 @@ def _render() -> str:
         if pd.isna(wn): return ""
         wn=int(wn); return f"{chr(65+wn%8)}{wn//8+1}"
 
+    def coord_wc(wn, nwells):
+        # The '384 Echo Source Plate' labware is overloaded in LIMS: at least one
+        # plate carries it while being physically 96-well. Pick the layout from the
+        # plate's real well_count, never from the labware name.
+        return coord96(wn) if pd.to_numeric(nwells, errors="coerce")==96 else coord384(wn)
+
     def glycerol_streak(part):
         _loc=apd["PLATE_LOCATION_BOX"].fillna("").astype(str)
         _lw =apd["LABWARE"].fillna("").astype(str)
@@ -244,7 +250,7 @@ def _render() -> str:
         rows=[]
         for _,x in av.iterrows():
             age=(now-x["CREATED_AT"]).days if pd.notna(x["CREATED_AT"]) else None
-            rows.append((x["PLATE_ID"], str(x["PLATE_LOCATION_BOX"]), coord384(x["WELL_NUMBER"]),
+            rows.append((x["PLATE_ID"], str(x["PLATE_LOCATION_BOX"]), coord_wc(x["WELL_NUMBER"], x["PLATE_NUMBER_OF_WELLS"]),
                          x["WELL_ID"], x["VOLUME_UL"], x["CONCENTRATION_NGUL"], age))
         rows.sort(key=lambda rr:(rr[6] is None, rr[6] if rr[6] is not None else 0))
         return rows
@@ -262,7 +268,7 @@ def _render() -> str:
             age=(now-x["CREATED_AT"]).days if pd.notna(x["CREATED_AT"]) else None
             if not (pd.notna(v) and v>25 and pd.notna(cc) and cc>5): continue
             if age is not None and age>win: continue
-            rows.append((x["PLATE_ID"], coord384(x["WELL_NUMBER"]), x["WELL_ID"], loc or "(no loc)", v, cc, age))
+            rows.append((x["PLATE_ID"], coord_wc(x["WELL_NUMBER"], x["PLATE_NUMBER_OF_WELLS"]), x["WELL_ID"], loc or "(no loc)", v, cc, age))
         rows.sort(key=lambda rr:-(pd.to_numeric(rr[5],errors="coerce") or 0))
         return rows
 
@@ -669,7 +675,7 @@ def _render() -> str:
 
     # ---- SCOPED fragment: every CSS rule namespaced under #tab-parts so nothing leaks ----
     frag=f"""<style>
- #tab-parts{{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f1f5f9;color:#1d1d1f}}
+ #tab-parts{{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#e9ecf2;color:#1d1d1f}}
  #tab-parts .hd{{background:#fff;border-bottom:1px solid #e5e7eb;padding:16px 20px}} #tab-parts .hd h1{{font-size:18px;margin:0 0 4px}} #tab-parts .hd p{{font-size:12px;color:#6b7280;margin:0}}
  #tab-parts .sec{{margin:16px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden}}
  #tab-parts .sechd{{padding:10px 14px;font-size:14px;font-weight:700;background:#faf8ff;border-bottom:1px solid #ece8f5}}
