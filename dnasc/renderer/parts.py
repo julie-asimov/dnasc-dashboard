@@ -235,7 +235,12 @@ def _render() -> str:
         return rows
 
     def dna_stock(part, seq_only=True):
-        s = apd[(apd["STOCK_ID"]==part) & (apd["WELL_TYPE"]=="Stock")
+        # Exclude error plates (a '384 Echo Source Plate' that is not physically
+        # 384-well) — they should be found & discarded, never offered as transform
+        # DNA. Genuine 96-well plates (other labware) still qualify.
+        _errp = ((apd["LABWARE"]=="384 Echo Source Plate")
+                 & (pd.to_numeric(apd["PLATE_NUMBER_OF_WELLS"],errors="coerce")!=384))
+        s = apd[(apd["STOCK_ID"]==part) & (apd["WELL_TYPE"]=="Stock") & ~_errp
                 & ~apd["PLATE_LOCATION_BOX"].fillna("").astype(str).str.upper().str.contains("DISCARD")]
         if seq_only:
             s = s[s["SEQ_CONFIRMED"]=="True"]

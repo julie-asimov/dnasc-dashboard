@@ -51,6 +51,17 @@ WELLS_96 = {
     "89": "A12", "90": "B12", "91": "C12", "92": "D12", "93": "E12", "94": "F12", "95": "G12", "96": "H12",
 }
 
+
+def _echo384(df):
+    """Mask of REAL 384 Echo source wells: the '384 Echo Source Plate' labware AND
+    a physically 384-well plate. Excludes mislabeled plates (e.g. a 96-well plate
+    carrying that labware — a LIMS data error) from all Echo-source availability /
+    mark-available logic, so they never drive a suggested action. Those plates are
+    surfaced separately as "error plates" in the Parts tab renderer."""
+    return ((df["LABWARE"] == "384 Echo Source Plate")
+            & (pd.to_numeric(df["PLATE_NUMBER_OF_WELLS"], errors="coerce") == 384))
+
+
 # ---------------------------------------------------------------------------
 # Control parts: fixed 96-reaction buffer (4 plates/wk × 2 controls × 12 wks).
 # Refill is triggered when Echo stock drops below CONTROL_REFILL_TRIGGER (30 rxns).
@@ -522,7 +533,7 @@ def run_optimized_lab_workflow(
     # Inventory = DNA source stock only. The Echo source plate also carries Temp/Glycerol/
     # working wells; restrict to WELL_TYPE 'Stock' so those never count toward "Have".
     if "LABWARE" in all_plate_data.columns:
-        _echo_mask = all_plate_data["LABWARE"] == "384 Echo Source Plate"
+        _echo_mask = _echo384(all_plate_data)
         if "WELL_TYPE" in all_plate_data.columns:
             _echo_mask = _echo_mask & (all_plate_data["WELL_TYPE"] == "Stock")
         echo_plates = all_plate_data[_echo_mask].copy()
@@ -859,7 +870,7 @@ def classify_actions(
 
             wells_confirmed = all_plate_data[
                 (all_plate_data["STOCK_ID"] == part) &
-                (all_plate_data["LABWARE"] == "384 Echo Source Plate") &
+                (_echo384(all_plate_data)) &
                 (all_plate_data["AVAILABLE"] != "True") &
                 (pd.to_numeric(all_plate_data["CONCENTRATION_NGUL"], errors="coerce") > 5) &
                 (pd.to_numeric(all_plate_data["VOLUME_UL"], errors="coerce") > 30) &   # >30 µL — exclude near-empty wells
@@ -891,7 +902,7 @@ def classify_actions(
             if _req_cols.issubset(all_plate_data.columns):
                 all_conf = all_plate_data[
                     (all_plate_data["STOCK_ID"] == part) &
-                    (all_plate_data["LABWARE"] == "384 Echo Source Plate") &
+                    (_echo384(all_plate_data)) &
                     (all_plate_data["AVAILABLE"] != "True") &
                     (pd.to_numeric(all_plate_data["CONCENTRATION_NGUL"], errors="coerce") > 5) &
                     (pd.to_numeric(all_plate_data["VOLUME_UL"], errors="coerce") > 30) &   # >30 µL
@@ -1193,7 +1204,7 @@ def build_mark_available_queue(all_plate_data: pd.DataFrame, now: dt.datetime | 
     vol  = pd.to_numeric(all_plate_data.get("VOLUME_UL"), errors="coerce")
     conc = pd.to_numeric(all_plate_data.get("CONCENTRATION_NGUL"), errors="coerce")
     mask = (
-        (all_plate_data["LABWARE"] == "384 Echo Source Plate") &
+        (_echo384(all_plate_data)) &
         (all_plate_data["SEQ_CONFIRMED"] == "True") &
         (all_plate_data["AVAILABLE"] != "True") &
         (vol > MARK_AVAILABLE_VOL_MIN) &
@@ -1237,7 +1248,7 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
     loc = (all_plate_data["PLATE_LOCATION_BOX"] if "PLATE_LOCATION_BOX" in all_plate_data.columns
            else pd.Series("", index=all_plate_data.index)).fillna("").astype(str)
     mask = (
-        (all_plate_data["LABWARE"] == "384 Echo Source Plate") &
+        (_echo384(all_plate_data)) &
         (all_plate_data["AVAILABLE"] == "True") &
         (near_empty | expired | low_conc) &
         ~loc.str.upper().str.contains("DISCARD")
@@ -1285,7 +1296,7 @@ def build_exhausted_plates_queue(all_plate_data: pd.DataFrame) -> list[dict]:
     """
     if all_plate_data.empty or "LABWARE" not in all_plate_data.columns:
         return []
-    echo = all_plate_data[all_plate_data["LABWARE"] == "384 Echo Source Plate"].copy()
+    echo = all_plate_data[_echo384(all_plate_data)].copy()
     if echo.empty:
         return []
     echo["_vol"] = pd.to_numeric(echo.get("VOLUME_UL"), errors="coerce")
