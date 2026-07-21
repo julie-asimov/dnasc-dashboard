@@ -645,9 +645,11 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     _ip = [r for r in records if r['status'] in _ACTIVE_REQ_STATUS]
     in_prog  = len(_ip)
     flagged  = sum(1 for r in _ip if r['flags'])
-    past_due = sum(1 for r in _ip if 'PAST_DUE' in r['flags'])
-    at_risk  = sum(1 for r in _ip if 'AT_RISK'  in r['flags'])
-    stalled  = sum(1 for r in _ip if 'STALLED'  in r['flags'])
+    past_due  = sum(1 for r in _ip if 'PAST_DUE'  in r['flags'])
+    at_vendor = sum(1 for r in _ip if 'AT_VENDOR' in r['flags'])
+    at_risk   = sum(1 for r in _ip if 'AT_RISK'   in r['flags'])
+    blocked   = sum(1 for r in _ip if 'BLOCKED'   in r['flags'])
+    stalled   = sum(1 for r in _ip if 'STALLED'   in r['flags'])
 
     data_json          = json.dumps(records, ensure_ascii=False)
     excl_exp_json      = json.dumps(sorted(_DEFAULT_EXCLUDED_EXP))
@@ -759,7 +761,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     <span class="kpill"><span class="kk">In progress</span><b style="color:#1d4ed8;">{in_prog}</b></span>
     <span class="kpill"><span class="kk">Flagged</span><b id="if-flagged-ct">{flagged}</b></span>
     <span class="kpill"><span class="kk">Past due</span><b style="color:#991b1b;">{past_due}</b></span>
+    <span class="kpill"><span class="kk">At vendor</span><b style="color:#3730a3;">{at_vendor}</b></span>
     <span class="kpill"><span class="kk">At risk</span><b style="color:#854d0e;">{at_risk}</b></span>
+    <span class="kpill"><span class="kk">Blocked</span><b style="color:#b91c1c;">{blocked}</b></span>
     <span class="kpill"><span class="kk">Stalled</span><b style="color:#dc2626;">{stalled}</b></span>
     <span class="kpill"><span class="kk">Colony risk</span><b id="if-colrisk-ct" style="color:#991b1b;">0</b></span>
   </div>
@@ -785,6 +789,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     <button onclick="ifFlagFilter('ip')"       id="iff-ip"       class="iff-fbtn"            style="{btn_s}">IN PROGRESS</button>
     <button onclick="ifFlagFilter('flagged')"  id="iff-flagged"  class="iff-fbtn"            style="{btn_s}">All Flags</button>
     <button onclick="ifFlagFilter('PAST_DUE')" id="iff-PAST_DUE" class="iff-fbtn"            style="{btn_s}background:#fee2e2;color:#991b1b;border-color:#fca5a5;">Past Due</button>
+    <button onclick="ifFlagFilter('AT_VENDOR')" id="iff-AT_VENDOR" class="iff-fbtn"          style="{btn_s}background:#eef2ff;color:#3730a3;border-color:#c7d2fe;">At Vendor</button>
     <button onclick="ifFlagFilter('AT_RISK')"  id="iff-AT_RISK"  class="iff-fbtn"            style="{btn_s}background:#fef9c3;color:#713f12;border-color:#fde047;">At Risk</button>
     <button onclick="ifFlagFilter('BLOCKED')"  id="iff-BLOCKED"  class="iff-fbtn"            style="{btn_s}background:#fee2e2;color:#b91c1c;border-color:#fca5a5;">Blocked</button>
     <button onclick="ifFlagFilter('STALLED')"  id="iff-STALLED"  class="iff-fbtn"            style="{btn_s}background:#fef2f2;color:#dc2626;border-color:#fca5a5;">Stalled</button>

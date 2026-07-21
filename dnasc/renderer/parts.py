@@ -207,6 +207,14 @@ def _render() -> str:
         # plate's real well_count, never from the labware name.
         return coord96(wn) if pd.to_numeric(nwells, errors="coerce")==96 else coord384(wn)
 
+    def _is_echo384(d):
+        # A REAL Echo source plate is 384-well. Some plates carry the '384 Echo
+        # Source Plate' labware while being physically 96-well (LIMS data error) —
+        # those are not Echo sources and must never enter the Echo-source flows
+        # (make-available, on-hand, trash). Gate on the actual well_count.
+        return ((d["LABWARE"] == "384 Echo Source Plate")
+                & (pd.to_numeric(d["PLATE_NUMBER_OF_WELLS"], errors="coerce") == 384))
+
     def glycerol_streak(part):
         _loc=apd["PLATE_LOCATION_BOX"].fillna("").astype(str)
         _lw =apd["LABWARE"].fillna("").astype(str)
@@ -245,7 +253,7 @@ def _render() -> str:
 
     def avail_wells(part):
         av = apd[(apd["STOCK_ID"]==part) & (apd["AVAILABLE"]=="True")
-                 & (apd["WELL_TYPE"]=="Stock") & (apd["LABWARE"]=="384 Echo Source Plate")
+                 & (apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)
                  & ~apd["PLATE_LOCATION_BOX"].fillna("").astype(str).str.upper().str.contains("DISCARD")]
         rows=[]
         for _,x in av.iterrows():
@@ -257,7 +265,7 @@ def _render() -> str:
 
     def make_avail_wells(part):
         win = 730 if part.startswith("o") else 200
-        s = apd[(apd["STOCK_ID"]==part) & (apd["WELL_TYPE"]=="Stock") & (apd["LABWARE"]=="384 Echo Source Plate")
+        s = apd[(apd["STOCK_ID"]==part) & (apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)
                 & (apd["SEQ_CONFIRMED"]=="True") & (apd["AVAILABLE"]!="True")]
         rows=[]
         for _,x in s.iterrows():
@@ -562,8 +570,43 @@ def _render() -> str:
                 f'<span class="seccount" style="background:{accent}">{len(tokens)}</span>'
                 f'<span class="secdesc">{desc}</span></div>{body}</div>')
 
+    # Error plates — labware says "384 Echo Source Plate" but the plate is not
+    # physically 384-well (LIMS data error). These are NOT valid Echo sources and
+    # are excluded from every Echo-source list above; surface them so they can be
+    # found, verified, and discarded / relabeled in LIMS.
+    _echo_lbl = apd[apd["LABWARE"] == "384 Echo Source Plate"].copy()
+    _echo_lbl["_wc"] = pd.to_numeric(_echo_lbl["PLATE_NUMBER_OF_WELLS"], errors="coerce")
+    _err = _echo_lbl[_echo_lbl["_wc"] != 384]
+    err_plates = []
+    for pid, g in _err.groupby("PLATE_ID"):
+        _loc = g["PLATE_LOCATION_BOX"].dropna().astype(str)
+        _loc = _loc.mode().iloc[0] if not _loc.empty else "(no loc)"
+        _wc = g["_wc"].dropna()
+        _wc = int(_wc.iloc[0]) if not _wc.empty else "?"
+        err_plates.append((int(pid), _loc, _wc, g["WELL_ID"].nunique()))
+    err_plates.sort(key=lambda x: x[0])
+    err_section = ""
+    if err_plates:
+        erows = "".join(f'<tr><td style="font-family:monospace">plate {p}</td>'
+                        f'<td>{html.escape(str(loc))}</td>'
+                        f'<td style="text-align:right;color:#be123c;font-weight:700">{wc}-well</td>'
+                        f'<td style="text-align:right;color:#6b7280">{n}</td></tr>'
+                        for p, loc, wc, n in err_plates)
+        ebody = (f'<table class="platetbl"><thead><tr>'
+                 f'<th style="text-align:left;padding:3px 10px">Plate</th>'
+                 f'<th style="text-align:left;padding:3px 10px">Location</th>'
+                 f'<th style="text-align:right;padding:3px 10px">Actual size</th>'
+                 f'<th style="text-align:right;padding:3px 10px">Wells</th>'
+                 f'</tr></thead><tbody>{erows}</tbody></table>')
+        err_section = (f'<div class="sec"><div class="sechd" style="border-left:4px solid #dc2626">'
+                       f'&#9888; Error plates — mislabeled Echo source '
+                       f'<span class="seccount" style="background:#dc2626">{len(err_plates)}</span>'
+                       f'<span class="secdesc">labware says &ldquo;384 Echo Source Plate&rdquo; but the plate is NOT 384-well '
+                       f'(LIMS data error) &middot; find, verify, and discard or relabel &middot; excluded from all Echo-source lists</span>'
+                       f'</div>{ebody}</div>')
+
     # "Make Available" removed — can't confirm these wells aren't partner-associated or rule-compliant.
-    extra = wells_section("mk_un","Make Unavailable · 384 Echo source",
+    extra = err_section + wells_section("mk_un","Make Unavailable · 384 Echo source",
               "available Echo source wells that are ≤25µL (near-empty), past expiration (200d), OR &lt;5 ng/µL (too dilute) → flip OFF in LIMS","#be185d", clean_wells, show_plates=False)
     extra += wells_section("mk_un_mp","Make Unavailable · 96-well miniprep stock",
               "available miniprep-stock wells (96-well) past expiration (200d) → flip OFF in LIMS","#9d174d", mp_wells, show_plates=False)
@@ -615,7 +658,7 @@ def _render() -> str:
         return "Other"
     EXPIRE_DAYS={"Plasmid":200,"dPart":200,"SynPart":200,"Oligo":730}
 
-    stk = apd[(apd["WELL_TYPE"]=="Stock") & (apd["LABWARE"]=="384 Echo Source Plate")].copy()
+    stk = apd[(apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)].copy()
     stk = stk[stk["PLATE_LOCATION_BOX"].astype(str).str.startswith("4B-")]
     stk["ptype"]=stk["STOCK_ID"].map(_ptype)
     stk = stk[stk["ptype"]!="Other"]
