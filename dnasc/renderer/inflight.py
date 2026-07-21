@@ -369,13 +369,6 @@ def _build_colony_rollup(base: pd.DataFrame, today: date, req_ids: set | None = 
         cflags: list = []
         if any(d['low_pick'] for d in designs):
             cflags.append('LOW_PICKABLE')
-        if r_picked > 0 and r_seq == 0 and last_op is not None:
-            try:
-                stale_days = (pd.Timestamp(today, tz='UTC') - last_op).days
-            except Exception:
-                stale_days = 0
-            if stale_days > PipelineConfig.SEQ_STALL_DAYS:
-                cflags.append('SEQ_STALLED')
 
         out[req_id] = {
             'col': {
@@ -515,6 +508,32 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     _EMPTY_COL = {'imaged': 0, 'pickable': 0, 'picked': 0, 'seq': 0, 'tot': 0,
                   'has_winner': False, 'cflags': []}
 
+    # Outsourced-LSP detection: when the active LSP prep is out at an external
+    # vendor (Aldevron / Azenta), the wait is outside dnasc's control, so we don't
+    # count it as PAST DUE. The vendor shows in vendor_order_id (Batch_..._Aldevron_.../
+    # ..._Azenta_...) and prep_method ("Aldevron 10mg" / "Genewiz ..." = Azenta) on the
+    # active (non-terminal) lsp_workorder row. Genewiz is Azenta's sequencing brand.
+    req_vendor_out: dict = {}
+    _vout_cols = [c for c in ('vendor_order_id', 'prep_method', 'location',
+                              'batch_comments', 'deposited_by', 'digest_note')
+                  if c in base.columns]
+    if _vout_cols:
+        _lsp_active = base[
+            (base['type'] == 'lsp_workorder')
+            & ~base['visual_status'].isin(('SUCCEEDED', 'FULFILLED', 'FAILED', 'CANCELED'))
+        ]
+        for _rid, _grp in _lsp_active.groupby('req_id'):
+            _blob = ' '.join(_grp[_vout_cols].fillna('').astype(str).values.ravel()).lower()
+            if 'aldevron' in _blob:
+                req_vendor_out[str(_rid)] = 'Aldevron'
+            elif 'azenta' in _blob or 'genewiz' in _blob:
+                req_vendor_out[str(_rid)] = 'Azenta'
+
+    # Requests with a BLOCKED part/assembly workorder. Surfaced as its own flag so
+    # a build waiting on a stuck part shows BLOCKED alongside its running/ready op
+    # (e.g. pAI-22328: 2 PCRs RUNNING + 1 BLOCKED → op "PCR: RUNNING" + BLOCKED badge).
+    req_blocked = set(base.loc[base['visual_status'] == 'BLOCKED', 'req_id'].astype(str))
+
     records = []
     for _, row in req_rows.iterrows():
         fp     = str(row.get('for_partner', '')).lower() == 'true'
@@ -531,17 +550,28 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         asm        = ms.get('assembly')
         lsp_scaleup = ms.get('lsp_scaleup')
         is_stalled = bool(row.get('is_stalled', False))
+        vendor_out = req_vendor_out.get(req_id, '')
         flags: list = []
         if status not in ('FULFILLED', 'CANCELED'):
             if due and due < today:
-                flags.append('PAST_DUE')
+                # Out at an external vendor → the delay isn't ours: badge it AT VENDOR
+                # instead of PAST DUE so it doesn't count against our TAT.
+                flags.append('AT_VENDOR' if vendor_out else 'PAST_DUE')
             elif phase in ('ASM', 'PARTS') and (
                 (asm and asm < today) or (lsp_scaleup and lsp_scaleup < today)
             ):
                 flags.append('AT_RISK')
+            # Separate, additive flag: a stuck part/assembly. Coexists with the op
+            # label so "PCR: RUNNING" + BLOCKED can both show.
+            if phase in ('ASM', 'PARTS') and req_id in req_blocked:
+                flags.append('BLOCKED')
         if is_stalled and status == 'IN_PROGRESS':
             flags.append('STALLED')
-        op_display = '' if is_stalled else op
+        # A finished request has no active operation/phase — blank both so
+        # FULFILLED/SUCCEEDED/CANCELED rows don't read as "still in ASM".
+        _terminal = status in ('FULFILLED', 'SUCCEEDED', 'CANCELED')
+        op_display = '' if (is_stalled or _terminal) else op
+        phase_display = '' if _terminal else phase
         _cr = colony_roll.get(req_id, {})
         # Variant grouping: a redo of the same design carries a trailing `_vN`
         # suffix on the construct name (e.g. "...(CO 1.5)" vs "...(CO 1.5)_v2").
@@ -561,9 +591,10 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
             'customer':  str(row.get('customer', '') or ''),
             'submitter': str(row.get('submitter_email', '') or ''),
             'status':    status,
-            'phase':     phase,
+            'phase':     phase_display,
             'operation': op_display,
             'flags':     flags,
+            'vendor_out': vendor_out,
             'req_id':    req_id,
             'due_date':   str(due or ''),
             'assembly':   str(asm or ''),
@@ -654,7 +685,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     JS_ST_GRAY = _tint(tok.STATUS["CANCELED"])
     JS_P_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in tok.PHASE.items()) + "}"
     JS_F_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in tok.FLAG.items()) + "}"
-    _cf_keys   = ["LOW_PICKABLE", "SEQ_STALLED", "PAST_DUE", "AT_RISK"]
+    _cf_keys   = ["LOW_PICKABLE", "PAST_DUE", "AT_RISK"]
     JS_CF_ST   = "{" + ",".join(f"'{k}':'{_tint(tok.FLAG[k])}'" for k in _cf_keys) + "}"
     JS_CUST    = "{" + ",".join(f"'{k}':['{lbl}','{bg}','{txt}']"
                                 for k, (lbl, bg, txt) in tok.CUSTOMER.items()) + "}"
@@ -721,7 +752,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
 .if-cgrp td:first-child{{border-left:3px solid #cbd5e1;}}
 .if-cgrp-mem td:first-child{{border-left:3px solid #e8e8ee;}}
 </style>
-<div style="padding:12px 16px;background:#fff;min-height:100%;">
+<div style="padding:12px 16px;background:#e9ecf2;min-height:100%;">
 
   <!-- Metadata clouds (Kernel-style) -->
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
@@ -755,16 +786,19 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     <button onclick="ifFlagFilter('flagged')"  id="iff-flagged"  class="iff-fbtn"            style="{btn_s}">All Flags</button>
     <button onclick="ifFlagFilter('PAST_DUE')" id="iff-PAST_DUE" class="iff-fbtn"            style="{btn_s}background:#fee2e2;color:#991b1b;border-color:#fca5a5;">Past Due</button>
     <button onclick="ifFlagFilter('AT_RISK')"  id="iff-AT_RISK"  class="iff-fbtn"            style="{btn_s}background:#fef9c3;color:#713f12;border-color:#fde047;">At Risk</button>
+    <button onclick="ifFlagFilter('BLOCKED')"  id="iff-BLOCKED"  class="iff-fbtn"            style="{btn_s}background:#fee2e2;color:#b91c1c;border-color:#fca5a5;">Blocked</button>
     <button onclick="ifFlagFilter('STALLED')"  id="iff-STALLED"  class="iff-fbtn"            style="{btn_s}background:#fef2f2;color:#dc2626;border-color:#fca5a5;">Stalled</button>
     <button onclick="ifFlagFilter('COLONY_RISK')" id="iff-COLONY_RISK" class="iff-fbtn"      style="{btn_s}background:#fee2e2;color:#991b1b;border-color:#fca5a5;">Colony Risk</button>
   </div>
 
-  <!-- Table -->
+  <!-- Table — soft off-white surface on the grey tab body, matching the Tracking tab cards -->
+  <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;box-shadow:0 1px 3px rgba(15,23,42,0.06);overflow:hidden;">
   <div style="overflow-x:auto;">
-    <table id="inflight-table" style="width:100%;border-collapse:collapse;">
+    <table id="inflight-table" style="width:100%;border-collapse:collapse;background:#f8fafc;">
       <thead id="inflight-thead"></thead>
       <tbody id="inflight-tbody"><tr><td colspan="14" style="padding:20px;color:#6b7280;font-size:11px;">Loading…</td></tr></tbody>
     </table>
+  </div>
   </div>
 </div>
 
@@ -853,7 +887,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function strainBdg(s){{var st=STRAIN_STY[s]||'background:#F1F5F9;color:#475569;border:0.5px solid #CBD5E1;';return '<span style="'+STRAIN_CHIP+st+'">'+esc(s)+'</span>';}}
   // Flag chips (item 8) — muted, thin border.
   var CF_ST = {JS_CF_ST};
-  var CF_LBL = {{'LOW_PICKABLE':'LOW COLONIES','SEQ_STALLED':'SEQ STALLED','PAST_DUE':'PAST DUE'}};
+  var CF_LBL = {{'LOW_PICKABLE':'LOW COLONIES','PAST_DUE':'PAST DUE'}};
   // L1 colony flags = colony flags + PAST_DUE inherited from the request flags
   function colFlags(r){{var f=(r.col.cflags||[]).slice();if(r.flags.indexOf('PAST_DUE')!==-1)f.push('PAST_DUE');return f;}}
   // Numeric cell — neutral dark, right-aligned, no conditional red (item 9).
@@ -1027,6 +1061,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var ph  = phaseBdg(r.phase);
     var fl  = r.flags.map(function(f){{
       if(f==='COLONY_RISK') return colRiskFlag(r._colRisk, r._colPick, r._colPicked);
+      if(f==='AT_VENDOR') return bdg('AT VENDOR'+(r.vendor_out?' · '+r.vendor_out:''),F_ST['AT_VENDOR']);
       return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);
     }}).join('');
     return '<tr class="'+(grouped?'if-cgrp-mem':'')+'" style="'+bg+'">'

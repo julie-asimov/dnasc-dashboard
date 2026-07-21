@@ -1554,6 +1554,10 @@ def render_all_projects_dashboard(
         _req_email = str(_req_email_raw).strip() if _req_email_raw else ''
         now = datetime.now(pytz.timezone('US/Eastern'))
         is_done = str(req_status).upper() in ['FULFILLED', 'SUCCEEDED', 'CANCELED']
+        # A finished request has no active operation — drop the phase pill (ASM/PARTS/LSP)
+        # and the op badge so FULFILLED/SUCCEEDED/CANCELED rows don't read as "still in ASM".
+        if is_done:
+            status_badge_html = ""
 
         stalled_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#dc2626; color:white; border:2px solid #b91c1c; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ STALLED</span><div class="badge-tip">No pipeline progress detected — may need intervention</div></div>' if is_stalled else ""
         asm_review_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#d97706; color:white; border:2px solid #b45309; font-size:12px; padding:4px 12px; font-weight:800;">🔬 ASM REVIEW</span><div class="badge-tip">Assembly needs review before proceeding</div></div>' if is_asm_review else ""
@@ -4187,6 +4191,7 @@ def render_all_projects_dashboard(
                         {f'<span class="stat-item" title="A sequencing winner has been identified — ready for LSP" style="background:rgba(5,150,105,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">🏆 {count_seq_winner}</span> <span style="font-size:10px;">Seq Winner</span></span>' if count_seq_winner > 0 else ''}
                         {f'<span class="stat-item" title="Parts order submitted to synthesis vendor — waiting on delivery" style="background:rgba(124,58,237,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">⏳ {count_order_pending}</span> <span style="font-size:10px;">Order Pending</span></span>' if count_order_pending > 0 else ''}
                         {f'<span class="stat-item" title="A Gibson or Golden Gate workorder has an antibiotic that does not match LIMS" style="background:rgba(220,38,38,0.6); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">🚨 {count_antibiotic_mismatch}</span> <span style="font-size:10px;">Antibiotic Mismatch</span></span>' if count_antibiotic_mismatch > 0 else ''}
+                        {f'<span class="stat-item" title="LIMS lists two bacterial antibiotics on a plasmid (often NeoR mis-flagged as Kan) — correct one is selected, but the BIOS/LIMS record should be fixed" style="background:rgba(245,158,11,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">⚠️ {count_dual_antibiotic}</span> <span style="font-size:10px;">Dual Antibiotic (LIMS)</span></span>' if count_dual_antibiotic > 0 else ''}
                         {f'<span class="stat-item" title="Assembly is blocked — upstream dependency unresolved" style="background:rgba(190,24,93,0.5); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">{count_blocked}</span> <span style="font-size:10px;">Blocked</span></span>' if count_blocked > 0 else ''}
                         {f'<span class="stat-item" title="Requests canceled" style="background:rgba(100,116,139,0.4); border:1px solid #cbd5e1;"><span class="stat-label" style="font-size:11px;">{count_canceled}</span> <span style="font-size:10px;">Canceled</span></span>' if count_canceled > 0 else ''}
                     </div>

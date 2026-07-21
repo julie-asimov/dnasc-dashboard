@@ -166,13 +166,14 @@ FLAG = {
     "PAST_DUE":     ("#fee2e2", "#991b1b", "#fca5a5"),
     "AT_RISK":      ("#fef9c3", "#854d0e", "#fde047"),   # one yellow (collapses ffedd5/fef9c3 dupe)
     "STALLED":      ("#fef2f2", "#dc2626", "#fca5a5"),   # split from #be185d
-    "MUST_BATCH":   ("#fef2f2", "#dc2626", "#fca5a5"),   # urgent; icon differs from STALLED
+    "BLOCKED":      ("#fee2e2", "#b91c1c", "#fca5a5"),   # a required part/assembly is stuck
     "LOW_PICKABLE": ("#fef3c7", "#92400e", "#fcd34d"),
-    "SEQ_STALLED":  ("#fef3c7", "#92400e", "#fcd34d"),
+    "AT_VENDOR":    ("#eef2ff", "#3730a3", "#c7d2fe"),   # indigo — informational, not a miss
 }
 FLAG_ICON = {
     "PAST_DUE": "⏰", "AT_RISK": "⚠", "STALLED": "⏸",
-    "MUST_BATCH": "⬆", "LOW_PICKABLE": "▽", "SEQ_STALLED": "⏱",
+    "BLOCKED": "⛔", "LOW_PICKABLE": "▽",
+    "AT_VENDOR": "🏭",
 }
 
 # ───────────────────────────────────────────────────────────────────────────

@@ -46,7 +46,6 @@ class PipelineConfig:
 
     # ── Colony Tracking view (Requests In Flight tab) ─────────────────────────
     MIN_PICKABLE_COLONIES: int = 3   # request-level pickable sum below this → red flag
-    SEQ_STALL_DAYS: int = 7          # picked>0 & seq_confirmed=0 & days-since-last-op>this → red flag
 
     # ── Pinned infrastructure experiments ────────────────────────────────────
     # Ongoing reference/infra projects (not normal customer experiments). Single
@@ -61,7 +60,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.10.80"
+    PIPELINE_VERSION: str = "1.10.84"
 
     @classmethod
     def get_date_filter(cls) -> str:
