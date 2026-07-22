@@ -675,6 +675,12 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         bg, txt, bd = triple
         return f"background:{bg};color:{txt};border:1px solid {bd};"
 
+    def _tint_nb(triple):
+        # Borderless soft tint — for the flag pills (Behind / Colony / etc.) so they
+        # read as calm chips, not hard-outlined stickers. Static badges keep _tint.
+        bg, txt, _bd = triple
+        return f"background:{bg};color:{txt};border:1px solid transparent;"
+
     def _solid(pair):
         return f"background:{pair[0]};color:{pair[1]};"
 
@@ -694,9 +700,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     JS_STAT_LU = json.dumps(tok.STATUS_LUCIDE)           # status -> icon name (single source)
     JS_ST_GRAY = _tint(tok.STATUS["CANCELED"])
     JS_P_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in tok.PHASE.items()) + "}"
-    JS_F_ST    = "{" + ",".join(f"'{k}':'{_tint(v)}'" for k, v in tok.FLAG.items()) + "}"
+    JS_F_ST    = "{" + ",".join(f"'{k}':'{_tint_nb(v)}'" for k, v in tok.FLAG.items()) + "}"
     _cf_keys   = ["LOW_PICKABLE", "PAST_DUE", "AT_RISK"]
-    JS_CF_ST   = "{" + ",".join(f"'{k}':'{_tint(tok.FLAG[k])}'" for k in _cf_keys) + "}"
+    JS_CF_ST   = "{" + ",".join(f"'{k}':'{_tint_nb(tok.FLAG[k])}'" for k in _cf_keys) + "}"
     JS_CUST    = "{" + ",".join(f"'{k}':['{lbl}','{bg}','{txt}']"
                                 for k, (lbl, bg, txt) in tok.CUSTOMER.items()) + "}"
     GEO_STATUS = _geo("status")
@@ -944,8 +950,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function riskBadge(level){{
     if(level!=='HIGH' && level!=='MED') return '';
     var st = level==='HIGH'
-      ? 'background:#FEE2E2;color:#991B1B;border:0.5px solid #FCA5A5;'
-      : 'background:#FEF3C7;color:#92400E;border:0.5px solid #FCD34D;';
+      ? 'background:#FEE2E2;color:#991B1B;border:1px solid transparent;'
+      : 'background:#FEF3C7;color:#92400E;border:1px solid transparent;';
     var tip = level==='HIGH'
       ? 'Every attempt is in the LOW pickable band (0–'+PICK_LOW_MAX+') with no sequence-confirmed colony — at risk of running out of viable picks.'
       : 'Best attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one.';
@@ -967,8 +973,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function colRiskFlag(level,pick,picked){{
     if(level!=='HIGH' && level!=='MED') return '';
     picked=picked||0;
-    var st = level==='HIGH' ? 'background:#FEE2E2;color:#991B1B;border:1px solid #FCA5A5;'
-                            : 'background:#FEF3C7;color:#92400E;border:1px solid #FCD34D;';
+    var st = level==='HIGH' ? 'background:#FEE2E2;color:#991B1B;border:1px solid transparent;'
+                            : 'background:#FEF3C7;color:#92400E;border:1px solid transparent;';
     var tip = level==='HIGH'
       ? 'Colony at risk: every attempt LOW (0–'+PICK_LOW_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked.'
       : 'Colony watch: best attempt only MEDIUM (≤'+PICK_MED_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked.';
