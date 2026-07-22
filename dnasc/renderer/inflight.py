@@ -770,7 +770,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     <span class="kpill"><span class="kk">Flagged</span><b id="if-flagged-ct">{flagged}</b></span>
     <span class="kpill"><span class="kk">Past due</span><b style="color:#991b1b;">{past_due}</b></span>
     <span class="kpill"><span class="kk">At vendor</span><b style="color:#3730a3;">{at_vendor}</b></span>
-    <span class="kpill"><span class="kk">At risk</span><b style="color:#854d0e;">{at_risk}</b></span>
+    <span class="kpill"><span class="kk">Behind schedule</span><b style="color:#854d0e;">{at_risk}</b></span>
     <span class="kpill"><span class="kk">Blocked</span><b style="color:#b91c1c;">{blocked}</b></span>
     <span class="kpill"><span class="kk">Stalled</span><b style="color:#dc2626;">{stalled}</b></span>
     <span class="kpill"><span class="kk">Colony risk</span><b id="if-colrisk-ct" style="color:#991b1b;">0</b></span>
@@ -798,7 +798,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     <button onclick="ifFlagFilter('flagged')"  id="iff-flagged"  class="iff-fbtn"            style="{btn_s}">All Flags</button>
     <button onclick="ifFlagFilter('PAST_DUE')" id="iff-PAST_DUE" class="iff-fbtn"            style="{btn_s}background:#fee2e2;color:#991b1b;border-color:#fca5a5;">Past Due</button>
     <button onclick="ifFlagFilter('AT_VENDOR')" id="iff-AT_VENDOR" class="iff-fbtn"          style="{btn_s}background:#eef2ff;color:#3730a3;border-color:#c7d2fe;">At Vendor</button>
-    <button onclick="ifFlagFilter('AT_RISK')"  id="iff-AT_RISK"  class="iff-fbtn"            style="{btn_s}background:#fef9c3;color:#713f12;border-color:#fde047;">At Risk</button>
+    <button onclick="ifFlagFilter('AT_RISK')"  id="iff-AT_RISK"  class="iff-fbtn"            style="{btn_s}background:#fef9c3;color:#713f12;border-color:#fde047;">Behind Schedule</button>
     <button onclick="ifFlagFilter('BLOCKED')"  id="iff-BLOCKED"  class="iff-fbtn"            style="{btn_s}background:#fee2e2;color:#b91c1c;border-color:#fca5a5;">Blocked</button>
     <button onclick="ifFlagFilter('STALLED')"  id="iff-STALLED"  class="iff-fbtn"            style="{btn_s}background:#fef2f2;color:#dc2626;border-color:#fca5a5;">Stalled</button>
     <button onclick="ifFlagFilter('COLONY_RISK')" id="iff-COLONY_RISK" class="iff-fbtn"      style="{btn_s}background:#fee2e2;color:#991b1b;border-color:#fca5a5;">Colony Risk</button>
@@ -949,7 +949,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var tip = level==='HIGH'
       ? 'Every attempt is in the LOW pickable band (0–'+PICK_LOW_MAX+') with no sequence-confirmed colony — at risk of running out of viable picks.'
       : 'Best attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one.';
-    return '<span title="'+tip+'" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">&#9888; '+level+' RISK</span>';
+    return '<span title="'+tip+'" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">&#9888; COLONY RISK &middot; '+level+'</span>';
   }}
   // Worst colony risk across a request's designs + the pickable/picked counts driving it.
   function reqColRisk(r){{
@@ -971,7 +971,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var tip = level==='HIGH'
       ? 'Colony at risk: every attempt LOW (0–'+PICK_LOW_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked.'
       : 'Colony watch: best attempt only MEDIUM (≤'+PICK_MED_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked.';
-    return '<span title="'+tip+'" style="'+BDG+st+'">'+level+' RISK &middot; '+pick+'pk &middot; '+picked+' picked</span>';
+    return '<span title="'+tip+'" style="'+BDG+st+'">COLONY RISK &middot; '+level+' &middot; '+pick+'pk &middot; '+picked+' picked</span>';
   }}
   // One-time: fold colony risk into each record's flags so it filters/sorts like the
   // other flags (and "All Flags" includes it). Idempotent via the indexOf guard.
@@ -1086,6 +1086,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var fl  = r.flags.map(function(f){{
       if(f==='COLONY_RISK') return colRiskFlag(r._colRisk, r._colPick, r._colPicked);
       if(f==='AT_VENDOR') return bdg('AT VENDOR'+(r.vendor_out?' · '+r.vendor_out:''),F_ST['AT_VENDOR']);
+      if(f==='AT_RISK') return '<span title="Behind the internal milestone schedule needed to hit the committed due date — the assembly or LSP scale-up milestone has already passed." style="'+BDG+F_ST['AT_RISK']+'">'+esc('BEHIND SCHEDULE')+'</span>';
       return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);
     }}).join('');
     return '<tr class="'+(grouped?'if-cgrp-mem':'')+'" style="'+bg+'">'
