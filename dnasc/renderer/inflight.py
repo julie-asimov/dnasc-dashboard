@@ -45,6 +45,11 @@ _ASM_TYPES = frozenset({'golden_gate_workorder', 'gibson_workorder'})
 _L3_TYPES = frozenset(_ASM_TYPES | {'transformation_workorder', 'transformation_offline_operation'})
 # L3 row ordering: assembly attempts → transformations → lsp → parts/inputs.
 _KIND_RANK = {'assembly': 0, 'transformation': 1, 'lsp': 2, 'parts': 3}
+# In-flight visual statuses — an attempt with any of these is still "live" and is
+# surfaced even before it has colony data (e.g. a resubmitted assembly whose
+# transformations haven't imaged yet). Dead no-work resubmissions (all CANCELED/
+# FAILED, no colonies) are still dropped.
+_ACTIVE_VS = frozenset({'RUNNING', 'READY', 'IN_PROGRESS', 'WAITING', 'BLOCKED', 'LSP_RUNNING'})
 # Design-status priority (lower wins) for rolling attempt statuses to a design verdict.
 _STATUS_RANK = {'SUCCEEDED': 0, 'RUNNING': 1, 'READY': 1, 'WAITING': 2,
                 'IN_PROGRESS': 2, 'FAILED': 3, 'CANCELED': 4, 'DRAFT': 5}
@@ -60,8 +65,10 @@ def _kind(wtype: str) -> str:
 
 
 def _pp(s) -> str:
-    """Compact a 'd8004:True, d8073:True' backbone/parts string to 'd8004, d8073'.
-    Drops parts flagged ':False' (declared but not actually used in the build)."""
+    """Compact a 'd8004:True, d8073:False' backbone/parts string to 'd8004, d8073'.
+    The ':True/:False' is the BIOS `available` (inventory) flag — it does NOT define
+    what the design is, so EVERY declared component is shown (a design is the design
+    whether or not its parts are on hand). Only strips the flag suffix."""
     if s is None or (isinstance(s, float) and pd.isna(s)):
         return ''
     out = []
@@ -69,10 +76,9 @@ def _pp(s) -> str:
         tok = tok.strip()
         if not tok:
             continue
-        pid, _, flag = tok.partition(':')
-        if flag.strip().lower() == 'false':
-            continue
-        out.append(pid.strip())
+        pid = tok.partition(':')[0].strip()
+        if pid:
+            out.append(pid)
     return ', '.join(out)
 
 
@@ -280,9 +286,11 @@ def _build_colony_rollup(base: pd.DataFrame, today: date, req_ids: set | None = 
                 csort = min((r['_csort'] for r in wo_rows), default=pd.Timestamp.max)
                 for r in wo_rows:
                     r.pop('_csort', None)
-                # only keep an attempt that produced colony data somewhere
+                # Keep an attempt that produced colony data OR is still actively in
+                # flight (a resubmitted assembly whose transformations haven't imaged
+                # yet). Drop only dead no-work resubmissions (no colonies, nothing live).
                 col = [r for r in wo_rows if r['hascol']]
-                if not col:
+                if not col and not any(r['status'] in _ACTIVE_VS for r in wo_rows):
                     continue
                 # Attempt verdict = the assembly's pipeline-computed chain_status
                 # (single source of truth shared with the tracking tab): a CANCELED
@@ -896,7 +904,12 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   // L1 colony flags = colony flags + PAST_DUE inherited from the request flags
   function colFlags(r){{var f=(r.col.cflags||[]).slice();if(r.flags.indexOf('PAST_DUE')!==-1)f.push('PAST_DUE');return f;}}
   // Numeric cell — neutral dark, right-aligned, no conditional red (item 9).
-  function num(n,low){{n=n||0;return '<span class="if-cnum'+(n===0?' if-cz':'')+'">'+n+'</span>';}}
+  function num(n){{n=n||0;return '<span class="if-cnum">'+n+'</span>';}}
+  // Real counts vs "not counted yet": a colony metric is a genuine count only when
+  // SOME metric is positive — a non-null 0 placeholder is NOT a count. Uncounted →
+  // "—"; counted → the real number, never greyed (even a genuine 0).
+  function _counted(o){{return ((o.imaged||0)+(o.pickable||0)+(o.picked||0)+(o.seq||0)+(o.tot||0)+(o.totc||0))>0;}}
+  function ccell(n,o){{return _counted(o)?num(n):_dash();}}
   // Pickable risk band for an attempt's pickable count (see legend in the toolbar):
   //   Low 0–7 (below median), Medium 8–22 (median→75th pct), High 23+ (top quartile).
   var PICK_LOW_MAX=7, PICK_MED_MAX=22;
@@ -1101,8 +1114,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+rwarn+'</td>'
-      + '<td style="'+TD+'">'+num(c.pickable)+'</td>'
-      + '<td style="'+TD+'">'+num(c.picked)+'</td>'
+      + '<td style="'+TD+'">'+ccell(c.pickable,c)+'</td>'
+      + '<td style="'+TD+'">'+ccell(c.picked,c)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(c.seq,c.tot,c.has_winner,reqSeqStatus(r),c.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(r.status)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;font-size:9px;color:#64748b;">'+fmtMDY(r.assembly)+'</td>'
@@ -1124,15 +1137,15 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     // attempt designs band each attempt row instead (the design total is a sum).
     // Zero-attempt designs (WAITING/CANCELED with no colony work) have no pickable
     // data to band — pickBand(0) would falsely read "LOW", so suppress it.
-    var band = ((d.attempts||[]).length === 1) ? pickBand(d.pickable) : '';
+    var band = ((d.attempts||[]).length === 1 && _counted(d)) ? pickBand(d.pickable) : '';
     var warn = riskBadge(designRisk(d));
     return '<tr class="if-att-row"'+click+'>'
       + '<td style="'+TD+'padding-left:20px;">'+caret+'</td>'
       + '<td style="'+TD+'" colspan="4"><span style="font-size:10px;font-weight:700;color:#334155;">Design '+(di+1)+' &middot; '+esc(d.dtype||'Design')+'</span>'+natt+parts+'</td>'
       + '<td style="'+TD+'"></td>'
       + '<td style="'+TD+'white-space:nowrap;">'+(warn||band)+'</td>'
-      + '<td style="'+TD+'">'+num(d.pickable)+'</td>'
-      + '<td style="'+TD+'">'+num(d.picked)+'</td>'
+      + '<td style="'+TD+'">'+ccell(d.pickable,d)+'</td>'
+      + '<td style="'+TD+'">'+ccell(d.picked,d)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(d.seq,d.tot,false,d.status,d.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(d.status)+win+'</td>'
       + '<td style="'+TD+'"></td>'
@@ -1150,7 +1163,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     // tab-indented so it reads as nested under the attempt.
     var pidCell = '<span style="font-size:8px;font-family:monospace;color:#94a3b8;">'+esc(String(w.wid))+'</span>';
     var c8,c9,c10,rb;
-    if (!w.hascol) {{ c8=_dash(); c9=_dash(); c10='<span style="color:#cbd5e1;">&mdash;</span>'; rb=''; }}
+    if (!_counted(w)) {{ c8=_dash(); c9=_dash(); c10='<span style="color:#cbd5e1;">&mdash;</span>'; rb=''; }}
     else {{ c8=num(w.pickable); c9=num(w.picked); c10=seqBdg(w.seq,w.totc,false,w.status,w.picked); rb=pickBand(w.pickable); }}
     return '<tr class="if-strain-row">'
       + '<td style="'+TD+'"></td>'
@@ -1176,9 +1189,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       + '<td style="'+TD+'"></td>'
       + '<td style="'+TD+'padding-left:38px;" colspan="4">'+lbl+'</td>'
       + '<td style="'+TD+'"></td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+pickBand(a.pickable)+'</td>'
-      + '<td style="'+TD+'">'+num(a.pickable)+'</td>'
-      + '<td style="'+TD+'">'+num(a.picked)+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+(_counted(a)?pickBand(a.pickable):'')+'</td>'
+      + '<td style="'+TD+'">'+ccell(a.pickable,a)+'</td>'
+      + '<td style="'+TD+'">'+ccell(a.picked,a)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(a.seq,a.tot,false,a.status,a.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(a.status)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;font-size:9px;color:#64748b;">'+fmtMDY(a.date)+'</td>'
