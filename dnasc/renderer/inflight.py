@@ -930,7 +930,13 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var atts=d.attempts||[];
     if(!atts.length) return '';
     if(d.has_winner || d.status==='SUCCEEDED' || d.status==='FULFILLED') return '';
-    var best=0; atts.forEach(function(a){{var p=a.pickable||0; if(p>best) best=p;}});
+    // Only assess pickable-band risk over attempts that have ACTUAL colony counts.
+    // An uncounted attempt (nothing imaged yet) has pickable 0, which is NOT "low
+    // pickable" — it just hasn't been counted, so it must not read as HIGH RISK.
+    // No counted attempt yet → no risk verdict.
+    var counted=atts.filter(_counted);
+    if(!counted.length) return '';
+    var best=0; counted.forEach(function(a){{var p=a.pickable||0; if(p>best) best=p;}});
     if(best<=PICK_LOW_MAX) return 'HIGH';
     if(best<=PICK_MED_MAX) return 'MED';
     return '';
