@@ -1243,6 +1243,11 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     window.ifBuildHead();
     var tbody = document.getElementById('inflight-tbody');
     if (!tbody) return;
+    // Preserve scroll position: rebuilding tbody.innerHTML resets the scroll
+    // container to the top, so toggling a dropdown would jump the page. Capture the
+    // scroll offset here and restore it after the rebuild.
+    var _scEl = document.getElementById('tab-inflight');
+    var _scTop = _scEl ? _scEl.scrollTop : 0;
     var COLONY = _view === 'colony', NCOL = COLONY ? 12 : 13;
     var expOrder = [], buckets = {{}};
     _IFD.forEach(function(r) {{
@@ -1283,6 +1288,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     }});
     if (!html) html = '<tr><td colspan="'+NCOL+'" style="padding:20px;color:#6b7280;font-size:11px;text-align:center;">No matching requests.</td></tr>';
     tbody.innerHTML = html;
+    if (_scEl) _scEl.scrollTop = _scTop;   // restore scroll — toggling no longer jumps the page
   }};
 
   // ── Sort — sorts _IFD then re-renders (group headers rebuild correctly) ───
