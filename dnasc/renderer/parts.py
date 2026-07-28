@@ -108,14 +108,55 @@ def _render() -> str:
     flagged = set(out["Part"].astype(str))
 
     # --- "already started?" refill signal: wells tagged REFILL_* in PROCESS_ID ---
+    # A refill process is SHORT: measured over all 299 refill processes in the pull, the span from
+    # first to last well is median 3d, p90 6d, p95 9d — and the 384 Echo stock well is created
+    # INSIDE the process (median lag from last refill well to Echo well: -1d). So a refill older
+    # than the window below is NOT in flight: it finished, and whether it worked is answerable
+    # from the stock it left behind. Reporting "batch in progress" for an 80-day-old refill (as
+    # this did before) sent people to wait on a batch that had already died.
+    _REFILL_INFLIGHT_DAYS = 14          # p95 span (9d) + margin for NGS turnaround
+    # Furthest stage reached, in real refill order (streak → overnights → miniprep → quant →
+    # NGS confirm → rearray into the 384 Echo source). Rank by the LAST stage reached, never by
+    # the newest well's protocol — a process touches several plates on the same day, so
+    # "newest well" picks an arbitrary one and mislabels the stage.
+    _STAGE_RANK = {"Overnight Culture":1, "Bank Overnights":1, "Miniprep":2, "DNA Quant":3,
+                   "Sequence Plasmid":4, "NGS Sequence Confirmation":4, "Rearray 96 to 384":5}
+    _STAGE_LABEL = {1:"overnight culture", 2:"miniprep", 3:"DNA quant",
+                    4:"NGS (sequencing)", 5:"rearray into 384 Echo"}
     _refill = apd[apd["PROCESS_ID"].astype(str).str.contains("REFILL", case=False, na=False)].copy()
     _refill["age"]=(now-_refill["CREATED_AT"]).dt.days
+
     def refill_status(part):
-        w=_refill[_refill["STOCK_ID"]==str(part)].sort_values("CREATED_AT", ascending=False)
-        if w.empty: return ("none", None, None, None)
-        x=w.iloc[0]; age=int(x["age"]) if pd.notna(x["age"]) else None
-        proto=str(x["PLATE_PROTOCOL"])
-        return ("ngs" if "NGS" in proto else "pre_ngs", age, str(x["PROCESS_ID"]), proto)
+        """State of the most recent refill batch for `part`.
+
+        Returns a dict: state = 'inflight' | 'done' | 'none'.
+          inflight — young enough to still be running; `stage` is the furthest stage reached.
+          done     — the batch has run out its clock. `landed` says what it left in the Echo
+                     plate, so the UI can say "produced nothing usable" instead of "in progress".
+        """
+        w=_refill[_refill["STOCK_ID"]==str(part)]
+        if w.empty: return {"state":"none"}
+        proc=str(w.sort_values("CREATED_AT").iloc[-1]["PROCESS_ID"])   # newest process for this part
+        g=w[w["PROCESS_ID"].astype(str)==proc]
+        age=int((now-g["CREATED_AT"].max()).days) if pd.notna(g["CREATED_AT"].max()) else None
+        rank=max((_STAGE_RANK.get(str(p),0) for p in g["PLATE_PROTOCOL"]), default=0)
+        stage=_STAGE_LABEL.get(rank, "started")
+        if age is not None and age <= _REFILL_INFLIGHT_DAYS:
+            return {"state":"inflight","age":age,"proc":proc,"stage":stage,"rank":rank}
+        # Finished. How much of what it put in the 384 Echo source plate is still usable?
+        # Only ever report the CURRENT state of those wells — never why they got that way. LIMS
+        # overwrites VOLUME_UL in place, so an empty/discarded well is indistinguishable from a
+        # batch that was consumed normally and one that never worked. Either way what matters
+        # operationally is the same: nothing is left, so a new batch is needed.
+        e=apd[(apd["PROCESS_ID"].astype(str)==proc) & (apd["STOCK_ID"]==str(part))
+              & (apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)]
+        landed=None
+        if len(e):
+            vol=pd.to_numeric(e["VOLUME_UL"],errors="coerce"); cc=pd.to_numeric(e["CONCENTRATION_NGUL"],errors="coerce")
+            disc=e["PLATE_LOCATION_BOX"].fillna("").astype(str).str.upper().str.contains("DISCARD")
+            landed={"wells":int(len(e)),"usable":int(((vol>25)&(cc>5)&~disc).sum()),
+                    "gone":int((disc|(vol<=0)).sum())}
+        return {"state":"done","age":age,"proc":proc,"stage":stage,"rank":rank,"landed":landed}
 
     # --- "already ordered?" vendor-order signal (Reorder) — from the pull ---
     _ord = r["ord_df"].copy()
@@ -268,7 +309,15 @@ def _render() -> str:
         rows.sort(key=lambda rr:(rr[6] is None, rr[6] if rr[6] is not None else 0))
         return rows
 
+    _ma_cache = {}
     def make_avail_wells(part):
+        # memoized: called per row, again by flip_gain, and again by the Make Available section —
+        # each call is a full scan of the 1.1M-row well frame.
+        if part in _ma_cache: return _ma_cache[part]
+        _ma_cache[part] = _make_avail_wells(part)
+        return _ma_cache[part]
+
+    def _make_avail_wells(part):
         win = 730 if part.startswith("o") else 200
         s = apd[(apd["STOCK_ID"]==part) & (apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)
                 & (apd["SEQ_CONFIRMED"]=="True") & (apd["AVAILABLE"]!="True")]
@@ -288,6 +337,44 @@ def _render() -> str:
     def newest_age(part):
         ages=[a for *_,a in avail_wells(part) if a is not None]
         return min(ages) if ages else None
+
+    # ---- reactions math: what flipping the make-available wells ON is actually worth ----
+    # Same formula and same well set the pull uses for "Reactions Available" (verified to
+    # reproduce it exactly for every part in the pull), so the two numbers are comparable:
+    # rxns = (volume - dead volume) * concentration / (weight * sequence length * 6e9).
+    _WEIGHT, _DEAD_VOL = 1e-12, 20
+    _FRESH_DAYS = 200
+
+    def _rxns(sub):
+        sl = pd.to_numeric(sub["DPART_SEQUENCE_LENGTH"], errors="coerce").where(
+             sub["STOCK_ID"].astype(str).str.startswith("d"),
+             pd.to_numeric(sub["SEQUENCE_LENGTH"], errors="coerce"))
+        v = pd.to_numeric(sub["VOLUME_UL"], errors="coerce")
+        c = pd.to_numeric(sub["CONCENTRATION_NGUL"], errors="coerce")
+        return (((v - _DEAD_VOL) * c) / (_WEIGHT * sl * 6e9)).clip(lower=0).fillna(0)
+
+    _flip_cache = {}
+    def flip_gain(part, have):
+        """(n_wells, rxns gained, total after flipping) for the make-available wells.
+
+        Anchored on the pull's `have` and adding the delta, so the panel can never disagree
+        with the "on hand" number it prints right above it.
+        """
+        part = str(part)
+        key = (part, int(have))
+        if key in _flip_cache: return _flip_cache[key]
+        ma = make_avail_wells(part)
+        if not ma:
+            _flip_cache[key] = (0, 0, int(have)); return _flip_cache[key]
+        ids = {int(rr[2]) for rr in ma}
+        base = apd[(apd["STOCK_ID"]==part) & (apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)
+                   & (apd["AVAILABLE"]=="True")
+                   & (apd["CREATED_AT"] > (now - pd.Timedelta(days=_FRESH_DAYS)))]
+        b = float(_rxns(base).sum())
+        f = float(_rxns(apd[apd["WELL_ID"].isin(ids)]).sum())
+        gain = int(b + f) - int(b)
+        _flip_cache[key] = (len(ma), gain, int(have) + gain)
+        return _flip_cache[key]
 
     _fmt=lambda v: "?" if pd.isna(v) else (f"{v:g}" if isinstance(v,(int,float)) else str(v))
     ST_CHIP={"RUNNING":"#1d4ed8","WAITING":"#b45309","READY":"#15803d","BLOCKED":"#b91c1c"}
@@ -311,14 +398,23 @@ def _render() -> str:
 
     # ---- build detail panel HTML for one part ----
     def detail_html(x):
-        part=str(x["Part"]); act=x["Action Suggested"]
+        part=str(x["Part"]); act=disp_act(x)
         have=int(x["Reactions Available"]); need=int(x["Reactions Required"])
         win = 730 if part.startswith("o") else 200
         nage = newest_age(part)
         is_ctrl = part in ctrl_related
-        target = 96 if is_ctrl else need + max(10, need)   # buffer = min 10, else 2× (buffer == need over 10)
+        target = _target(x)      # buffer = min 10, else 2× (buffer == need over 10); 96 for controls
+        n_flip, flip_rxns, after_flip = flip_gain(part, have)
 
-        if act=="Refill":
+        if act=="Mark available" and not n_flip:
+            # Pull flagged wells but none pass the 4B-fridge / volume / freshness rules used here.
+            situation, guidance, tone = "Below target", "", "#92400e"
+        elif act=="Mark available":
+            situation = f"Below target — but {n_flip} seq-confirmed well{'s' if n_flip!=1 else ''} already in the fridge"
+            guidance  = (f"Flip {n_flip} well{'s' if n_flip!=1 else ''} ON in LIMS (well IDs below) "
+                         f"→ {after_flip}/{target} rxns. No streak or batch needed.")
+            tone      = "#1d4ed8"
+        elif act=="Refill":
             gp=str(x.get("Glycerol Plate","") or ""); gw=str(x.get("Glycerol Well","") or "")
             gl=str(x.get("Glycerol Location","") or ""); cs=str(x.get("Cell Strain","") or "")
             src=" · ".join(b for b in [f"plate {gp}" if gp not in("","nan") else "", f"well {gw}" if gw not in("","nan") else "", f"({gl})" if gl not in("","nan","None") else "", cs if cs not in("","nan") else ""] if b)
@@ -333,10 +429,27 @@ def _render() -> str:
         blocks=[]
         pct = max(3, min(100, int(round(100*have/target)))) if target else 0
         note = f"{need} needed + {max(10, need)} buffer" if not is_ctrl else "control buffer"
+        # What the shortfall really is: buffer-only shortfalls are not the same urgency as a
+        # part live builds are waiting on.
+        if not is_ctrl and need == 0:
+            note += " · nothing live needs it — shortfall is buffer only"
+        # The post-flip number, on the same line as "on hand", so the free stock can't be missed.
+        flip_line = ""
+        if n_flip:
+            fpct = max(3, min(100, int(round(100*after_flip/target)))) if target else 0
+            flip_line = (f'<div style="font-size:11px;color:#1d4ed8;margin-top:2px">&uarr; <b>{after_flip}</b> '
+                         f'after flipping {n_flip} well{"s" if n_flip!=1 else ""} ON '
+                         f'(+{flip_rxns} rxns) — {"clears" if after_flip>=target else "still short of"} '
+                         f'the target of {target}</div>')
+        # bar = what's available now (tone) + what a flip would add (light blue), 2px gap between
+        seg = f'<span class="d-seg" style="width:{pct}%;background:{tone}"></span>'
+        if n_flip and fpct > pct:
+            seg += (f'<span class="d-seg" style="width:{fpct-pct}%;background:#93c5fd;margin-left:2px" '
+                    f'title="reachable by flipping {n_flip} well(s) ON"></span>')
         blocks.append(_block("Status",
             f'<div class="d-stat"><span class="d-have">{have}</span><span class="d-of"> on hand · target {target}</span>'
             f'<span class="d-note">({note})</span></div>'
-            f'<div class="d-barwrap"><div class="d-bar" style="width:{pct}%;background:{tone}"></div></div>'
+            f'<div class="d-barwrap">{seg}</div>{flip_line}'
             f'<div class="d-sit" style="color:{tone}">{html.escape(situation)}</div>'))
         wl=avail_wells(part)
         if wl:
@@ -379,14 +492,34 @@ def _render() -> str:
             blocks.append(_block("DNA to transform", cap + (_dna_tbl("384",ds["384"]) + '<div style="height:6px"></div>' + _dna_tbl("96",ds["96"]) if n_total else "")))
         if guidance:
             blocks.append(_block("Do this", f'<div class="d-do">{html.escape(guidance)}</div>'))
-        if act in ("Refill","Transform"):
-            st,age,proc,proto = refill_status(part)
-            if st=="pre_ngs":
-                prog=f'<span style="color:#15803d;font-weight:700">⟳ Batch in progress</span> — plate map up, at <b>{html.escape(proto)}</b> (pre-NGS), {age}d ago · {html.escape(proc)}'
-            elif st=="ngs":
-                prog=f'<span style="color:#15803d;font-weight:700">⟳ Batch in progress</span> — at <b>NGS</b> (sequencing), {age}d ago · {html.escape(proc)}'
+        if act in ("Refill","Transform","Mark available"):
+            rs = refill_status(part)
+            if rs["state"]=="inflight":
+                prog=(f'<span style="color:#15803d;font-weight:700">⟳ Batch in progress</span> — furthest stage '
+                      f'<b>{html.escape(rs["stage"])}</b>, last activity {rs["age"]}d ago · {html.escape(rs["proc"])}')
+            elif rs["state"]=="done":
+                ld=rs.get("landed")
+                # A refill runs its course in ~3-9 days (median 3, p95 9 across the pull), and it
+                # creates its 384 Echo well inside the process — so past the window it is over.
+                # Report only what is left of it today; the snapshot cannot tell a batch that was
+                # used up from one that never worked, so it says neither.
+                prog=(f'<span style="color:#9ca3af">Last refill</span> — reached '
+                      f'<b>{html.escape(rs["stage"])}</b>, {rs["age"]}d ago · {html.escape(rs["proc"])}')
+                if ld:
+                    prog+=(f'<div style="color:#6b7280;margin-top:2px">put {ld["wells"]} well'
+                           f'{"s" if ld["wells"]!=1 else ""} in the 384 Echo source · '
+                           f'<b>{ld["usable"]}</b> still usable today'
+                           + (f' ({ld["gone"]} empty or discarded)' if ld["gone"] else "") + '</div>')
+                else:
+                    prog+='<div style="color:#6b7280;margin-top:2px">never reached the 384 Echo source plate</div>'
+                if not (n_flip and after_flip>=target):
+                    prog+='<div style="color:#be185d;margin-top:2px">→ needs a new batch</div>'
             else:
                 prog='<span style="color:#be185d;font-weight:700">⚠ Needs batching</span> <span style="color:#9ca3af">— no refill on record</span>'
+            if n_flip and after_flip>=target:
+                prog=(f'<span style="color:#1d4ed8;font-weight:700">No batch needed</span> '
+                      f'<span style="color:#6b7280">— flipping {n_flip} well{"s" if n_flip!=1 else ""} ON '
+                      f'reaches {after_flip}/{target}</span><div style="margin-top:3px">{prog}</div>')
             blocks.append(_block("In progress?", f'<div style="font-size:11px">{prog}</div>'))
         elif act=="True":
             o=order_status(part)
@@ -422,18 +555,52 @@ def _render() -> str:
     out["_o"]=out["Action Suggested"].map(lambda a: order.get(a,3 if not str(a).startswith("Mark") else 1))
     out["_sec"]=out["Part"].astype(str).map(section_of)
 
-    def batch_cell(part, act):
-        if act in ("Refill","Transform"):
-            st,age,proc,proto = refill_status(part)
-            # pre_ngs (overnight/miniprep) AND ngs (sequencing) are both a live batch in flight;
-            # only "none" (no refill on record) actually needs a new batch.
-            if st in ("pre_ngs","ngs"): return '<span style="color:#15803d;font-weight:700">⟳ batch in progress</span>'
-            return '<span style="color:#be185d;font-weight:700">⚠ needs batch</span>'
+    def batch_state(part, need, is_ctrl):
+        """The batch half of the 'Batch / order' cell — never claims a dead batch is running.
+
+        A shortfall that is pure buffer (nothing live needs the part) is called that, so it
+        doesn't read as urgent as a part that real builds are waiting on.
+        """
+        rs = refill_status(part)
+        urgent = bool(need > 0 or is_ctrl)
+        col = "#be185d" if urgent else "#6b7280"
+        pre = "" if urgent else '<span style="color:#9ca3af">buffer only · </span>'
+        if rs["state"] == "inflight":
+            return (f'<span style="color:#15803d;font-weight:700">⟳ batch in progress</span>'
+                    f'<span style="color:#9ca3af"> · {html.escape(rs["stage"])}, {rs["age"]}d</span>')
+        if rs["state"] == "done":
+            ld = rs.get("landed")
+            tail = (f' · last batch {rs["age"]}d ago, nothing left from it'
+                    if ld and ld["usable"] == 0 else f' · last batch {rs["age"]}d ago')
+            return (f'{pre}<span style="color:{col};font-weight:700">⚠ needs batch</span>'
+                    f'<span style="color:#9ca3af">{tail}</span>')
+        return f'{pre}<span style="color:{col};font-weight:700">⚠ needs batch</span>'
+
+    def batch_cell(x):
+        part=str(x["Part"]); act=x["Action Suggested"]
         if act=="True":
             o=order_status(part)
             if o and o["active"]: return f'<span style="color:#15803d">on order · {html.escape(str(o["vendor"]))}</span>'
             return '<span style="color:#be185d;font-weight:700">⚠ needs order</span>'
-        return '<span style="color:#9ca3af">—</span>'
+        # "Mark ..." rows come from the pull already knowing wells can be flipped ON — they get
+        # the same treatment as Refill/Transform, so the cell still says what to do. Before, they
+        # fell straight through to "—" and the flip wells only appeared inside the open panel.
+        if act not in ("Refill","Transform") and not str(act).startswith("Mark"):
+            return '<span style="color:#9ca3af">—</span>'
+        have=int(x["Reactions Available"]); need=int(x["Reactions Required"])
+        is_ctrl=str(part) in ctrl_related
+        tgt=_target(x)
+        n,gain,after = flip_gain(part, have)
+        # Wells already sitting in the fridge, seq-confirmed, that only need the LIMS available
+        # flag flipped ON — free stock. Say so BEFORE asking for a batch: this is why a part
+        # could read "needs batch" while its own panel listed wells ready to flip.
+        if n:
+            flip=(f'<span style="color:#1d4ed8;font-weight:700">&uarr; flip {n} well{"s" if n!=1 else ""} ON</span>'
+                  f'<span style="color:#9ca3af"> &rarr; {after}/{tgt} rxns</span>')
+            if after >= tgt:
+                return flip + '<div style="color:#15803d;font-size:10px">covers target — no batch needed</div>'
+            return flip + f'<div style="font-size:10px;margin-top:1px">{batch_state(part,need,is_ctrl)}</div>'
+        return batch_state(part, need, is_ctrl)
 
     def repeat_badge(demand):
         d=int(demand) if pd.notna(demand) else 0
@@ -442,9 +609,20 @@ def _render() -> str:
         else:       lvl,bg,fg="LOW","#f0fdf4","#15803d"
         return f'<span title="feeds {d} downstream builds" style="background:{bg};color:{fg};font-size:8px;font-weight:700;padding:1px 5px;border-radius:8px;margin-left:5px">{lvl}</span>'
 
+    def disp_act(x):
+        """Action to SHOW. If flipping the make-available wells ON already clears the target,
+        the job is 'Mark available', not 'Refill' — the pull can't reach this verdict because it
+        picks the action from raw demand while the target (need + buffer) is computed here."""
+        act=x["Action Suggested"]
+        if str(act).startswith("Mark"): return "Mark available"    # the pull already reached it
+        if act in ("Refill","Transform"):
+            n,_g,after = flip_gain(str(x["Part"]), int(x["Reactions Available"]))
+            if n and after >= _target(x): return "Mark available"
+        return act
+
     _rowstate = {"i": 0}
     def row_html(i, x):
-        part=str(x["Part"]); act=x["Action Suggested"]
+        part=str(x["Part"]); act=disp_act(x)
         age=None
         bb=builds_for(part)
         if bb: summary=f'{bb[0][0]} ({bb[0][2]})'+(f' +{len(bb)-1} more' if len(bb)>1 else '')
@@ -457,7 +635,7 @@ def _render() -> str:
                 f'<td style="font-family:monospace;font-weight:700">{part}{repeat_badge(x["Reactions Required"])}</td>'
                 f'<td style="text-align:center">{int(x["Reactions Available"])} / <strong style="color:#b45309;font-size:13px">{int(x["Reactions Required"])}</strong></td>'
                 f'<td>{act_badge(act,age)}</td>'
-                f'<td style="font-size:11px">{batch_cell(part,act)}</td>'
+                f'<td style="font-size:11px">{batch_cell(x)}</td>'
                 f'<td style="font-size:11px;color:#374151">{html.escape(summary)}</td></tr>'
                 f'<tr id="d{i}" style="display:none"><td></td><td colspan="5">{detail_html(x)}</td></tr>')
 
@@ -610,8 +788,20 @@ def _render() -> str:
                        f'(LIMS data error) &middot; find, verify, and discard or relabel &middot; excluded from all Echo-source lists</span>'
                        f'</div>{ebody}</div>')
 
-    # "Make Available" removed — can't confirm these wells aren't partner-associated or rule-compliant.
-    extra = err_section + wells_section("mk_un","Make Unavailable · 384 Echo source",
+    # Make Available — the flip-ON wells for ONLY the parts listed in this tab. A global
+    # make-available list was pulled once before because there was no way to tell whether an
+    # arbitrary well was partner-associated; scoping it to the parts we are actively restocking
+    # keeps that bound: every well here is one already shown in that part's own row.
+    mk_avail = []
+    for _x in _pa_rows + _nb_rows:
+        for _p, _co, _wid, _loc, _v, _cc, _a in make_avail_wells(str(_x["Part"])):
+            tok = f"well{int(_wid)}"
+            if tok not in mk_avail: mk_avail.append(tok)
+    extra = err_section + wells_section("mk_av","Make Available · 384 Echo source",
+              "seq-confirmed Echo source wells for the parts listed above that are &gt;25µL, &gt;5 ng/µL, fresh, and "
+              "not yet available → flip ON in LIMS · <b>these are the refills</b>: flipping them is usually enough "
+              "to reach target without batching","#1d4ed8", mk_avail, show_plates=False)
+    extra += wells_section("mk_un","Make Unavailable · 384 Echo source",
               "available Echo source wells that are ≤25µL (near-empty), past expiration (200d), OR &lt;5 ng/µL (too dilute) → flip OFF in LIMS","#be185d", clean_wells, show_plates=False)
     extra += wells_section("mk_un_mp","Make Unavailable · 96-well miniprep stock",
               "available miniprep-stock wells (96-well) past expiration (200d) → flip OFF in LIMS","#9d174d", mp_wells, show_plates=False)
@@ -701,9 +891,13 @@ def _render() -> str:
     extra += trash_section("trash_dp","Trash — dPart stock plates","#0891b2","200 days", exp_by_type["dPart"])
     extra += trash_section("trash_sp","Trash — 384 rearray with synparts","#15803d","200 days", exp_by_type["SynPart"])
 
-    _n_refill = int((out["Action Suggested"]=="Refill").sum())
-    _n_xform  = int((out["Action Suggested"]=="Transform").sum())
-    _n_nosrc  = int((out["Action Suggested"]=="True").sum())
+    # Overview counts use the DISPLAYED action, so the cards can't disagree with the table
+    # (a part whose flip-ON wells already cover the target counts as Mark available, not Refill).
+    _disp = [disp_act(x) for _,x in out.iterrows()]
+    _n_flip   = sum(1 for a in _disp if a=="Mark available")
+    _n_refill = sum(1 for a in _disp if a=="Refill")
+    _n_xform  = sum(1 for a in _disp if a=="Transform")
+    _n_nosrc  = sum(1 for a in _disp if a=="True")
     _n_trash  = (len(dispose) + len(exhausted)
                  + sum(len(exp_by_type[t]) for t in ("Plasmid","dPart","SynPart")))
 
@@ -764,7 +958,8 @@ def _render() -> str:
  #tab-parts table.detail td.d-cell{{padding:10px 14px;border-bottom:1px solid #e7e3f2;vertical-align:top}}
  #tab-parts .d-stat{{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}}
  #tab-parts .d-have{{font-size:22px;font-weight:800}} #tab-parts .d-of{{font-size:12px;color:#374151}} #tab-parts .d-note{{font-size:11px;color:#9ca3af}}
- #tab-parts .d-barwrap{{height:6px;background:#eceaf3;border-radius:4px;margin:6px 0 4px;max-width:320px;overflow:hidden}} #tab-parts .d-bar{{height:100%;border-radius:4px}}
+ #tab-parts .d-barwrap{{height:6px;background:#eceaf3;border-radius:4px;margin:6px 0 4px;max-width:320px;overflow:hidden;display:flex}} #tab-parts .d-bar{{height:100%;border-radius:4px}}
+ #tab-parts .d-seg{{height:6px;border-radius:4px;display:inline-block}}
  #tab-parts .d-sit{{font-size:12px;font-weight:600}}
  #tab-parts .d-tbl{{font-size:11px;border-collapse:collapse}} #tab-parts .d-tbl td{{border:1px solid #d8d4e6;padding:3px 9px;color:#374151;white-space:nowrap}}
  #tab-parts .d-tbl tr:first-child td{{background:#f3f1fa}}
@@ -780,6 +975,7 @@ def _render() -> str:
 <p>click any part for detail</p>
 <div style="position:absolute;top:14px;right:20px;font-size:11px;font-weight:700;color:#1d4ed8;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:4px 11px"><span style="color:#93a5c9;letter-spacing:.04em">PARTS DATA PULLED</span> {now_et:%Y-%m-%d %-I:%M %p} ET</div></div>
 <div class="ov">
+  <div class="ovc"><div class="ovn" style="color:#1d4ed8">{_n_flip}</div><div class="ovl">Flip wells ON</div></div>
   <div class="ovc"><div class="ovn" style="color:#92400e">{_n_refill}</div><div class="ovl">Refill</div></div>
   <div class="ovc"><div class="ovn" style="color:#c2410c">{_n_xform}</div><div class="ovl">Transform</div></div>
   <div class="ovc"><div class="ovn" style="color:#be185d">{_n_nosrc}</div><div class="ovl">Reorder</div></div>
