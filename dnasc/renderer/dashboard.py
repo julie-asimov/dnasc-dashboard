@@ -4201,7 +4201,7 @@ def render_all_projects_dashboard(
             html += f"""
                 <details>
                     <summary class="group-header in-progress">
-                        <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''}{f' - 🔬 {count_asm_review} ASM Review' if count_asm_review > 0 else ''}{f' - 🏆 {count_seq_winner} Seq Winner' if count_seq_winner > 0 else ''}{f' - ⏳ {count_order_pending} Order Pending' if count_order_pending > 0 else ''}{f' - 🚨 {count_antibiotic_mismatch} Antibiotic Mismatch' if count_antibiotic_mismatch > 0 else ''})
+                        <span class="group-arrow">▶</span> Planned / In-Progress ({len(active_req_list)}{f' - ⚠️ {count_stalled} Stalled' if count_stalled > 0 else ''}{f' - 🔬 {count_asm_review} ASM Review' if count_asm_review > 0 else ''}{f' - 🏆 {count_seq_winner} Seq Winner' if count_seq_winner > 0 else ''}{f' - ⏳ {count_order_pending} Order Pending' if count_order_pending > 0 else ''}{f' - 🚨 {count_antibiotic_mismatch} Antibiotic Mismatch' if count_antibiotic_mismatch > 0 else ''}{f' - ⚠️ {count_dual_antibiotic} Dual Antibiotic' if count_dual_antibiotic > 0 else ''})
                     </summary>"""
             _active_parts = []
             for rid, r_df in active_req_list:
