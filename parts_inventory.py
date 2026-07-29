@@ -1740,12 +1740,27 @@ FROM bios__src.ngsworkorder nw
 JOIN bios__src.workorder wo ON wo.id = nw.id
 WHERE wo.deleted_at IS NULL AND nw.well_id IS NOT NULL
 """
+    # PCR workorder history per product. A dPart is made in-house by PCR — there is no dPart
+    # synthesis workorder type — so "is a PCR queued, and how did the last one go" is the dPart
+    # equivalent of the vendor-order question Q_ORD answers for plasmids/oligos/synparts. Q_WOD
+    # only carries OPEN workorders, so closed outcomes (a PCR that FAILED yesterday) need this.
+    Q_PCR = """
+SELECT JSON_VALUE(PCR.product,'$.name') AS NAME, wo.status AS STATUS,
+       wo.created_at AS CREATED, wo.updated_at AS UPDATED
+FROM bios__src.workorder wo
+JOIN bios__src.pcrworkorder PCR ON PCR.id = wo.id
+WHERE wo.deleted_at IS NULL
+  AND (wo.status IN ('RUNNING','WAITING','READY','BLOCKED')
+       OR wo.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 730 DAY))
+"""
     wod = client.query(Q_WOD).to_dataframe()
     blk = client.query(Q_BLK).to_dataframe()
     succ_names = set(client.query(Q_SUCC).to_dataframe()["p"].dropna())
     ordf = client.query(Q_ORD).to_dataframe()
     ngs = client.query(Q_NGS).to_dataframe()
-    return {"wod": wod, "blk": blk, "blk_succ_names": succ_names, "ord": ordf, "ngs": ngs}
+    pcr = client.query(Q_PCR).to_dataframe()
+    return {"wod": wod, "blk": blk, "blk_succ_names": succ_names, "ord": ordf,
+            "ngs": ngs, "pcr": pcr}
 
 
 def run_parts_inventory() -> dict:
@@ -1831,6 +1846,7 @@ def run_parts_inventory() -> dict:
         "blk_succ_names": _tab["blk_succ_names"],
         "ord_df": _tab["ord"],
         "ngs_df": _tab["ngs"],
+        "pcr_df": _tab["pcr"],
         "generated_at": now,
     }
 

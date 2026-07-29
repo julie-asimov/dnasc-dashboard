@@ -70,22 +70,11 @@ def _render() -> str:
     out = out[~out["Part"].astype(str).str.startswith("o")].reset_index(drop=True)
 
     # All workorder inputs come from the PULL (parts_result.pkl) — the render does ZERO BigQuery.
-    import json as _json
     wod = r["wod_df"]                                  # active GG/Gibson/PCR workorders
     _blk = r["blk_df"]                                 # blocked workorder queue
-    _succ_names = set(r.get("blk_succ_names") or set())  # products with a SUCCEEDED maker
 
-    def _inp_names(pj, bj):
-        ns=[]
-        for j,single in ((pj,False),(bj,True)):
-            if j is None or (isinstance(j,float)): continue
-            try: d=_json.loads(j)
-            except Exception: continue
-            for it in ([d] if single else (d or [])):
-                if isinstance(it,dict) and it.get("name"): ns.append(it["name"])
-        return ns
-
-    # (blocked_html is RENDERED later — after builds_for/cons exist — so it can show "what it's blocking")
+    # (blocked WOs are indexed by product LATER — after builds_for/cons exist — so each missing
+    #  part can list the workorders it is holding up. There is no standalone blocked-WO section.)
 
     TY = {"golden_gate_workorder":"GG","gibson_workorder":"Gibson","pcr_workorder":"PCR"}
     def _n(s): return [i.split(":")[0] for i in s.split(", ") if i.split(":")[0]]
@@ -209,62 +198,166 @@ def _render() -> str:
     def builds_for(part):
         return sorted(set(cons.get(part, [])))
 
-    # ---- Blocked workorder queue render (needs builds_for/cons for "what it's blocking") ----
+    # --- dParts are made by PCR, never ordered: "is a PCR queued, and how did the last one go?" ---
+    _OPEN_ST = ("RUNNING","WAITING","READY","BLOCKED")
+    _pcr = r.get("pcr_df")
+    if _pcr is not None and len(_pcr):
+        _pcr = _pcr.copy()
+        _pcr["CREATED"] = pd.to_datetime(_pcr["CREATED"], errors="coerce", utc=True)
+    def pcr_status(part):
+        """Newest PCR workorder that PRODUCES `part` (not ones consuming it)."""
+        if _pcr is None or not len(_pcr): return None
+        p=_pcr[_pcr["NAME"]==str(part)].sort_values("CREATED")
+        if p.empty: return None
+        openq=p[p["STATUS"].isin(_OPEN_ST)]
+        pick=openq.iloc[-1] if not openq.empty else p.iloc[-1]
+        age=(now-pick["CREATED"]).days if pd.notna(pick["CREATED"]) else None
+        return {"open":not openq.empty,"status":str(pick["STATUS"]),"days":age,
+                "date":pick["CREATED"],"n":int(len(p))}
+
+    _pi_cache={}
+    def pcr_inputs(part):
+        if str(part) in _pi_cache: return _pi_cache[str(part)]
+        _pi_cache[str(part)] = _pcr_inputs(part)
+        return _pi_cache[str(part)]
+
+    def _pcr_inputs(part):
+        """The template + two oligos a PCR for this dPart needs, with what's on hand.
+
+        Uses the same reaction math as the pull for each type: plasmid/dPart wells from the 384
+        Echo source (200d freshness), oligo tubes from molarity (730d, (vol-5)*nM/100k).
+        """
+        if str(part) not in dmeta.index: return []
+        row=dmeta.loc[str(part)]
+        want=[("template", row.get("DPART_TEMPLATE")),
+              ("oligo 1", row.get("OLIGO_1")), ("oligo 2", row.get("OLIGO_2"))]
+        outl=[]
+        for role,name in want:
+            # None/NaN means LIMS has no oligo_N_id on the dPart record at all. That is "we don't
+            # know what it needs", NOT "we have zero of it" — showing it as ✗ 0 rxns reads as a
+            # stock problem when it is a missing-data problem.
+            if pd.isna(name) or str(name) in ("","nan","None"):
+                outl.append((role,None,None,"")); continue
+            n=str(name)
+            if n.startswith("o"):
+                w=apd[(apd["STOCK_ID"]==n) & (apd["AVAILABLE"]=="True")
+                      & (apd["CREATED_AT"] > (now - pd.Timedelta(days=730)))]
+                if len(w):
+                    vol=pd.to_numeric(w["VOLUME_UL"],errors="coerce")
+                    mol=pd.to_numeric(w["MOLARITY_NM"],errors="coerce")
+                    rx=int(((vol-5).clip(lower=0)*mol/100_000).fillna(0).clip(lower=0).sum())
+                else: rx=0
+            else:
+                w=apd[(apd["STOCK_ID"]==n) & (apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)
+                      & (apd["AVAILABLE"]=="True")
+                      & (apd["CREATED_AT"] > (now - pd.Timedelta(days=_FRESH_DAYS)))]
+                rx=int(_rxns(w).sum()) if len(w) else 0
+            loc=""
+            if len(w):
+                _l=w["PLATE_LOCATION_BOX"].dropna().astype(str)
+                loc=_l.mode().iloc[0] if not _l.empty else ""
+            outl.append((role,n,rx,loc))
+        return outl
+
+    # ---- Blocked workorders, indexed by the product they make -------------------------------
+    # There is no standalone "Blocked workorders" section any more. A blocked WO is never its own
+    # piece of work — it is stuck because an input part does not exist — so it is listed inside
+    # the missing part that blocks it. Two missing parts can block the same WO (a Gibson short two
+    # inputs), so every total below counts DISTINCT wids.
     _TYB={"gibson_workorder":"Gibson","golden_gate_workorder":"GG","pcr_workorder":"PCR",
           "plasmid_synthesis_workorder":"PlasmidSynth","syn_part_synthesis_workorder":"SynPartSynth"}
-    _SC={"RUNNING":"#1d4ed8","WAITING":"#b45309","READY":"#15803d","BLOCKED":"#b91c1c"}
-    _BHDR='<tr><th></th><th>WO</th><th>Type</th><th>Product</th><th>Blocked inputs</th><th>Created</th><th>Note / action</th></tr>'
-    _BCOLS='<colgroup><col style="width:26px"><col style="width:9%"><col style="width:7%"><col style="width:14%"><col style="width:16%"><col style="width:9%"><col></colgroup>'
-    _bexp={}; _bi=300000   # experiment -> list of row-html
+    # Open WO statuses per final product, so a blocked WO can be checked for a twin that RUNS.
+    _open_by_prod={}
+    for _,w in wod.iterrows():
+        _open_by_prod.setdefault(str(w["PRODUCT"]),[]).append(str(w["ST"]))
+
+    def _unblocked_twin(prod):
+        """How many OTHER open workorders make this same final product and are NOT blocked.
+
+        This is the useful question, and LIMS's own "Duplicate Product" warning does not answer it:
+        that warning only compares product NAMES, so it fires whether the twin can run or is stuck
+        in the same ditch. Counting non-BLOCKED statuses here also excludes the blocked WO itself.
+        """
+        return sum(1 for s in _open_by_prod.get(prod,[]) if s!="BLOCKED")
+
+    _blk_by_prod={}
     for _,b in _blk.iterrows():
-        prod=str(b["product"] or "?")
-        inputs=_inp_names(b["parts"], b["backbone"])
-        blocked_in=[i for i in inputs if i not in _succ_names]
-        succ_wos=[w for w in (list(b["succeeded_wos"]) if b["succeeded_wos"] is not None else []) if w]
-        if succ_wos:
-            note=f'<span style="color:#15803d;font-weight:600">✓ Another design already SUCCEEDED (wo {str(succ_wos[0])[:8]}) → safe to cancel this WO</span>'
-        else:
-            _w = b["warnings"]
-            _w = list(dict.fromkeys(str(x) for x in _w)) if (_w is not None and len(_w)) else []  # dedupe, keep order
-            warns = re.sub(r"(\d+\.\d)\d+", r"\1", "; ".join(_w))   # trim absurd float precision (51.7194… → 51.7)
-            note=f'<span style="color:#b45309">{html.escape(warns) or "blocked — investigate"}</span>'
-        feeds=builds_for(prod)
-        feeds_chips="".join(f'<span class="chip" style="border-color:{_SC.get(s,"#9ca3af")};color:{_SC.get(s,"#6b7280")}">{html.escape(p)} <em>{t}·{s.lower()}</em></span>' for p,t,s,_e in feeds[:40])
-        feeds_html=(f'<div class="d-sub">Blocking {len(feeds)} downstream build{"s" if len(feeds)!=1 else ""}</div><div class="d-chips">{feeds_chips}{" +"+str(len(feeds)-40) if len(feeds)>40 else ""}</div>') if feeds else '<div style="font-size:11px;color:#9ca3af">nothing downstream depends on it right now</div>'
-        det=(f'<table class="detail">'
-             f'<tr><th class="d-lab">Working on</th><td class="d-cell"><b>{html.escape(prod)}</b> ({_TYB.get(b["type"],b["type"])}) · WO {str(b["wid"])[:8]}</td></tr>'
-             f'<tr><th class="d-lab">Blocked inputs</th><td class="d-cell" style="color:#b91c1c;font-family:monospace">{html.escape(", ".join(blocked_in) or "—")} <span style="color:#9ca3af">(no successful maker)</span></td></tr>'
-             f'<tr><th class="d-lab">All inputs</th><td class="d-cell" style="font-family:monospace;color:#6b7280">{html.escape(", ".join(inputs))}</td></tr>'
-             f'<tr><th class="d-lab">What it&#39;s blocking</th><td class="d-cell">{feeds_html}</td></tr>'
-             f'<tr><th class="d-lab">Action</th><td class="d-cell">{note}</td></tr></table>')
-        row=(f'<tr class="prow" onclick="partsToggle({_bi})" style="cursor:pointer">'
-             f'<td style="width:18px;color:#9ca3af" id="c{_bi}">▸</td>'
-             f'<td style="font-family:monospace">{str(b["wid"])[:8]}</td>'
-             f'<td>{_TYB.get(b["type"],b["type"])}</td>'
-             f'<td style="font-family:monospace;font-weight:700">{html.escape(prod)}</td>'
-             f'<td style="color:#b91c1c;font-family:monospace">{html.escape(", ".join(blocked_in) or "—")}</td>'
-             f'<td style="white-space:nowrap">{b["created"]}</td><td style="font-size:11px">{note}</td></tr>'
-             f'<tr id="d{_bi}" style="display:none"><td></td><td colspan="6">{det}</td></tr>')
-        _bexp.setdefault(str(b["experiment"] or "— no experiment —"),[]).append(row)
-        _bi+=1
-    blocked_html=""
-    if len(_blk):
-        _bgroups=""
-        for e in sorted(_bexp, key=lambda e:-len(_bexp[e])):
-            rows=_bexp[e]
-            _bgroups+=(f'<details class="expgrp"><summary>'
-                       f'<span class="egname">{html.escape(e)}</span>'
-                       f'<span class="egcount">{len(rows)}</span></summary>'
-                       f'<table class="ptbl">{_BCOLS}<tbody>{"".join(rows)}</tbody></table></details>')
-        blocked_html=_bgroups
+        _w = b["warnings"]
+        _w = list(dict.fromkeys(str(x) for x in _w)) if (_w is not None and len(_w)) else []  # dedupe, keep order
+        _sw=[w for w in (list(b["succeeded_wos"]) if b["succeeded_wos"] is not None else []) if w]
+        _prod=str(b["product"] or "?")
+        # Three DIFFERENT claims, never conflated:
+        #   succeeded_wos      → a WO for this product actually SUCCEEDED. The product exists.
+        #   unblocked twin     → another open WO for the same final product is running/waiting, so
+        #                        this blocked one is redundant work — the product still gets made.
+        #   "Duplicate Product" → LIMS saw two WOs with the same product name. Says nothing about
+        #                        whether either can run; only used when there is no unblocked twin.
+        _blk_by_prod.setdefault(_prod,[]).append({
+            "wid":str(b["wid"]), "type":_TYB.get(b["type"],str(b["type"])),
+            "product":_prod, "created":str(b["created"]),
+            "exp":str(b["experiment"] or "— no experiment —"),
+            "dup":any("Duplicate Product" in x for x in _w), "succ":_sw,
+            "twin":_unblocked_twin(_prod),
+            "warns":[x for x in _w if "Duplicate Product" not in x]})
+    _blk_all={w["wid"]:w for _lst in _blk_by_prod.values() for w in _lst}
+
+    def blocked_wos_for(part):
+        """The BLOCKED workorders this missing part is holding up (its direct consumers)."""
+        seen={}
+        for prod,_t,st,_e in builds_for(part):
+            if st!="BLOCKED": continue
+            for w in _blk_by_prod.get(prod,[]): seen[w["wid"]]=w
+        return sorted(seen.values(), key=lambda w:(w["product"],w["wid"]))
+
+    def _wo_note(w):
+        """Why this blocked WO is here, and whether it needs its own action."""
+        if w["succ"]:
+            return ('<span style="color:#15803d;font-weight:600">✓ already produced by wo '
+                    f'{html.escape(str(w["succ"][0])[:8])} → safe to cancel</span>')
+        if w["twin"]:
+            return ('<span style="color:#b45309;font-weight:600">other unblocked WO for the same '
+                    'final product</span><span style="color:#6b7280"> — that one can run, so this '
+                    'one is redundant → cancel it</span>')
+        if w["dup"]:
+            return ('<span style="color:#b45309;font-weight:600">second WO for the same final '
+                    'product</span><span style="color:#6b7280"> — but it is blocked too, so '
+                    'neither can run yet</span>')
+        return '<span style="color:#6b7280">waiting on this part — no action of its own</span>'
+
+    def _wo_tbl(wos):
+        """Static table of blocked WOs (no nested toggles — it lives inside an open panel)."""
+        hdr=('<tr><td><b>WO</b></td><td><b>Type</b></td><td><b>Making</b></td>'
+             '<td><b>Created</b></td><td><b>Status / note</b></td></tr>')
+        rws=""
+        for w in wos:
+            note=_wo_note(w)
+            if w["warns"]:
+                # trim absurd float precision (Tm 51.7194… → 51.7)
+                _wt=re.sub(r"(\d+\.\d)\d+", r"\1", "; ".join(w["warns"]))
+                note+=(f'<div style="color:#b45309;font-size:10px;margin-top:2px">'
+                       f'{html.escape(_wt)}</div>')
+            rws+=(f'<tr><td style="font-family:monospace">{html.escape(w["wid"][:8])}</td>'
+                  f'<td>{html.escape(w["type"])}</td>'
+                  f'<td style="font-family:monospace;font-weight:700">{html.escape(w["product"])}</td>'
+                  f'<td style="white-space:nowrap">{html.escape(w["created"])}</td>'
+                  f'<td style="font-size:11px">{note}</td></tr>')
+        return f'<table class="d-tbl"><tbody>{hdr}{rws}</tbody></table>'
 
     def typ(pt): return "Plasmid" if pt.startswith("pAI") else ("Oligo" if pt.startswith("o") else "dPart")
     ST_COLOR = {"RUNNING":"#1d4ed8","WAITING":"#92400e","READY":"#15803d","BLOCKED":"#b91c1c"}
     def st_pill(s):
         cc = ST_COLOR.get(s, "#6b7280")
         return f'<span style="font-size:9px;font-weight:700;color:{cc}">{s}</span>'
-    def act_badge(a, age=None):
-        if str(a).startswith("Mark"): lbl,bg,fg = "Mark available","#eff6ff","#1d4ed8"
+    def _no_lims_wells(part):
+        """Not one well on record for this part — LIMS has never held any of it."""
+        return not len(apd[apd["STOCK_ID"].astype(str)==str(part)])
+
+    def act_badge(a, age=None, not_in_lims=False):
+        # "Reorder" is wrong for a part LIMS has never held: there is nothing to RE-order, and the
+        # row's real state is that it isn't there at all. Say that instead of naming an action.
+        if not_in_lims: lbl,bg,fg = "Not in LIMS","#f3f4f6","#b91c1c"
+        elif a=="Make by PCR": lbl,bg,fg = "Add PCR WO","#ecfeff","#0e7490"
+        elif str(a).startswith("Mark"): lbl,bg,fg = "Mark available","#eff6ff","#1d4ed8"
         elif a=="Refill": lbl,bg,fg = "Refill","#fef3c7","#92400e"
         elif a=="Transform": lbl,bg,fg = "Transform","#fff7ed","#c2410c"
         elif a=="True":   lbl,bg,fg = "Reorder","#fff1f5","#be185d"
@@ -458,6 +551,18 @@ def _render() -> str:
             situation, guidance, tone = "Below target — top up", f"Streak from glycerol {src}" if src else "No glycerol source recorded", "#92400e"
         elif act=="Transform":
             situation, guidance, tone = "No glycerol stock — transform fresh", "Transform the plasmid DNA below → overnight → miniprep → re-stock", "#c2410c"
+        elif act=="Make by PCR":
+            _pi=[i for i in pcr_inputs(part) if i[1]]
+            _short=[i[1] for i in _pi if not i[2]]
+            _unknown=[i[0] for i in pcr_inputs(part) if not i[1]]
+            situation = "Not enough dPart stock — PCR it"
+            guidance  = ("Queue a PCR workorder for this dPart"
+                         + (f" · missing inputs: {', '.join(_short)} — sort those first" if _short
+                            else " · all known inputs on hand")
+                         + (f" · {', '.join(_unknown)} not recorded in LIMS" if _unknown else ""))
+            tone      = "#0e7490"
+        elif act=="True" and x.get("_blockedpart") and _no_lims_wells(part):
+            situation, guidance, tone = "Not in LIMS — no wells on record", "", "#b91c1c"
         elif act=="True":
             situation, guidance, tone = "No DNA on hand", "Reorder / synthesize", "#be185d"
         else:
@@ -517,6 +622,26 @@ def _render() -> str:
             blocks.append(_block(f"Make available &rarr; flip ON ({len(ma)})",
                 f'<div style="font-size:10px;color:#6b7280;margin-bottom:3px">seq-confirmed · &gt;25µL · &gt;5 ng/µL · fresh · not yet available</div>'
                 f'<table class="d-tbl"><tbody>{hdr}{rws}</tbody></table>{cb}'))
+        if act=="Make by PCR":
+            pi=pcr_inputs(part)
+            if pi:
+                hdr='<tr><td><b>Role</b></td><td><b>Part</b></td><td><b>On hand</b></td><td><b>Location</b></td></tr>'
+                rws=""
+                for role,name,rx,loc in pi:
+                    if not name:   # LIMS has no oligo/template id on the dPart record
+                        rws+=(f'<tr><td style="color:#6b7280">{role}</td>'
+                              f'<td colspan="3" style="color:#b45309">not recorded in LIMS '
+                              f'<span style="color:#9ca3af">— can&#39;t tell what this PCR needs</span></td></tr>')
+                        continue
+                    mark = ('<span style="color:#15803d">✓</span>' if rx>0
+                            else '<span style="color:#be185d">✗</span>')
+                    rws+=(f'<tr><td style="color:#6b7280">{role}</td>'
+                          f'<td style="font-family:monospace;font-weight:700">{html.escape(str(name))}</td>'
+                          f'<td>{mark} {rx} rxns</td><td>{html.escape(loc) or "—"}</td></tr>')
+                blocks.append(_block("PCR inputs",
+                    '<div style="font-size:10px;color:#6b7280;margin-bottom:3px">template + both oligos must be '
+                    'on hand to run the PCR</div>'
+                    f'<table class="d-tbl"><tbody>{hdr}{rws}</tbody></table>'))
         if act=="Transform":
             ds=dna_stock(part)
             def _dna_tbl(fmt, wells):
@@ -574,6 +699,26 @@ def _render() -> str:
                       f'<span style="color:#6b7280">— flipping {n_flip} well{"s" if n_flip!=1 else ""} ON '
                       f'reaches {after_flip}/{target}</span><div style="margin-top:3px">{prog}</div>')
             blocks.append(_block("In progress?", f'<div style="font-size:11px">{prog}</div>'))
+        elif act=="Make by PCR":
+            p=pcr_status(part)
+            if p is None:
+                prog='<span style="color:#9ca3af">No PCR workorder on record for this dPart</span>'
+            elif p["open"]:
+                _c,_ic = (("#b91c1c","⚠") if p["status"]=="BLOCKED" else ("#15803d","⟳"))
+                prog=(f'<span style="color:{_c};font-weight:700">{_ic} PCR {html.escape(p["status"])}</span> — '
+                      f'queued {p["days"]}d ago ({p["date"]:%Y-%m-%d})')
+                if p["status"]=="BLOCKED":
+                    _sh=[i[1] for i in pcr_inputs(part) if i[1] and not i[2]]
+                    prog+=('<div style="color:#b91c1c;margin-top:2px">missing '
+                           f'{html.escape(", ".join(_sh))} — sort that first</div>' if _sh else
+                           '<div style="color:#6b7280;margin-top:2px">inputs look present — check the WO warnings</div>')
+            else:
+                _c="#be185d" if p["status"] in ("FAILED","CANCELED") else "#9ca3af"
+                prog=(f'<span style="color:{_c};font-weight:700">Last PCR {html.escape(p["status"])}</span> '
+                      f'{p["days"]}d ago ({p["date"]:%Y-%m-%d}) · {p["n"]} PCR workorder'
+                      f'{"s" if p["n"]!=1 else ""} on record'
+                      '<div style="color:#be185d;margin-top:2px">→ no PCR queued now — needs one</div>')
+            blocks.append(_block("In progress?", f'<div style="font-size:11px">{prog}</div>'))
         elif act=="True":
             o=order_status(part)
             if o is None:
@@ -583,6 +728,13 @@ def _render() -> str:
             else:
                 prog=f'<span style="color:#9ca3af">Last ordered</span> {o["date"]:%Y-%m-%d} · {html.escape(str(o["vendor"]))} ({o["status"]}) — needs new order'
             blocks.append(_block("In progress?", f'<div style="font-size:11px">{prog}</div>'))
+        if x.get("_blockedpart"):
+            ws=blocked_wos_for(part)
+            if ws:
+                blocks.append(_block(f"Blocking {len(ws)} workorder{'s' if len(ws)!=1 else ''}",
+                    '<div style="font-size:10px;color:#6b7280;margin-bottom:3px">stuck until this part '
+                    'exists — they unblock themselves once it does, so they need no action of their own '
+                    'unless flagged cancelable</div>' + _wo_tbl(ws)))
         bb=builds_for(part)
         if bb:
             exps={}
@@ -642,6 +794,51 @@ def _render() -> str:
 
     def batch_cell(x):
         part=str(x["Part"]); act=x["Action Suggested"]
+        if x.get("_blockedpart"):
+            # Lead with the cost (how many WOs are stuck), because that is what makes one missing
+            # part more urgent than another — the action itself is already in the Action column.
+            ws=blocked_wos_for(part)
+            nd=sum(1 for w in ws if w["twin"] and not w["succ"])
+            ns=sum(1 for w in ws if w["succ"])
+            cell=(f'<span style="color:#b91c1c;font-weight:700">⚠ blocking {len(ws)} '
+                  f'WO{"s" if len(ws)!=1 else ""}</span>'
+                  f'<span style="color:#9ca3af"> · nothing queued to make it</span>')
+            if ns:
+                cell+=(f'<div style="color:#15803d;font-size:10px">{ns} already produced '
+                       f'elsewhere → cancelable</div>')
+            if nd:
+                cell+=(f'<div style="color:#b45309;font-size:10px">{nd} of them have another '
+                       f'unblocked WO for the same final product</div>')
+            return cell
+        # A dPart with an OPEN pcr workorder: the pull writes "pcr_workorder is <STATUS>" as the
+        # action, which left this column empty. Say how long it has been queued, and for BLOCKED
+        # ones name the missing inputs — that is usually why it is stuck.
+        if "pcr_workorder is" in str(act) and part.startswith("d"):
+            p=pcr_status(part)
+            if p and p["open"]:
+                # BLOCKED is not progress — it is stuck, so it reads red like every other stall.
+                _blk_pcr = p["status"]=="BLOCKED"
+                _c, _ic = ("#b91c1c","⚠") if _blk_pcr else ("#15803d","⟳")
+                cell=(f'<span style="color:{_c};font-weight:700">{_ic} PCR {html.escape(p["status"].lower())}</span>'
+                      f'<span style="color:#9ca3af"> · queued {p["days"]}d ago</span>')
+                if _blk_pcr:
+                    short=[i[1] for i in pcr_inputs(part) if i[1] and not i[2]]
+                    if short:
+                        cell+=(f'<div style="color:#b91c1c;font-size:10px">missing '
+                               f'{html.escape(", ".join(short))}</div>')
+                return cell
+        if act=="True" and part.startswith("d"):
+            # PCR is the only maker for a dPart, so the question is PCR state, not order state.
+            p=pcr_status(part)
+            if p and p["open"]:
+                return (f'<span style="color:#15803d;font-weight:700">⟳ PCR {html.escape(p["status"].lower())}</span>'
+                        f'<span style="color:#9ca3af"> · queued {p["days"]}d ago</span>')
+            if p:
+                return (f'<span style="color:#be185d;font-weight:700">⚠ needs PCR</span>'
+                        f'<span style="color:#9ca3af"> · last PCR {html.escape(p["status"].lower())} '
+                        f'{p["days"]}d ago</span>')
+            return ('<span style="color:#be185d;font-weight:700">⚠ needs PCR</span>'
+                    '<span style="color:#9ca3af"> · none on record</span>')
         if act=="True":
             o=order_status(part)
             if o and o["active"]: return f'<span style="color:#15803d">on order · {html.escape(str(o["vendor"]))}</span>'
@@ -679,6 +876,11 @@ def _render() -> str:
         picks the action from raw demand while the target (need + buffer) is computed here."""
         act=x["Action Suggested"]
         if str(act).startswith("Mark"): return "Mark available"    # the pull already reached it
+        # "True" means no fresh source to make more from. For a dPart that is never an order —
+        # dParts are PCR'd in-house (there is no dPart synthesis workorder type), so "Reorder /
+        # needs order" was unactionable: order_status() only covers oligo/plasmid/synpart
+        # synthesis, so a dPart could never show "on order" and always fell through to it.
+        if act=="True" and str(x["Part"]).startswith("d"): return "Make by PCR"
         if act in ("Refill","Transform"):
             n,_g,after = flip_gain(str(x["Part"]), int(x["Reactions Available"]))
             if n and after >= _target(x): return "Mark available"
@@ -698,7 +900,7 @@ def _render() -> str:
                 f'<td style="width:18px;color:#9ca3af" id="c{i}">▸</td>'
                 f'<td style="font-family:monospace;font-weight:700">{part}{repeat_badge(x["Reactions Required"])}</td>'
                 f'<td style="text-align:center">{int(x["Reactions Available"])} / <strong style="color:#b45309;font-size:13px">{int(x["Reactions Required"])}</strong></td>'
-                f'<td>{act_badge(act,age)}</td>'
+                f'<td>{act_badge(act,age,not_in_lims=bool(x.get("_blockedpart") and act=="True" and _no_lims_wells(part)))}</td>'
                 f'<td style="font-size:11px">{batch_cell(x)}</td>'
                 f'<td style="font-size:11px;color:#374151">{html.escape(summary)}</td></tr>'
                 f'<tr id="d{i}" style="display:none"><td></td><td colspan="5">{detail_html(x)}</td></tr>')
@@ -724,12 +926,44 @@ def _render() -> str:
         out["_isbuild"]=out["Action Suggested"].astype(str).str.contains("workorder", case=False)
         out["_sec"]=out["Part"].astype(str).map(section_of)
 
+    def _has_open_maker(part):
+        """Something is already queued to make this part — a PCR for a dPart, a vendor/synthesis
+        order for anything else. Such a part is ordinary restock work ("on order" / "PCR ready"),
+        so it must NOT be called blocked; the section claims nothing is queued to make it."""
+        if str(part).startswith("d"):
+            p=pcr_status(part);  return bool(p and p["open"])
+        o=order_status(part);    return bool(o and o["active"])
+
     def _blocked_only(part):
         bb=builds_for(part)
-        return bool(bb) and all(s=="BLOCKED" for _p,_t,s,_e in bb)
+        return (bool(bb) and all(s=="BLOCKED" for _p,_t,s,_e in bb)
+                and not _has_open_maker(part))
+    # A part with nothing queued to make it is BLOCKED: it can't be refilled (there is no stock to
+    # top up and no workorder in flight), and everything downstream of it stops. So it does not
+    # belong in the restock list — but it must not disappear either, which is what dropping it as
+    # "phantom demand" used to do. It gets its own section instead, and that section now carries
+    # the blocked WOs each part is holding up (see blocked_wos_for) so there is no separate
+    # blocked-workorder list saying the same thing from the other end.
     _phantom={p for p in out["Part"].astype(str).unique() if _blocked_only(p)}
+    _ph_rows=[]
     if _phantom:
+        _ph_rows=[]
+        for _,_x in out[out["Part"].astype(str).isin(_phantom)].iterrows():
+            _x=_x.copy(); _x["_blockedpart"]=True; _ph_rows.append(_x)
         out=out[~out["Part"].astype(str).isin(_phantom)].reset_index(drop=True)
+
+    # ---- Blocked totals, for the header strip and to prove nothing is being dropped ----------
+    _bp_wos={}
+    for _x in _ph_rows:
+        for _w in blocked_wos_for(str(_x["Part"])): _bp_wos[_w["wid"]]=_w
+    _n_bp      = len(_ph_rows)                                        # missing parts
+    _n_bp_wo   = len(_bp_wos)                                         # distinct WOs they block
+    _n_bp_twin = sum(1 for w in _bp_wos.values() if w["twin"] and not w["succ"])
+    _n_bp_succ = sum(1 for w in _bp_wos.values() if w["succ"])
+    # A blocked WO that no missing part accounts for would silently vanish now that the standalone
+    # blocked-WO list is gone. Today that set is empty (all 15 resolve to one of the 8 parts), but
+    # it is not guaranteed — so orphans still get shown, in their own small section.
+    _orphan_wos=[w for wid,w in sorted(_blk_all.items()) if wid not in _bp_wos]
 
     # ---- Demand = DIRECT in-flight builds only (reconciles the number with "Needed for") ----
     def direct_need(part):
@@ -740,6 +974,13 @@ def _render() -> str:
     builds_all["Reactions Required"]=builds_all.apply(
         lambda x: int(x["Reactions Required"]) if str(x["Part"]) in ctrl_related else direct_need(x["Part"]),
         axis=1)
+    # The blocked rows were lifted out of `out` ABOVE this recompute, so they kept the pull's raw
+    # demand figure while every other section switched to direct in-flight builds — pAI-22332 read
+    # "0 / 12" next to its own "blocking 4 WOs" and "4 builds across 1 experiment". Same basis for
+    # every section, so Need, the target, and the WO count can't contradict each other.
+    for _x in _ph_rows:
+        if str(_x["Part"]) not in ctrl_related:
+            _x["Reactions Required"]=direct_need(_x["Part"])
 
     def _target(x):
         need=int(x["Reactions Required"])
@@ -786,6 +1027,7 @@ def _render() -> str:
     _pa_rows=[x for _,x in out[~out["_isbuild"]].iterrows()]
     newbuilds_html = grouped_by_experiment(_nb_rows, open_=False) if _nb_rows else ""
     parts_html     = grouped_by_experiment(_pa_rows, open_=True)
+    blockedparts_html = grouped_by_experiment(_ph_rows, open_=True) if _ph_rows else ""
 
     # ============================================================================
     # Well/plate action sections: Make Unavailable, Trash
@@ -824,6 +1066,12 @@ def _render() -> str:
     _echo_lbl = apd[apd["LABWARE"] == "384 Echo Source Plate"].copy()
     _echo_lbl["_wc"] = pd.to_numeric(_echo_lbl["PLATE_NUMBER_OF_WELLS"], errors="coerce")
     _err = _echo_lbl[_echo_lbl["_wc"] != 384]
+    # Already dealt with → not an action item. A plate whose location says DISCARD, or whose every
+    # well is switched OFF, can no longer leak into an Echo-source list and there is nothing left
+    # to relabel for. LIMS may still carry the wrong labware string, but nobody has to touch it —
+    # this section is for plates you still have to go find, so drop the finished ones.
+    _err = _err[~_err["PLATE_LOCATION_BOX"].fillna("").astype(str).str.upper().str.contains("DISCARD")]
+    _err = _err[_err["PLATE_ID"].isin(set(_err[_err["AVAILABLE"].astype(str) == "True"]["PLATE_ID"]))]
     err_plates = []
     for pid, g in _err.groupby("PLATE_ID"):
         _loc = g["PLATE_LOCATION_BOX"].dropna().astype(str)
@@ -861,7 +1109,10 @@ def _render() -> str:
         for _p, _co, _wid, _loc, _v, _cc, _a in make_avail_wells(str(_x["Part"])):
             tok = f"well{int(_wid)}"
             if tok not in mk_avail: mk_avail.append(tok)
-    extra = err_section + wells_section("mk_av","Make Available · 384 Echo source",
+    # Copy-box sections first — the well strings are the thing you act on every day. The error /
+    # trash plate lists are find-and-toss housekeeping, so they sit at the bottom (err_section is
+    # appended after the trash sections below).
+    extra = wells_section("mk_av","Make Available · 384 Echo source",
               "seq-confirmed Echo source wells for the parts listed above that are &gt;25µL, &gt;5 ng/µL, fresh, and "
               "not yet available → flip ON in LIMS · <b>these are the refills</b>: flipping them is usually enough "
               "to reach target without batching","#1d4ed8", mk_avail, show_plates=False)
@@ -954,6 +1205,7 @@ def _render() -> str:
     extra += trash_section("trash_pl","Trash — Plasmid stock plates","#7c3aed","200 days", exp_by_type["Plasmid"])
     extra += trash_section("trash_dp","Trash — dPart stock plates","#0891b2","200 days", exp_by_type["dPart"])
     extra += trash_section("trash_sp","Trash — 384 rearray with synparts","#15803d","200 days", exp_by_type["SynPart"])
+    extra += err_section      # bottom of the well/plate housekeeping block, with the trash lists
 
     # Overview counts use the DISPLAYED action, so the cards can't disagree with the table
     # (a part whose flip-ON wells already cover the target counts as Mark available, not Refill).
@@ -961,6 +1213,7 @@ def _render() -> str:
     _n_flip   = sum(1 for a in _disp if a=="Mark available")
     _n_refill = sum(1 for a in _disp if a=="Refill")
     _n_xform  = sum(1 for a in _disp if a=="Transform")
+    _n_pcr    = sum(1 for a in _disp if a=="Make by PCR")
     _n_nosrc  = sum(1 for a in _disp if a=="True")
     _n_trash  = (len(dispose) + len(exhausted)
                  + sum(len(exp_by_type[t]) for t in ("Plasmid","dPart","SynPart")))
@@ -977,7 +1230,29 @@ def _render() -> str:
     _nb_count=int(len(builds_all)) if builds_all is not None else 0
     _pa_count=int(len(out[~out["_isbuild"]]))
     _PHDR_ROW=f'<table class="ptbl hdrow">{_PCOLS}<thead>{_HDR}</thead></table>'
-    _BHDR_ROW=f'<table class="ptbl hdrow">{_BCOLS}<thead>{_BHDR}</thead></table>'
+
+    # ---- "Add it up" strip for the blocked section: parts, WOs they stall, what's cancelable ----
+    _bp_strip=""
+    if _ph_rows:
+        _bits=[f'<b style="color:#b91c1c">{_n_bp}</b> missing part{"s" if _n_bp!=1 else ""}',
+               f'blocking <b style="color:#b91c1c">{_n_bp_wo}</b> '
+               f'workorder{"s" if _n_bp_wo!=1 else ""}']
+        if _n_bp_succ:
+            _bits.append(f'<b style="color:#15803d">{_n_bp_succ}</b> of those already produced '
+                         f'elsewhere → cancelable')
+        if _n_bp_twin:
+            _bits.append(f'<b style="color:#b45309">{_n_bp_twin}</b> of those have another '
+                         f'unblocked WO for the same final product → cancel the blocked one')
+        _bp_strip=('<div style="margin:0 0 8px;padding:7px 10px;background:#fef2f2;'
+                   'border:1px solid #fecaca;border-radius:6px;font-size:11.5px;color:#374151">'
+                   + ' &nbsp;·&nbsp; '.join(_bits) + '</div>')
+
+    # Only rendered when a blocked WO can't be traced back to a missing part above (normally none).
+    _orphan_html=""
+    if _orphan_wos:
+        _orphan_html=('<div style="padding:2px"><div style="font-size:11px;color:#6b7280;'
+                      'margin:0 0 6px">no missing part above accounts for these — the WO itself '
+                      'needs investigating</div>' + _wo_tbl(_orphan_wos) + '</div>')
 
     # ---- SCOPED fragment: every CSS rule namespaced under #tab-parts so nothing leaks ----
     frag=f"""<style>
@@ -1042,14 +1317,16 @@ def _render() -> str:
   <div class="ovc"><div class="ovn" style="color:#1d4ed8">{_n_flip}</div><div class="ovl">Flip wells ON</div></div>
   <div class="ovc"><div class="ovn" style="color:#92400e">{_n_refill}</div><div class="ovl">Refill</div></div>
   <div class="ovc"><div class="ovn" style="color:#c2410c">{_n_xform}</div><div class="ovl">Transform</div></div>
+  <div class="ovc"><div class="ovn" style="color:#0e7490">{_n_pcr}</div><div class="ovl">Add PCR WO</div></div>
   <div class="ovc"><div class="ovn" style="color:#be185d">{_n_nosrc}</div><div class="ovl">Reorder</div></div>
+  <div class="ovc"><div class="ovn" style="color:#b91c1c">{_n_bp}</div><div class="ovl">Blocked parts &rarr; {_n_bp_wo} WOs</div></div>
   <div class="ovc"><div class="ovn" style="color:#be185d">{len(clean_wells)+len(mp_wells)}</div><div class="ovl">Wells → unavailable</div></div>
   <div class="ovc"><div class="ovn" style="color:#6b7280">{_n_trash}</div><div class="ovl">Plates to trash</div></div>
 </div>
 {section_card("Parts needing attention", ("#fffbeb","#b45309","#fde68a"), _pa_count, parts_html, "restock / refill / reorder — grouped by experiment · Need = direct in-flight builds", colhdr=_PHDR_ROW)}
-{section_card("Blocked workorders", ("#fef2f2","#b91c1c","#fca5a5"), len(_blk), blocked_html, "stuck assembly WOs — grouped by experiment · click a row for what it's blocking + cancel note", colhdr=_BHDR_ROW)}
+{section_card("Blocked — nothing queued to make it", ("#fef2f2","#b91c1c","#fca5a5"), _n_bp, _bp_strip+blockedparts_html, f"order or PCR these to unblock {_n_bp_wo} stuck workorder{'s' if _n_bp_wo!=1 else ''} · click a part to see exactly which WOs it stalls", colhdr=_PHDR_ROW)}
+{section_card("Blocked workorders — cause unknown", ("#fef2f2","#b91c1c","#fca5a5"), len(_orphan_wos), _orphan_html, "stuck WOs that no missing part above explains — investigate the workorder itself")}
 {section_card("New builds — feed into requests", ("#f5f3ff","#6d28d9","#ddd6fe"), _nb_count, newbuilds_html, "net-new parts being assembled (workorder in flight) that feed downstream requests", colhdr=_PHDR_ROW)}
-<p class="note"><b>Refill</b> = has glycerol → streak &nbsp;·&nbsp; <b>Transform</b> = no glycerol but DNA on hand → transform fresh &nbsp;·&nbsp; <b>Reorder</b> = no DNA → order/synthesize</p>
 <div class="secgroup-title">Well &amp; plate actions</div>
 {extra}
 <script>
