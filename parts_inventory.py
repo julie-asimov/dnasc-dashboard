@@ -1730,11 +1730,22 @@ WHERE wo.type IN ('oligo_synthesis_workorder','plasmid_synthesis_workorder','syn
   AND (wo.status IN ('RUNNING','WAITING','READY','BLOCKED')
        OR wo.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 730 DAY))
 """
+    # NGS job state per well. A refill is "in progress" until its NGS job CLOSES — the plate
+    # being on an NGS protocol only means it was submitted, not that results are in. Statuses:
+    # RUNNING = still sequencing, SUCCEEDED/FAILED/CANCELED = closed. NGS runs on the picked
+    # samples, so only a handful of a process's wells ever carry a job.
+    Q_NGS = """
+SELECT nw.well_id AS WELL_ID, wo.status AS STATUS, wo.updated_at AS UPDATED
+FROM bios__src.ngsworkorder nw
+JOIN bios__src.workorder wo ON wo.id = nw.id
+WHERE wo.deleted_at IS NULL AND nw.well_id IS NOT NULL
+"""
     wod = client.query(Q_WOD).to_dataframe()
     blk = client.query(Q_BLK).to_dataframe()
     succ_names = set(client.query(Q_SUCC).to_dataframe()["p"].dropna())
     ordf = client.query(Q_ORD).to_dataframe()
-    return {"wod": wod, "blk": blk, "blk_succ_names": succ_names, "ord": ordf}
+    ngs = client.query(Q_NGS).to_dataframe()
+    return {"wod": wod, "blk": blk, "blk_succ_names": succ_names, "ord": ordf, "ngs": ngs}
 
 
 def run_parts_inventory() -> dict:
@@ -1819,6 +1830,7 @@ def run_parts_inventory() -> dict:
         "blk_df": _tab["blk"],
         "blk_succ_names": _tab["blk_succ_names"],
         "ord_df": _tab["ord"],
+        "ngs_df": _tab["ngs"],
         "generated_at": now,
     }
 

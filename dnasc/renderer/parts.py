@@ -108,13 +108,24 @@ def _render() -> str:
     flagged = set(out["Part"].astype(str))
 
     # --- "already started?" refill signal: wells tagged REFILL_* in PROCESS_ID ---
-    # A refill process is SHORT: measured over all 299 refill processes in the pull, the span from
-    # first to last well is median 3d, p90 6d, p95 9d — and the 384 Echo stock well is created
-    # INSIDE the process (median lag from last refill well to Echo well: -1d). So a refill older
-    # than the window below is NOT in flight: it finished, and whether it worked is answerable
-    # from the stock it left behind. Reporting "batch in progress" for an 80-day-old refill (as
-    # this did before) sent people to wait on a batch that had already died.
-    _REFILL_INFLIGHT_DAYS = 14          # p95 span (9d) + margin for NGS turnaround
+    # A refill is finished when it has rearrayed into the 384 Echo source plate — that step is what
+    # CREATES the Echo stock wells, so "this process has Echo wells" is the completion test. It is
+    # exact, not a heuristic: across all 317 refill processes in the pull, every one that reached
+    # NGS or rearray has Echo wells (17 + 293) and every one that has not (7, all at miniprep) has
+    # none. Age is reported but never decides the state — a batch that went through NGS is done
+    # whether that was yesterday or two years ago, which is why an 80-day-old refill used to sit
+    # here claiming to be in progress.
+    _REFILL_TYPICAL_DAYS = 9            # p95 of first→last well span (median 3d); "looks stalled" past this
+    # NGS job state per well, from the pull. This is the real "is it still running?" signal: a plate
+    # sitting on an NGS protocol only means the samples were submitted. RUNNING = still sequencing,
+    # SUCCEEDED/FAILED/CANCELED = the job closed and the answer is in. Older pkls have no ngs_df.
+    _ngs = r.get("ngs_df")
+    _ngs_by_well = {}
+    if _ngs is not None and len(_ngs):
+        _n = _ngs.copy()
+        _n["WELL_ID"] = pd.to_numeric(_n["WELL_ID"], errors="coerce")
+        for _w, _g in _n.dropna(subset=["WELL_ID"]).groupby("WELL_ID"):
+            _ngs_by_well[int(_w)] = (set(_g["STATUS"].astype(str)), _g["UPDATED"].max())
     # Furthest stage reached, in real refill order (streak → overnights → miniprep → quant →
     # NGS confirm → rearray into the 384 Echo source). Rank by the LAST stage reached, never by
     # the newest well's protocol — a process touches several plates on the same day, so
@@ -130,9 +141,12 @@ def _render() -> str:
         """State of the most recent refill batch for `part`.
 
         Returns a dict: state = 'inflight' | 'done' | 'none'.
-          inflight — young enough to still be running; `stage` is the furthest stage reached.
-          done     — the batch has run out its clock. `landed` says what it left in the Echo
-                     plate, so the UI can say "produced nothing usable" instead of "in progress".
+          inflight — the batch has not finished: either it has not reached NGS yet, or its NGS job
+                     is still RUNNING. `stage` is the furthest stage reached; `stalled` if it has
+                     gone quiet for longer than a refill normally takes.
+          done     — its NGS job closed (or it rearrayed into the Echo plate). `ngs` carries the
+                     closing status, `landed` how much of the stock is still usable — together
+                     those decide whether a new batch is needed.
         """
         w=_refill[_refill["STOCK_ID"]==str(part)]
         if w.empty: return {"state":"none"}
@@ -141,22 +155,45 @@ def _render() -> str:
         age=int((now-g["CREATED_AT"].max()).days) if pd.notna(g["CREATED_AT"].max()) else None
         rank=max((_STAGE_RANK.get(str(p),0) for p in g["PLATE_PROTOCOL"]), default=0)
         stage=_STAGE_LABEL.get(rank, "started")
-        if age is not None and age <= _REFILL_INFLIGHT_DAYS:
-            return {"state":"inflight","age":age,"proc":proc,"stage":stage,"rank":rank}
-        # Finished. How much of what it put in the 384 Echo source plate is still usable?
-        # Only ever report the CURRENT state of those wells — never why they got that way. LIMS
-        # overwrites VOLUME_UL in place, so an empty/discarded well is indistinguishable from a
-        # batch that was consumed normally and one that never worked. Either way what matters
-        # operationally is the same: nothing is left, so a new batch is needed.
+        # NGS job state over this process's wells decides "in progress". NGS only runs on the
+        # picked samples, so most wells carry no job — what matters is whether the process has any
+        # job and whether they have closed.
+        _st=set(); _upd=None
+        for _wid in g["WELL_ID"]:
+            try: _hit=_ngs_by_well.get(int(_wid))
+            except (TypeError, ValueError): _hit=None
+            if _hit:
+                _st |= _hit[0]
+                if _upd is None or (pd.notna(_hit[1]) and _hit[1] > _upd): _upd = _hit[1]
+        ngs=None
+        if _st:
+            closed=not ("RUNNING" in _st)
+            ngs={"statuses":_st, "closed":closed,
+                 "outcome":("SUCCEEDED" if "SUCCEEDED" in _st else
+                            ("FAILED" if "FAILED" in _st else
+                             ("CANCELED" if "CANCELED" in _st else "RUNNING"))),
+                 "closed_days":(int((now-_upd).days) if _upd is not None and pd.notna(_upd) else None)}
+        # Rearray into the 384 Echo source comes after NGS, so wells there also mean it finished —
+        # it covers the legacy processes whose NGS job predates the ngsworkorder records.
         e=apd[(apd["PROCESS_ID"].astype(str)==proc) & (apd["STOCK_ID"]==str(part))
               & (apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)]
+        still_sequencing = bool(ngs and not ngs["closed"])
+        if still_sequencing or (ngs is None and rank < 4 and not len(e)):
+            return {"state":"inflight","age":age,"proc":proc,"stage":stage,"rank":rank,"ngs":ngs,
+                    "sequencing":still_sequencing,
+                    "stalled":bool(not still_sequencing and age is not None and age > _REFILL_TYPICAL_DAYS)}
+        # Finished. How much of what it left is still usable? Only ever report the CURRENT state of
+        # those wells — never why they got that way. LIMS overwrites VOLUME_UL in place, so a well
+        # that was consumed normally is indistinguishable from a prep that never worked. Either way
+        # what matters operationally is the same: nothing left → a new batch is needed.
         landed=None
-        if len(e):
+        if len(e):      # through NGS but never rearrayed → no wells to report (0 such cases today)
             vol=pd.to_numeric(e["VOLUME_UL"],errors="coerce"); cc=pd.to_numeric(e["CONCENTRATION_NGUL"],errors="coerce")
             disc=e["PLATE_LOCATION_BOX"].fillna("").astype(str).str.upper().str.contains("DISCARD")
             landed={"wells":int(len(e)),"usable":int(((vol>25)&(cc>5)&~disc).sum()),
                     "gone":int((disc|(vol<=0)).sum())}
-        return {"state":"done","age":age,"proc":proc,"stage":stage,"rank":rank,"landed":landed}
+        return {"state":"done","age":age,"proc":proc,"stage":stage,"rank":rank,
+                "landed":landed,"ngs":ngs}
 
     # --- "already ordered?" vendor-order signal (Reorder) — from the pull ---
     _ord = r["ord_df"].copy()
@@ -495,23 +532,39 @@ def _render() -> str:
         if act in ("Refill","Transform","Mark available"):
             rs = refill_status(part)
             if rs["state"]=="inflight":
-                prog=(f'<span style="color:#15803d;font-weight:700">⟳ Batch in progress</span> — furthest stage '
-                      f'<b>{html.escape(rs["stage"])}</b>, last activity {rs["age"]}d ago · {html.escape(rs["proc"])}')
+                head=(f'<span style="color:#be185d;font-weight:700">⚠ Batch stalled</span>'
+                      if rs.get("stalled") else
+                      f'<span style="color:#15803d;font-weight:700">⟳ Batch in progress</span>')
+                prog=(f'{head} — furthest stage <b>{html.escape(rs["stage"])}</b>, last activity '
+                      f'{rs["age"]}d ago · {html.escape(rs["proc"])}')
+                if rs.get("sequencing"):
+                    prog+=('<div style="color:#6b7280;margin-top:2px">its <b>NGS job is still open</b> — '
+                           'the result lands when that job closes</div>')
+                else:
+                    prog+=('<div style="color:#6b7280;margin-top:2px">no NGS job on it yet'
+                           + (f' · a refill normally finishes in {_REFILL_TYPICAL_DAYS}d — chase it'
+                              if rs.get("stalled") else "") + '</div>')
             elif rs["state"]=="done":
-                ld=rs.get("landed")
-                # A refill runs its course in ~3-9 days (median 3, p95 9 across the pull), and it
-                # creates its 384 Echo well inside the process — so past the window it is over.
-                # Report only what is left of it today; the snapshot cannot tell a batch that was
-                # used up from one that never worked, so it says neither.
-                prog=(f'<span style="color:#9ca3af">Last refill</span> — reached '
-                      f'<b>{html.escape(rs["stage"])}</b>, {rs["age"]}d ago · {html.escape(rs["proc"])}')
+                ld=rs.get("landed"); ng=rs.get("ngs")
+                # It rearrayed into the Echo plate, which is the finish line — so it is over no
+                # matter how long ago that was. Report only what is left of it today; the snapshot
+                # cannot tell a batch that was used up from one that never worked, so it says neither.
+                if ng:
+                    _oc=ng["outcome"]; _ocol="#15803d" if _oc=="SUCCEEDED" else "#be185d"
+                    _when=(f', closed {ng["closed_days"]}d ago' if ng["closed_days"] is not None else "")
+                    prog=(f'<span style="color:#9ca3af">Last refill</span> — NGS job '
+                          f'<b style="color:{_ocol}">{_oc}</b>{_when} · {html.escape(rs["proc"])}')
+                else:
+                    prog=(f'<span style="color:#9ca3af">Last refill</span> — finished at '
+                          f'<b>{html.escape(rs["stage"])}</b>, {rs["age"]}d ago · {html.escape(rs["proc"])}')
                 if ld:
                     prog+=(f'<div style="color:#6b7280;margin-top:2px">put {ld["wells"]} well'
                            f'{"s" if ld["wells"]!=1 else ""} in the 384 Echo source · '
                            f'<b>{ld["usable"]}</b> still usable today'
                            + (f' ({ld["gone"]} empty or discarded)' if ld["gone"] else "") + '</div>')
                 else:
-                    prog+='<div style="color:#6b7280;margin-top:2px">never reached the 384 Echo source plate</div>'
+                    prog+=('<div style="color:#6b7280;margin-top:2px">through NGS but nothing in the '
+                           '384 Echo source plate</div>')
                 if not (n_flip and after_flip>=target):
                     prog+='<div style="color:#be185d;margin-top:2px">→ needs a new batch</div>'
             else:
@@ -566,10 +619,21 @@ def _render() -> str:
         col = "#be185d" if urgent else "#6b7280"
         pre = "" if urgent else '<span style="color:#9ca3af">buffer only · </span>'
         if rs["state"] == "inflight":
+            if rs.get("sequencing"):
+                return (f'<span style="color:#15803d;font-weight:700">⟳ batch in progress</span>'
+                        f'<span style="color:#9ca3af"> · NGS job open, {rs["age"]}d</span>')
+            if rs.get("stalled"):
+                return (f'{pre}<span style="color:{col};font-weight:700">⚠ batch stalled</span>'
+                        f'<span style="color:#9ca3af"> · stuck at {html.escape(rs["stage"])}, quiet {rs["age"]}d</span>')
             return (f'<span style="color:#15803d;font-weight:700">⟳ batch in progress</span>'
                     f'<span style="color:#9ca3af"> · {html.escape(rs["stage"])}, {rs["age"]}d</span>')
         if rs["state"] == "done":
-            ld = rs.get("landed")
+            ld = rs.get("landed"); ng = rs.get("ngs")
+            # NGS FAILED/CANCELED is a real failure — the job itself says so, unlike guessing from
+            # well volume. Worth naming, because the fix differs: re-sequence or re-streak.
+            if ng and ng["outcome"] in ("FAILED","CANCELED"):
+                return (f'{pre}<span style="color:{col};font-weight:700">⚠ needs batch</span>'
+                        f'<span style="color:#9ca3af"> · NGS {ng["outcome"].lower()} {rs["age"]}d ago</span>')
             tail = (f' · last batch {rs["age"]}d ago, nothing left from it'
                     if ld and ld["usable"] == 0 else f' · last batch {rs["age"]}d ago')
             return (f'{pre}<span style="color:{col};font-weight:700">⚠ needs batch</span>'
