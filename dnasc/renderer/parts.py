@@ -144,6 +144,11 @@ def _render() -> str:
         age=int((now-g["CREATED_AT"].max()).days) if pd.notna(g["CREATED_AT"].max()) else None
         rank=max((_STAGE_RANK.get(str(p),0) for p in g["PLATE_PROTOCOL"]), default=0)
         stage=_STAGE_LABEL.get(rank, "started")
+        # SEQ_CONFIRMED is the sequencing verdict. The NGS *workorder status* is not: a job routinely
+        # closes FAILED while its wells carry SEQ_CONFIRMED=True, because the job can close short for
+        # reasons that have nothing to do with the read (low yield, for one). So never report a
+        # closed-FAILED workorder as "sequencing failed" when the wells are confirmed.
+        seq_ok=bool((g["SEQ_CONFIRMED"].astype(str)=="True").any())
         # NGS job state over this process's wells decides "in progress". NGS only runs on the
         # picked samples, so most wells carry no job — what matters is whether the process has any
         # job and whether they have closed.
@@ -169,7 +174,7 @@ def _render() -> str:
         still_sequencing = bool(ngs and not ngs["closed"])
         if still_sequencing or (ngs is None and rank < 4 and not len(e)):
             return {"state":"inflight","age":age,"proc":proc,"stage":stage,"rank":rank,"ngs":ngs,
-                    "sequencing":still_sequencing,
+                    "sequencing":still_sequencing,"seq_ok":seq_ok,
                     "stalled":bool(not still_sequencing and age is not None and age > _REFILL_TYPICAL_DAYS)}
         # Finished. How much of what it left is still usable? Only ever report the CURRENT state of
         # those wells — never why they got that way. LIMS overwrites VOLUME_UL in place, so a well
@@ -182,7 +187,7 @@ def _render() -> str:
             landed={"wells":int(len(e)),"usable":int(((vol>25)&(cc>5)&~disc).sum()),
                     "gone":int((disc|(vol<=0)).sum())}
         return {"state":"done","age":age,"proc":proc,"stage":stage,"rank":rank,
-                "landed":landed,"ngs":ngs}
+                "landed":landed,"ngs":ngs,"seq_ok":seq_ok}
 
     # --- "already ordered?" vendor-order signal (Reorder) — from the pull ---
     _ord = r["ord_df"].copy()
@@ -675,10 +680,24 @@ def _render() -> str:
                 # matter how long ago that was. Report only what is left of it today; the snapshot
                 # cannot tell a batch that was used up from one that never worked, so it says neither.
                 if ng:
-                    _oc=ng["outcome"]; _ocol="#15803d" if _oc=="SUCCEEDED" else "#be185d"
+                    _oc=ng["outcome"]
                     _when=(f', closed {ng["closed_days"]}d ago' if ng["closed_days"] is not None else "")
-                    prog=(f'<span style="color:#9ca3af">Last refill</span> — NGS job '
-                          f'<b style="color:{_ocol}">{_oc}</b>{_when} · {html.escape(rs["proc"])}')
+                    if _oc=="SUCCEEDED":
+                        prog=(f'<span style="color:#9ca3af">Last refill</span> — NGS job '
+                              f'<b style="color:#15803d">SUCCEEDED</b>{_when} · {html.escape(rs["proc"])}')
+                    elif rs.get("seq_ok"):
+                        # Wells are seq-confirmed, so the read was fine and only the job closed
+                        # unsuccessfully. Saying "NGS FAILED" here reads as a sequencing failure and
+                        # sends people to re-sequence work that already has its answer.
+                        prog=(f'<span style="color:#9ca3af">Last refill</span> — '
+                              f'<b style="color:#15803d">sequence confirmed</b> · its NGS job closed '
+                              f'<b>{_oc}</b>{_when} '
+                              f'<span style="color:#9ca3af">(job status — not a sequencing verdict)</span>'
+                              f' · {html.escape(rs["proc"])}')
+                    else:
+                        prog=(f'<span style="color:#9ca3af">Last refill</span> — NGS job '
+                              f'<b style="color:#be185d">{_oc}</b>{_when} · nothing seq-confirmed came '
+                              f'out of it · {html.escape(rs["proc"])}')
                 else:
                     prog=(f'<span style="color:#9ca3af">Last refill</span> — finished at '
                           f'<b>{html.escape(rs["stage"])}</b>, {rs["age"]}d ago · {html.escape(rs["proc"])}')
@@ -691,7 +710,10 @@ def _render() -> str:
                     prog+=('<div style="color:#6b7280;margin-top:2px">through NGS but nothing in the '
                            '384 Echo source plate</div>')
                 if not (n_flip and after_flip>=target):
-                    prog+='<div style="color:#be185d;margin-top:2px">→ needs a new batch</div>'
+                    # Say what's short, so the line reads as a yield shortfall and never as a
+                    # consequence of the NGS status printed above it.
+                    prog+=(f'<div style="color:#be185d;margin-top:2px">→ needs a new batch — '
+                           f'{have} of {target} rxns</div>')
             else:
                 prog='<span style="color:#be185d;font-weight:700">⚠ Needs batching</span> <span style="color:#9ca3af">— no refill on record</span>'
             if n_flip and after_flip>=target:
@@ -784,8 +806,12 @@ def _render() -> str:
             # NGS FAILED/CANCELED is a real failure — the job itself says so, unlike guessing from
             # well volume. Worth naming, because the fix differs: re-sequence or re-streak.
             if ng and ng["outcome"] in ("FAILED","CANCELED"):
+                # Seq-confirmed wells → the read was fine, the batch just came up short. Naming NGS
+                # here blamed the sequencing for what is a yield problem.
+                _why=(f' · last batch came up short, {rs["age"]}d ago' if rs.get("seq_ok")
+                      else f' · NGS {ng["outcome"].lower()}, nothing confirmed, {rs["age"]}d ago')
                 return (f'{pre}<span style="color:{col};font-weight:700">⚠ needs batch</span>'
-                        f'<span style="color:#9ca3af"> · NGS {ng["outcome"].lower()} {rs["age"]}d ago</span>')
+                        f'<span style="color:#9ca3af">{_why}</span>')
             tail = (f' · last batch {rs["age"]}d ago, nothing left from it'
                     if ld and ld["usable"] == 0 else f' · last batch {rs["age"]}d ago')
             return (f'{pre}<span style="color:{col};font-weight:700">⚠ needs batch</span>'
@@ -1104,8 +1130,11 @@ def _render() -> str:
     # make-available list was pulled once before because there was no way to tell whether an
     # arbitrary well was partner-associated; scoping it to the parts we are actively restocking
     # keeps that bound: every well here is one already shown in that part's own row.
+    # _ph_rows (the blocked parts) are in here too. They are correctly blocked — right now their
+    # stuck WOs have no usable stock to draw on — but a flip-ON well is exactly what un-blocks
+    # them, so leaving those wells out of the copy box hid the cheapest possible fix.
     mk_avail = []
-    for _x in _pa_rows + _nb_rows:
+    for _x in _pa_rows + _nb_rows + _ph_rows:
         for _p, _co, _wid, _loc, _v, _cc, _a in make_avail_wells(str(_x["Part"])):
             tok = f"well{int(_wid)}"
             if tok not in mk_avail: mk_avail.append(tok)
@@ -1115,7 +1144,8 @@ def _render() -> str:
     extra = wells_section("mk_av","Make Available · 384 Echo source",
               "seq-confirmed Echo source wells for the parts listed above that are &gt;25µL, &gt;5 ng/µL, fresh, and "
               "not yet available → flip ON in LIMS · <b>these are the refills</b>: flipping them is usually enough "
-              "to reach target without batching","#1d4ed8", mk_avail, show_plates=False)
+              "to reach target without batching · includes blocked parts, where flipping is what "
+              "un-blocks their stuck workorders","#1d4ed8", mk_avail, show_plates=False)
     extra += wells_section("mk_un","Make Unavailable · 384 Echo source",
               "available Echo source wells that are ≤25µL (near-empty), past expiration (200d), OR &lt;5 ng/µL (too dilute) → flip OFF in LIMS","#be185d", clean_wells, show_plates=False)
     extra += wells_section("mk_un_mp","Make Unavailable · 96-well miniprep stock",
