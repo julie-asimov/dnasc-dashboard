@@ -686,14 +686,19 @@ def _render() -> str:
                         prog=(f'<span style="color:#9ca3af">Last refill</span> — NGS job '
                               f'<b style="color:#15803d">SUCCEEDED</b>{_when} · {html.escape(rs["proc"])}')
                     elif rs.get("seq_ok"):
-                        # Wells are seq-confirmed, so the read was fine and only the job closed
-                        # unsuccessfully. Saying "NGS FAILED" here reads as a sequencing failure and
-                        # sends people to re-sequence work that already has its answer.
-                        prog=(f'<span style="color:#9ca3af">Last refill</span> — '
-                              f'<b style="color:#15803d">sequence confirmed</b> · its NGS job closed '
-                              f'<b>{_oc}</b>{_when} '
-                              f'<span style="color:#9ca3af">(job status — not a sequencing verdict)</span>'
-                              f' · {html.escape(rs["proc"])}')
+                        # Wells are seq-confirmed: the read was fine and the batch simply came up
+                        # short. Do not print the workorder status at all here. Showing "FAILED"
+                        # and then annotating it away just makes the reader cancel out a word that
+                        # should not have been in the sentence — and once the sequence is confirmed,
+                        # the status changes nothing about what to do. It stays in the tooltip so
+                        # the row is still reconcilable against LIMS.
+                        _fin=(f' · finished {ng["closed_days"]}d ago'
+                              if ng["closed_days"] is not None else "")
+                        prog=(f'<span title="LIMS NGS workorder status: {html.escape(_oc)}'
+                              f'{html.escape(_when)} — the wells are seq-confirmed, so that status '
+                              f'is not a sequencing verdict" style="color:#9ca3af">Last refill</span> — '
+                              f'<b style="color:#15803d">sequence confirmed</b>'
+                              f'{_fin} · {html.escape(rs["proc"])}')
                     else:
                         prog=(f'<span style="color:#9ca3af">Last refill</span> — NGS job '
                               f'<b style="color:#be185d">{_oc}</b>{_when} · nothing seq-confirmed came '
