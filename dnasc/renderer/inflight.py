@@ -932,41 +932,53 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   //   best MED (PICK_LOW_MAX–PICK_MED_MAX) → MED RISK  (no strong attempt yet)
   //   best HIGH (>PICK_MED_MAX)            → healthy, no badge
   // Designs with a sequence-confirmed winner / already succeeded are never flagged.
+  // Colony risk is a statement about work that is STILL LIVE. A design or attempt that
+  // has already failed or been canceled is over — its colony counts are history, and
+  // reading them as current risk flags requests that have nothing at risk right now.
+  var _DEAD_ST={{FAILED:1,CANCELED:1}};
+  function _dead(o){{ return !!_DEAD_ST[o.status]; }}
+  // Returns {{level, best}} — `best` is the pickable ceiling that drove the verdict, so the
+  // badge can show its own reason instead of looking like it contradicts the rows below it.
   function designRisk(d){{
     var atts=d.attempts||[];
-    if(!atts.length) return '';
-    if(d.has_winner || d.status==='SUCCEEDED' || d.status==='FULFILLED') return '';
+    if(!atts.length) return {{level:'',best:0}};
+    if(d.has_winner || d.status==='SUCCEEDED' || d.status==='FULFILLED') return {{level:'',best:0}};
+    if(_dead(d)) return {{level:'',best:0}};   // dead design: not currently at risk
     // Only assess pickable-band risk over attempts that have ACTUAL colony counts.
     // An uncounted attempt (nothing imaged yet) has pickable 0, which is NOT "low
     // pickable" — it just hasn't been counted, so it must not read as HIGH RISK.
-    // No counted attempt yet → no risk verdict.
-    var counted=atts.filter(_counted);
-    if(!counted.length) return '';
+    // Failed attempts drop out for the same reason as failed designs: those colonies
+    // are gone, so they are not options you could still pick from.
+    var counted=atts.filter(function(a){{ return _counted(a) && !_dead(a); }});
+    if(!counted.length) return {{level:'',best:0}};
     var best=0; counted.forEach(function(a){{var p=a.pickable||0; if(p>best) best=p;}});
-    if(best<=PICK_LOW_MAX) return 'HIGH';
-    if(best<=PICK_MED_MAX) return 'MED';
-    return '';
+    if(best<=PICK_LOW_MAX) return {{level:'HIGH',best:best}};
+    if(best<=PICK_MED_MAX) return {{level:'MED',best:best}};
+    return {{level:'',best:best}};
   }}
-  function riskBadge(level){{
+  // level is the RISK (High = bad); the LOW/MED/HIGH on the rows below is the pickable
+  // COUNT band. Those two scales run opposite ways, so name the driver in the badge.
+  function riskBadge(level, best){{
     if(level!=='HIGH' && level!=='MED') return '';
     var st = level==='HIGH'
       ? 'background:#FEE2E2;color:#991B1B;border:1px solid transparent;'
       : 'background:#FEF3C7;color:#92400E;border:1px solid transparent;';
     var tip = level==='HIGH'
-      ? 'Every attempt is in the LOW pickable band (0–'+PICK_LOW_MAX+') with no sequence-confirmed colony — at risk of running out of viable picks.'
-      : 'Best attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one.';
+      ? 'Every LIVE counted attempt is in the LOW pickable band (0–'+PICK_LOW_MAX+') with no sequence-confirmed colony — at risk of running out of viable picks. Failed/canceled attempts are excluded.'
+      : 'Best LIVE attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one. Failed/canceled attempts are excluded.';
     var L = level.charAt(0)+level.slice(1).toLowerCase();
-    return '<span title="'+tip+'" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">&#9888; Colony: '+L+'</span>';
+    var drv = (best||best===0) ? ' &middot; best live attempt '+(best||0)+' pk' : '';
+    return '<span title="'+tip+'" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">&#9888; Colony risk: '+L+drv+'</span>';
   }}
   // Worst colony risk across a request's designs + the pickable/picked counts driving it.
   function reqColRisk(r){{
-    var lv='', pk=0, pd=0;
+    var lv='', pk=0, pd=0, bs=0;
     (r.designs||[]).forEach(function(d){{
-      var rk=designRisk(d);
-      if(rk==='HIGH' && lv!=='HIGH'){{ lv='HIGH'; pk=d.pickable||0; pd=d.picked||0; }}
-      else if(rk==='MED' && lv===''){{ lv='MED'; pk=d.pickable||0; pd=d.picked||0; }}
+      var dr=designRisk(d), rk=dr.level;
+      if(rk==='HIGH' && lv!=='HIGH'){{ lv='HIGH'; pk=d.pickable||0; pd=d.picked||0; bs=dr.best; }}
+      else if(rk==='MED' && lv===''){{ lv='MED'; pk=d.pickable||0; pd=d.picked||0; bs=dr.best; }}
     }});
-    return {{level:lv, pick:pk, picked:pd}};
+    return {{level:lv, pick:pk, picked:pd, best:bs}};
   }}
   // Colony-risk flag badge (for the standard-view Flags column) — shows severity AND
   // the pickable + total-picked colony counts so the standard view carries the colony info too.
@@ -1119,8 +1131,10 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var open = !!_expR[r.req_id], c = r.col;
     var fps = r.fp ? 'color:#7c3aed;font-weight:700;' : '';
     var ph  = phaseBdg(r.phase);
-    var _lv = (r.designs||[]).map(designRisk);
-    var rwarn = riskBadge(_lv.indexOf('HIGH')!==-1 ? 'HIGH' : (_lv.indexOf('MED')!==-1 ? 'MED' : ''));
+    // Worst live design drives the request badge; carry that design's best-attempt count
+    // through so the request row explains itself the same way the design rows do.
+    var _rk = reqColRisk(r);
+    var rwarn = riskBadge(_rk.level, _rk.best);
     return '<tr class="if-cardtop'+(grouped?' if-cgrp-mem':'')+'" style="cursor:pointer;font-weight:600;" onclick="ifToggleReq(\\''+r.req_id+'\\')">'
       + '<td style="'+TD+'"><span class="if-caret'+(open?' open':'')+'">&#9654;</span></td>'
       + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
@@ -1153,7 +1167,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     // Zero-attempt designs (WAITING/CANCELED with no colony work) have no pickable
     // data to band — pickBand(0) would falsely read "LOW", so suppress it.
     var band = ((d.attempts||[]).length === 1 && _counted(d)) ? pickBand(d.pickable) : '';
-    var warn = riskBadge(designRisk(d));
+    var _dr = designRisk(d);
+    var warn = riskBadge(_dr.level, _dr.best);
     return '<tr class="if-att-row"'+click+'>'
       + '<td style="'+TD+'padding-left:20px;">'+caret+'</td>'
       + '<td style="'+TD+'" colspan="4"><span style="font-size:10px;font-weight:700;color:#334155;">Design '+(di+1)+' &middot; '+esc(d.dtype||'Design')+'</span>'+natt+parts+'</td>'
