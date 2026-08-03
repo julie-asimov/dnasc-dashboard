@@ -593,10 +593,30 @@ def _render() -> str:
         if n_flip and fpct > pct:
             seg += (f'<span class="d-seg" style="width:{fpct-pct}%;background:#93c5fd;margin-left:2px" '
                     f'title="reachable by flipping {n_flip} well(s) ON"></span>')
+        _ex=exposure(part); _tmax=_target_max(x)
+        _rng=(f'{target}&ndash;{_tmax}' if _tmax>target else f'{target}')
+        # Capacity-to-fail instead of a guessed retry rate: how many of the already-drawn
+        # builds could come back before this part is short.
+        _spare=have-int(x["Reactions Required"])
+        if _ex["drawn"] and _spare>0:
+            _pct=int(round(100*min(_spare,_ex["drawn"])/_ex["drawn"]))
+            _hd=(f'<div style="font-size:11px;color:#15803d;margin-top:3px">Headroom &mdash; '
+                 f'<b>{_spare}</b> rxns above the queued need: absorbs <b>{min(_spare,_ex["drawn"])}</b> '
+                 f'of the {_ex["drawn"]} running build{"s" if _ex["drawn"]!=1 else ""} coming back '
+                 f'({_pct}%)</div>')
+        elif _ex["drawn"]:
+            _hd=(f'<div style="font-size:11px;color:#be185d;margin-top:3px">No headroom &mdash; '
+                 f'nothing spare above the queued need, and {_ex["drawn"]} running '
+                 f'build{"s" if _ex["drawn"]!=1 else ""} could still come back</div>')
+        else:
+            _hd=''
+        _brk=(f'<div style="font-size:10px;color:#6b7280;margin-top:2px">'
+              f'{_ex["queued"]} queued now &middot; {_ex["drawn"]} already drew material &middot; '
+              f'target {target} if none retry, {_tmax} if all do</div>') if _ex["drawn"] else ''
         blocks.append(_block("Status",
-            f'<div class="d-stat"><span class="d-have">{have}</span><span class="d-of"> on hand · target {target}</span>'
+            f'<div class="d-stat"><span class="d-have">{have}</span><span class="d-of"> on hand · target {_rng}</span>'
             f'<span class="d-note">({note})</span></div>'
-            f'<div class="d-barwrap">{seg}</div>{flip_line}'
+            f'<div class="d-barwrap">{seg}</div>{flip_line}{_brk}{_hd}'
             f'<div class="d-sit" style="color:{tone}">{html.escape(situation)}</div>'))
         wl=avail_wells(part)
         if wl:
@@ -766,7 +786,13 @@ def _render() -> str:
         if bb:
             exps={}
             for p,t,s,e in bb: exps.setdefault(e or "—",[]).append((p,t,s))
-            body=f'<div class="d-sub">{len(bb)} build{"s" if len(bb)!=1 else ""} across {len(exps)} experiment{"s" if len(exps)!=1 else ""}</div>'
+            _todo=sum(1 for _p,_t,st,_e in bb if st in _NOT_DRAWN)
+            _drawn=len(bb)-_todo
+            body=(f'<div class="d-sub">{len(bb)} build{"s" if len(bb)!=1 else ""} across '
+                  f'{len(exps)} experiment{"s" if len(exps)!=1 else ""} &middot; '
+                  f'<b>{_todo}</b> still to run'
+                  + (f' &middot; {_drawn} already drew material (not counted as need)' if _drawn else '')
+                  + '</div>')
             for e,builds in sorted(exps.items(), key=lambda kv:-len(kv[1])):
                 chips="".join(f'<span class="chip" style="border-color:{ST_CHIP.get(s,"#9ca3af")};color:{ST_CHIP.get(s,"#6b7280")}">{html.escape(p)} <em>{t}·{s.lower()}</em></span>' for p,t,s in builds[:24])
                 more = f' <span class="d-more">+{len(builds)-24}</span>' if len(builds)>24 else ""
@@ -997,8 +1023,30 @@ def _render() -> str:
     _orphan_wos=[w for wid,w in sorted(_blk_all.items()) if wid not in _bp_wos]
 
     # ---- Demand = DIRECT in-flight builds only (reconciles the number with "Needed for") ----
+    # A RUNNING build has already drawn its material off the Echo plate — that draw is why
+    # the on-hand number is low in the first place. Counting it as demand asked for the same
+    # material twice: pAI-19910 sat at 42 rxns with 28 RUNNING + 10 queued builds and was told
+    # to reach a target of 76. Demand is what has NOT been served yet.
+    _NOT_DRAWN = {"WAITING","READY","BLOCKED","NEW"}
     def direct_need(part):
-        return len(builds_for(str(part)))
+        return sum(1 for _p,_t,st,_e in builds_for(str(part)) if st in _NOT_DRAWN)
+
+    def exposure(part):
+        """Queued vs already-drawn demand, with NO assumed failure rate.
+
+        Predicting how many RUNNING builds come back would mean inventing a retry
+        percentage, and a made-up number either hoards Echo plates or strands a batch.
+        So report the physical truth and let the operator judge it:
+          queued  — builds that still have to draw material (the immediate need)
+          drawn   — builds that already drew (why on-hand is low; NOT re-billed as need)
+          lo/hi   — target if nothing retries / target if EVERY running build retries
+          spare   — rxns above the immediate need
+          tol     — how many of the drawn builds that spare can absorb coming back
+        """
+        bb=builds_for(str(part))
+        queued=sum(1 for _p,_t,st,_e in bb if st in _NOT_DRAWN)
+        drawn=len(bb)-queued
+        return {"queued":queued,"drawn":drawn,"total":len(bb)}
     out["Reactions Required"]=out.apply(
         lambda x: int(x["Reactions Required"]) if str(x["Part"]) in ctrl_related else direct_need(x["Part"]),
         axis=1)
@@ -1016,9 +1064,20 @@ def _render() -> str:
     def _target(x):
         need=int(x["Reactions Required"])
         return 96 if str(x["Part"]) in ctrl_related else need + max(10, need)
+
+    def _target_max(x):
+        """Target if every RUNNING build came back for another attempt — the worst case."""
+        if str(x["Part"]) in ctrl_related: return 96
+        tot=exposure(x["Part"])["total"]
+        return tot + max(10, tot)
+
+    # Visibility uses the WORST case, urgency uses the immediate need. Filtering on the
+    # immediate need alone silently dropped parts that are fine today but have no cover if
+    # their running builds retry (pAI-19910: 42 on hand, 10 queued, 28 already drawn) — the
+    # row vanished instead of saying so. Nothing disappears now; the row states both numbers.
     out=out[out.apply(
         lambda x: bool(x["_isbuild"]) or (str(x["Part"]) in ctrl_related)
-                  or int(x["Reactions Available"]) < _target(x), axis=1)].reset_index(drop=True)
+                  or int(x["Reactions Available"]) < _target_max(x), axis=1)].reset_index(drop=True)
 
     i = 0
     def part_exps(part):
@@ -1358,7 +1417,7 @@ def _render() -> str:
   <div class="ovc"><div class="ovn" style="color:#be185d">{len(clean_wells)+len(mp_wells)}</div><div class="ovl">Wells → unavailable</div></div>
   <div class="ovc"><div class="ovn" style="color:#6b7280">{_n_trash}</div><div class="ovl">Plates to trash</div></div>
 </div>
-{section_card("Parts needing attention", ("#fffbeb","#b45309","#fde68a"), _pa_count, parts_html, "restock / refill / reorder — grouped by experiment · Need = direct in-flight builds", colhdr=_PHDR_ROW)}
+{section_card("Parts needing attention", ("#fffbeb","#b45309","#fde68a"), _pa_count, parts_html, "restock / refill / reorder — grouped by experiment · Need = in-flight builds that have not drawn their material yet (RUNNING ones already did)", colhdr=_PHDR_ROW)}
 {section_card("Blocked — nothing queued to make it", ("#fef2f2","#b91c1c","#fca5a5"), _n_bp, _bp_strip+blockedparts_html, f"order or PCR these to unblock {_n_bp_wo} stuck workorder{'s' if _n_bp_wo!=1 else ''} · click a part to see exactly which WOs it stalls", colhdr=_PHDR_ROW)}
 {section_card("Blocked workorders — cause unknown", ("#fef2f2","#b91c1c","#fca5a5"), len(_orphan_wos), _orphan_html, "stuck WOs that no missing part above explains — investigate the workorder itself")}
 {section_card("New builds — feed into requests", ("#f5f3ff","#6d28d9","#ddd6fe"), _nb_count, newbuilds_html, "net-new parts being assembled (workorder in flight) that feed downstream requests", colhdr=_PHDR_ROW)}
