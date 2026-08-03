@@ -21,7 +21,21 @@ class PipelineConfig:
     PROJECT_ID: str = "data-platform-core-prd"
 
     # ── Data filtering ────────────────────────────────────────────────────────
-    DATE_FILTER: str = "2025-01-01"          # Historical cutoff (full mode)
+    # Tracking history window — a ROLLING window ending today, so the refresh stops
+    # growing as the lab accumulates history. The old fixed "2025-01-01" cutoff was
+    # 19 months wide and widening every day.
+    #
+    # Verified safe at 365 days against the current baseline: it drops 38% of rows,
+    # and of the 282 live requests, ZERO have a root_work_order_id or attempt_anchor_id
+    # falling outside the window (the one live req_id spanning it is ACTIVE_WIP, the
+    # synthetic no-request bucket, which the In-Flight tab already excludes).
+    #
+    # This is the TRACKING window only. The Parts tab is unaffected — gen_parts_pkl.py
+    # carries its own freshness windows (200d stock, 730d oligos/orders).
+    HISTORY_DAYS: int = 365
+    DATE_FILTER_PIN: str = ""                # 'YYYY-MM-DD' to pin a fixed cutoff instead
+    DATE_FILTER: str = (DATE_FILTER_PIN or
+                        (datetime.now(pytz.UTC) - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d"))
 
     # ── Incremental mode ──────────────────────────────────────────────────────
     INCREMENTAL_MODE: bool = False
@@ -60,7 +74,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.11.12"
+    PIPELINE_VERSION: str = "1.11.13"
 
     @classmethod
     def get_date_filter(cls) -> str:
