@@ -147,6 +147,35 @@ def _agar(row) -> tuple[str, str]:
 _STALL_STRAIN = PipelineConfig.MIN_PICKABLE_COLONIES
 
 
+# Furthest OpTracker protocol an attempt has reached. protocol_name is a LIST column
+# (one row can carry several protocols), so membership must be tested per element —
+# comparing the stringified array to a name silently matches nothing.
+#
+# Colony counts land partway through MINIPREP ("Create Minipreps and Glycerol Stocks"),
+# so this is what distinguishes "no count because it has not got there yet" from
+# "no count because nobody entered it": 91 of 4449 attempts reached miniprep with the
+# counts still missing.
+_STAGE_PROTOS = [('miniprep',       (proto.MINIPREP, proto.REPICK)),
+                 ('transformation', (proto.STAR_TRANSF, proto.TRANSFORMATION)),
+                 ('assembly',       (proto.GOLDEN_GATE, proto.GIBSON))]
+
+
+def _attempt_stage(ag) -> str:
+    """'miniprep' | 'transformation' | 'assembly' | '' (nothing started) for an attempt."""
+    names = set()
+    for v in ag.get('protocol_name', []):
+        if v is None:
+            continue
+        try:
+            names.update(str(x) for x in v)
+        except TypeError:
+            continue
+    for label, protos in _STAGE_PROTOS:      # ordered furthest-first
+        if names & set(protos):
+            return label
+    return ''
+
+
 def _low_pick(raw_pickable) -> bool:
     """A colony-picking row is low-pickable only when picking data exists and is below threshold.
     Rows with no picking-count data (LSP, etc.) coalesce to null → never flagged."""
@@ -303,6 +332,7 @@ def _build_colony_rollup(base: pd.DataFrame, today: date, req_ids: set | None = 
                     'root':    str(root),
                     'att_num': att_num,
                     'status':  att_status,
+                    'stage_p': _attempt_stage(ag),   # furthest protocol reached
                     '_csort':  csort,
                     'date':    (wo_rows[0]['created'] if wo_rows else ''),  # assembly date (wo_rows is assembly-first)
                     'strains': sorted({r['strain'] for r in col if r['strain']}),
@@ -937,61 +967,99 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   // reading them as current risk flags requests that have nothing at risk right now.
   var _DEAD_ST={{FAILED:1,CANCELED:1}};
   function _dead(o){{ return !!_DEAD_ST[o.status]; }}
-  // Returns {{level, best}} — `best` is the pickable ceiling that drove the verdict, so the
-  // badge can show its own reason instead of looking like it contradicts the rows below it.
+  // A retry already in flight: an attempt with no colony counts yet whose workorder is
+  // queued or running. Low colonies matter far less when the next attempt is already
+  // moving, and 56% of HIGH flags are in exactly that position — so the badge has to
+  // say it, or it overstates how much of this needs a human today.
+  var _PEND_RANK={{RUNNING:4,READY:3,WAITING:2,NEW:1}};
+  // Returns {{st, stage}} for the furthest-along uncounted attempt. `stage` is the furthest
+  // OpTracker protocol it reached, which answers "is this before the colony-count step?" —
+  // counts land partway through miniprep, so 'miniprep' means a count is imminent while
+  // 'assembly' / '' means it is nowhere near one yet.
+  var _STAGE_TXT={{miniprep:'at miniprep — counts pending',transformation:'at transformation',
+                  assembly:'at assembly'}};
+  function _pending(d){{
+    var st='', rank=0, stage='';
+    (d.attempts||[]).forEach(function(a){{
+      if(_counted(a)) return;                       // already has colonies — not a retry
+      var rk=_PEND_RANK[a.status]||0;
+      if(rk>rank){{ rank=rk; st=a.status; stage=a.stage_p||''; }}
+    }});
+    return {{st:st, stage:stage}};
+  }}
+  // Returns {{level, cur, pend}} — `cur` is the pickable count that drove the verdict, so
+  // the badge can show its own reason instead of looking like it contradicts the rows below.
   function designRisk(d){{
     var atts=d.attempts||[];
-    if(!atts.length) return {{level:'',best:0}};
-    if(d.has_winner || d.status==='SUCCEEDED' || d.status==='FULFILLED') return {{level:'',best:0}};
-    if(_dead(d)) return {{level:'',best:0}};   // dead design: not currently at risk
+    if(!atts.length) return {{level:'',cur:0,pend:'',pstage:''}};
+    if(d.has_winner || d.status==='SUCCEEDED' || d.status==='FULFILLED') return {{level:'',cur:0,pend:'',pstage:''}};
+    if(_dead(d)) return {{level:'',cur:0,pend:'',pstage:''}};   // dead design: not currently at risk
     // Only assess pickable-band risk over attempts that have ACTUAL colony counts.
     // An uncounted attempt (nothing imaged yet) has pickable 0, which is NOT "low
     // pickable" — it just hasn't been counted, so it must not read as HIGH RISK.
     // Failed attempts drop out for the same reason as failed designs: those colonies
     // are gone, so they are not options you could still pick from.
     var counted=atts.filter(function(a){{ return _counted(a) && !_dead(a); }});
-    if(!counted.length) return {{level:'',best:0}};
-    var best=0; counted.forEach(function(a){{var p=a.pickable||0; if(p>best) best=p;}});
-    if(best<=PICK_LOW_MAX) return {{level:'HIGH',best:best}};
-    if(best<=PICK_MED_MAX) return {{level:'MED',best:best}};
-    return {{level:'',best:best}};
+    if(!counted.length) return {{level:'',cur:0,pend:'',pstage:''}};
+    // The NEWEST counted attempt is the verdict — not the best one. An earlier attempt
+    // can sit in transformation/miniprep for weeks, and taking the max let its old
+    // colony count keep the design looking healthy after the lab had already moved on
+    // to a fresh attempt. Once the new attempt is counted, that count is the state of
+    // the work: 40 colonies last month does not help if today's attempt yielded 3.
+    // `n` is assigned chronologically when attempts are built, so highest n = newest.
+    var cur=counted[0];
+    counted.forEach(function(a){{ if((a.n||0) > (cur.n||0)) cur=a; }});
+    var pick=cur.pickable||0;
+    var pend=_pending(d);
+    if(pick<=PICK_LOW_MAX) return {{level:'HIGH',cur:pick,pend:pend.st,pstage:pend.stage}};
+    if(pick<=PICK_MED_MAX) return {{level:'MED',cur:pick,pend:pend.st,pstage:pend.stage}};
+    return {{level:'',cur:pick,pend:pend.st,pstage:pend.stage}};
   }}
   // level is the RISK (High = bad); the LOW/MED/HIGH on the rows below is the pickable
   // COUNT band. Those two scales run opposite ways, so name the driver in the badge.
-  function riskBadge(level, best){{
+  function riskBadge(level, cur, pend, pstage){{
     if(level!=='HIGH' && level!=='MED') return '';
     var st = level==='HIGH'
       ? 'background:#FEE2E2;color:#991B1B;border:1px solid transparent;'
       : 'background:#FEF3C7;color:#92400E;border:1px solid transparent;';
     var tip = level==='HIGH'
-      ? 'Every LIVE counted attempt is in the LOW pickable band (0–'+PICK_LOW_MAX+') with no sequence-confirmed colony — at risk of running out of viable picks. Failed/canceled attempts are excluded.'
-      : 'Best LIVE attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one. Failed/canceled attempts are excluded.';
+      ? 'The newest counted attempt is in the LOW pickable band (0–'+PICK_LOW_MAX+') with no sequence-confirmed colony — at risk of running out of viable picks. Failed/canceled attempts are excluded.'
+      : 'The newest counted attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one. Failed/canceled attempts are excluded.';
     var L = level.charAt(0)+level.slice(1).toLowerCase();
-    var drv = (best||best===0) ? ' &middot; best live attempt '+(best||0)+' pk' : '';
-    return '<span title="'+tip+'" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">&#9888; Colony risk: '+L+drv+'</span>';
+    var drv = (cur||cur===0) ? ' &middot; latest attempt '+(cur||0)+' pk' : '';
+    // A queued/running retry is the single biggest thing that changes how urgent this is.
+    var _sg = pstage ? (_STAGE_TXT[pstage]||pstage) : 'not started';
+    var rt  = pend ? ' &middot; retry '+pend.toLowerCase()+' &middot; '+_sg : '';
+    if(pend) tip += ' A further attempt is already '+pend.toLowerCase()+' ('+_sg+') with no colonies counted yet.';
+    return '<span title="'+tip+'" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">&#9888; Colony risk: '+L+drv+rt+'</span>';
   }}
   // Worst colony risk across a request's designs + the pickable/picked counts driving it.
   function reqColRisk(r){{
-    var lv='', pk=0, pd=0, bs=0;
+    var lv='', pk=0, pd=0, cu=0, pn='', ps='';
     (r.designs||[]).forEach(function(d){{
       var dr=designRisk(d), rk=dr.level;
-      if(rk==='HIGH' && lv!=='HIGH'){{ lv='HIGH'; pk=d.pickable||0; pd=d.picked||0; bs=dr.best; }}
-      else if(rk==='MED' && lv===''){{ lv='MED'; pk=d.pickable||0; pd=d.picked||0; bs=dr.best; }}
+      if(rk==='HIGH' && lv!=='HIGH'){{ lv='HIGH'; pk=d.pickable||0; pd=d.picked||0; cu=dr.cur; pn=dr.pend; ps=dr.pstage; }}
+      else if(rk==='MED' && lv===''){{ lv='MED'; pk=d.pickable||0; pd=d.picked||0; cu=dr.cur; pn=dr.pend; ps=dr.pstage; }}
     }});
-    return {{level:lv, pick:pk, picked:pd, best:bs}};
+    return {{level:lv, pick:pk, picked:pd, cur:cu, pend:pn, pstage:ps}};
   }}
   // Colony-risk flag badge (for the standard-view Flags column) — shows severity AND
   // the pickable + total-picked colony counts so the standard view carries the colony info too.
-  function colRiskFlag(level,pick,picked){{
+  function colRiskFlag(level,pick,picked,pend,pstage){{
     if(level!=='HIGH' && level!=='MED') return '';
     picked=picked||0;
     var st = level==='HIGH' ? 'background:#FEE2E2;color:#991B1B;border:1px solid transparent;'
                             : 'background:#FEF3C7;color:#92400E;border:1px solid transparent;';
     var tip = level==='HIGH'
-      ? 'Colony at risk: every attempt LOW (0–'+PICK_LOW_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked.'
-      : 'Colony watch: best attempt only MEDIUM (≤'+PICK_MED_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked.';
+      ? 'Colony at risk: the newest counted attempt is LOW (0–'+PICK_LOW_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked across the design. Failed/canceled attempts excluded.'
+      : 'Colony watch: the newest counted attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked across the design. Failed/canceled attempts excluded.';
     var L = level.charAt(0)+level.slice(1).toLowerCase();
-    return '<span title="'+tip+'" style="'+BDG+st+'">Colony: '+L+' &middot; '+pick+'pk, '+picked+' picked</span>';
+    // Same retry qualifier the Colony Tracking badge carries — the standard view was
+    // showing the alarm without the one fact that says whether it needs you today.
+    var _sg = pstage ? (_STAGE_TXT[pstage]||pstage) : 'not started';
+    var rt = pend ? ' &middot; retry '+pend.toLowerCase()+' &middot; '+_sg : '';
+    if(pend) tip += ' A further attempt is already '+pend.toLowerCase()+' ('+_sg+') with no colonies counted yet.';
+    return '<span title="'+tip+'" style="'+BDG+st+'">Colony: '+L+' &middot; '+pick+'pk, '+picked+' picked'+rt+'</span>';
   }}
   // One-time: fold colony risk into each record's flags so it filters/sorts like the
   // other flags (and "All Flags" includes it). Idempotent via the indexOf guard.
@@ -1001,8 +1069,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       r.flags = r.flags || [];
       // Colony risk only applies while the request is in assembly (ASM). Past that
       // (LSP/PARTS/etc.) the colony picture is no longer the actionable signal.
-      var cr = (r.phase === 'ASM') ? reqColRisk(r) : {{level:'', pick:0, picked:0}};
+      var cr = (r.phase === 'ASM') ? reqColRisk(r) : {{level:'', pick:0, picked:0, pend:'', pstage:''}};
       r._colRisk = cr.level; r._colPick = cr.pick; r._colPicked = cr.picked;
+      r._colPend = cr.pend; r._colPStage = cr.pstage;
       if(cr.level && r.flags.indexOf('COLONY_RISK')===-1) {{ r.flags.push('COLONY_RISK'); _crCt++; }}
     }});
     var _el = document.getElementById('if-colrisk-ct');
@@ -1104,7 +1173,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var st  = statusBdg(r.status);
     var ph  = phaseBdg(r.phase);
     var fl  = r.flags.map(function(f){{
-      if(f==='COLONY_RISK') return colRiskFlag(r._colRisk, r._colPick, r._colPicked);
+      if(f==='COLONY_RISK') return colRiskFlag(r._colRisk, r._colPick, r._colPicked, r._colPend, r._colPStage);
       if(f==='AT_VENDOR') return bdg('AT VENDOR'+(r.vendor_out?' · '+r.vendor_out:''),F_ST['AT_VENDOR']);
       if(f==='AT_RISK') return '<span title="Behind the internal milestone schedule needed to hit the committed due date — the assembly or LSP scale-up milestone has already passed." style="'+BDG+F_ST['AT_RISK']+'">'+esc('Behind')+'</span>';
       return bdg(f.replace(/_/g,' '),F_ST[f]||F_ST['STALLED']);
@@ -1134,8 +1203,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     // Worst live design drives the request badge; carry that design's best-attempt count
     // through so the request row explains itself the same way the design rows do.
     var _rk = reqColRisk(r);
-    var rwarn = riskBadge(_rk.level, _rk.best);
-    return '<tr class="if-cardtop'+(grouped?' if-cgrp-mem':'')+'" style="cursor:pointer;font-weight:600;" onclick="ifToggleReq(\\''+r.req_id+'\\')">'
+    var rwarn = riskBadge(_rk.level, _rk.cur, _rk.pend, _rk.pstage);
+    return '<tr class="if-cardtop'+(grouped?' if-cgrp-mem':'')+'" data-tk="'+esc(r.req_id)+'" style="cursor:pointer;font-weight:600;" onclick="ifToggleReq(\\''+r.req_id+'\\')">'
       + '<td style="'+TD+'"><span class="if-caret'+(open?' open':'')+'">&#9654;</span></td>'
       + '<td style="'+TD+fps+'">'+(r.fp?'★':'')+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+paiBadges(r.pAI,r.customer)+'</td>'
@@ -1168,8 +1237,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     // data to band — pickBand(0) would falsely read "LOW", so suppress it.
     var band = ((d.attempts||[]).length === 1 && _counted(d)) ? pickBand(d.pickable) : '';
     var _dr = designRisk(d);
-    var warn = riskBadge(_dr.level, _dr.best);
-    return '<tr class="if-att-row"'+click+'>'
+    var warn = riskBadge(_dr.level, _dr.cur, _dr.pend, _dr.pstage);
+    return '<tr class="if-att-row" data-tk="'+esc(r.req_id+'|'+d.anchor)+'"'+click+'>'
       + '<td style="'+TD+'padding-left:20px;">'+caret+'</td>'
       + '<td style="'+TD+'" colspan="4"><span style="font-size:10px;font-weight:700;color:#334155;">Design '+(di+1)+' &middot; '+esc(d.dtype||'Design')+'</span>'+natt+parts+'</td>'
       + '<td style="'+TD+'"></td>'
@@ -1256,8 +1325,19 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     return html;
   }}
 
-  window.ifToggleReq = function(id) {{ if (_expR[id]) delete _expR[id]; else _expR[id] = true; window.ifRender(); }};
-  window.ifToggleDesign = function(id, anchor) {{ var k = id+'|'+anchor; if (_expA[k]) delete _expA[k]; else _expA[k] = true; window.ifRender(); }};
+  // Keep the clicked row visually still across the rebuild. Restoring a raw scrollTop
+  // is not enough: expanding/collapsing changes the container's total height, so the
+  // browser clamps the old offset and the view lurches. Anchoring to the clicked row
+  // holds it at the same screen position no matter how the height changes.
+  var _anchorKey = null, _anchorOff = 0;
+  function _markAnchor(key) {{
+    var sc = document.getElementById('tab-inflight');
+    var el = document.querySelector('#inflight-tbody [data-tk="'+key+'"]');
+    if (sc && el) {{ _anchorKey = key; _anchorOff = el.getBoundingClientRect().top - sc.getBoundingClientRect().top; }}
+    else {{ _anchorKey = null; }}
+  }}
+  window.ifToggleReq = function(id) {{ _markAnchor(id); if (_expR[id]) delete _expR[id]; else _expR[id] = true; window.ifRender(); }};
+  window.ifToggleDesign = function(id, anchor) {{ var k = id+'|'+anchor; _markAnchor(k); if (_expA[k]) delete _expA[k]; else _expA[k] = true; window.ifRender(); }};
   window.ifSetView = function(v) {{
     _view = v;
     var s = document.getElementById('if-v-standard'), c = document.getElementById('if-v-colony');
@@ -1278,6 +1358,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     // scroll offset here and restore it after the rebuild.
     var _scEl = document.getElementById('tab-inflight');
     var _scTop = _scEl ? _scEl.scrollTop : 0;
+    var _winY  = window.scrollY || document.documentElement.scrollTop || 0;
     var COLONY = _view === 'colony', NCOL = COLONY ? 12 : 13;
     var expOrder = [], buckets = {{}};
     _IFD.forEach(function(r) {{
@@ -1318,7 +1399,20 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     }});
     if (!html) html = '<tr><td colspan="'+NCOL+'" style="padding:20px;color:#6b7280;font-size:11px;text-align:center;">No matching requests.</td></tr>';
     tbody.innerHTML = html;
-    if (_scEl) _scEl.scrollTop = _scTop;   // restore scroll — toggling no longer jumps the page
+    // Anchored restore first (survives height changes); fall back to the raw offset.
+    var _done = false;
+    if (_anchorKey && _scEl) {{
+      var _el2 = document.querySelector('#inflight-tbody [data-tk="'+_anchorKey+'"]');
+      if (_el2) {{
+        _scEl.scrollTop += (_el2.getBoundingClientRect().top - _scEl.getBoundingClientRect().top) - _anchorOff;
+        _done = true;
+      }}
+    }}
+    _anchorKey = null;
+    if (!_done && _scEl) _scEl.scrollTop = _scTop;
+    // The tab is the scroll container, but restore the page offset too in case the
+    // window is also scrolled (short viewport) — otherwise the page itself lurches.
+    if (_winY) window.scrollTo(0, _winY);
   }};
 
   // ── Sort — sorts _IFD then re-renders (group headers rebuild correctly) ───
