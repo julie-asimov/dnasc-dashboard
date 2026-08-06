@@ -61,6 +61,21 @@ class PipelineConfig:
     # ── Colony Tracking view (Requests In Flight tab) ─────────────────────────
     MIN_PICKABLE_COLONIES: int = 3   # request-level pickable sum below this → red flag
 
+    # ── Parts restock buffer ──────────────────────────────────────────────────
+    # Spare stock to hold on top of the immediate need, as a fraction of that need,
+    # with REFILL_BUFFER_MIN as a floor for small needs.
+    #
+    # This is a STOCKING POLICY, not a prediction — it says how much spare to keep,
+    # and the tab labels it as such rather than presenting it as a forecast. It used
+    # to be 1.0 (hold 100% of need), which assumed every build might need doing twice
+    # and put parts with ~2x coverage on the restock list; that same full-retry case is
+    # already shown explicitly as the upper end of the target range, so counting it
+    # here too double-counted the pessimism.
+    #
+    # The floor governs until the need reaches 13 (0.8 * 13 > 10).
+    REFILL_BUFFER_FRAC: float = 0.80
+    REFILL_BUFFER_MIN:  int   = 10
+
     # ── Pinned infrastructure experiments ────────────────────────────────────
     # Ongoing reference/infra projects (not normal customer experiments). Single
     # source of truth — used by the In-Flight tab (_PINNED_EXPS: sort to bottom,
@@ -74,7 +89,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.11.20"
+    PIPELINE_VERSION: str = "1.11.23"
 
     @classmethod
     def get_date_filter(cls) -> str:

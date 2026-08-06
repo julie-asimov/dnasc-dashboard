@@ -12,10 +12,13 @@ import sys
 import re
 import html
 import pickle
+import math
 import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+from dnasc.config import PipelineConfig
 
 _ET = ZoneInfo("America/New_York")
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -575,7 +578,10 @@ def _render() -> str:
 
         blocks=[]
         pct = max(3, min(100, int(round(100*have/target)))) if target else 0
-        note = f"{need} needed + {max(10, need)} buffer" if not is_ctrl else "control buffer"
+        _bf=_buffer(need)
+        _rate=(f" @ {int(round(100*PipelineConfig.REFILL_BUFFER_FRAC))}%"
+               if _bf > PipelineConfig.REFILL_BUFFER_MIN else " floor")
+        note = f"{need} needed + {_bf} buffer{_rate}" if not is_ctrl else "control buffer"
         # What the shortfall really is: buffer-only shortfalls are not the same urgency as a
         # part live builds are waiting on.
         if not is_ctrl and need == 0:
@@ -1061,15 +1067,20 @@ def _render() -> str:
         if str(_x["Part"]) not in ctrl_related:
             _x["Reactions Required"]=direct_need(_x["Part"])
 
+    def _buffer(n):
+        """Spare stock to hold on top of `n`, per the configured stocking policy."""
+        return max(PipelineConfig.REFILL_BUFFER_MIN,
+                   math.ceil(PipelineConfig.REFILL_BUFFER_FRAC * n))
+
     def _target(x):
         need=int(x["Reactions Required"])
-        return 96 if str(x["Part"]) in ctrl_related else need + max(10, need)
+        return 96 if str(x["Part"]) in ctrl_related else need + _buffer(need)
 
     def _target_max(x):
         """Target if every RUNNING build came back for another attempt — the worst case."""
         if str(x["Part"]) in ctrl_related: return 96
         tot=exposure(x["Part"])["total"]
-        return tot + max(10, tot)
+        return tot + _buffer(tot)
 
     # Visibility uses the WORST case, urgency uses the immediate need. Filtering on the
     # immediate need alone silently dropped parts that are fine today but have no cover if
