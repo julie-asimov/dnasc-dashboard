@@ -751,6 +751,13 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
                     f"font-size:{_pg['size']};white-space:nowrap;margin:1px 1px;")
     CUST_DOT = tok.CUSTOMER_DOT
 
+    # Colony band + risk thresholds are config, not literals in the JS — see PipelineConfig for
+    # how they were calibrated and why the descriptive band and the risk trigger differ.
+    PICK_LOW_MAX  = PipelineConfig.PICK_BAND_LOW_MAX
+    PICK_MED_MAX  = PipelineConfig.PICK_BAND_MED_MAX
+    RISK_HIGH_MAX = PipelineConfig.COLONY_RISK_HIGH_MAX
+    RISK_MED_MAX  = PipelineConfig.COLONY_RISK_MED_MAX
+
     return f"""<style>
 .iff-active{{background:#eff4ff !important;border-color:#bcd0fb !important;color:#1d4ed8 !important;}}
 .if-vbtn.if-vactive{{background:#2563eb !important;color:#fff !important;border-color:#2563eb !important;}}
@@ -948,19 +955,33 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   function ccell(n,o){{return _counted(o)?num(n):_dash();}}
   // Pickable risk band for an attempt's pickable count (see legend in the toolbar):
   //   Low 0–7 (below median), Medium 8–22 (median→75th pct), High 23+ (top quartile).
-  var PICK_LOW_MAX=7, PICK_MED_MAX=22;
+  var PICK_LOW_MAX={PICK_LOW_MAX}, PICK_MED_MAX={PICK_MED_MAX};
+  var RISK_HIGH_MAX={RISK_HIGH_MAX}, RISK_MED_MAX={RISK_MED_MAX};
+  // Bands are PER STRAIN. An attempt sums its strain transformations, so judging a 1-strain
+  // attempt against the same number as a 2-strain one penalised it for having one pool:
+  // 1-strain median 12 vs 2-strain 26, ~1.9x more likely to read LOW. Per-strain yield is
+  // near-identical (12 vs 13), so dividing by the strain count compares like with like.
+  function _nstrain(a){{
+    var n=(a.by_strain||[]).filter(_counted).length;
+    if(!n) n=(a.strains||[]).length;
+    return n||1;
+  }}
+  function _perStrain(a){{ return Math.round((a.pickable||0)/_nstrain(a)); }}
   function pickBand(n){{
     n=n||0;
     var lbl, st;
     if(n<=PICK_LOW_MAX){{lbl='LOW'; st='background:#FDE2E2;color:#B42318;border:0.5px solid #F5A3A3;';}}
     else if(n<=PICK_MED_MAX){{lbl='MED'; st='background:#FEF3C7;color:#92400E;border:0.5px solid #FCD34D;';}}
     else{{lbl='HIGH'; st='background:#DCFCE7;color:#15803D;border:0.5px solid #86EFAC;';}}
-    return '<span title="'+n+' pickable — '+lbl+' band" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">'+lbl+'</span>';
+    return '<span title="'+n+' pickable per strain — '+lbl+' band (per-strain median '+PICK_LOW_MAX+', p75 '+PICK_MED_MAX+')" style="display:inline-block;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;white-space:nowrap;margin-left:6px;vertical-align:middle;'+st+'">'+lbl+'</span>';
   }}
   // Risk level for a design, by the BEST attempt available (its pickable ceiling):
-  //   best still LOW (0–PICK_LOW_MAX)      → HIGH RISK (only low options)
-  //   best MED (PICK_LOW_MAX–PICK_MED_MAX) → MED RISK  (no strong attempt yet)
-  //   best HIGH (>PICK_MED_MAX)            → healthy, no badge
+  //   per-strain <= RISK_HIGH_MAX (p25) → HIGH RISK (about to run out of viable picks)
+  //   per-strain <= RISK_MED_MAX (median) → MED RISK  (watch it)
+  //   above that                          → healthy, no badge
+  // Deliberately NOT the descriptive band: that one describes where a count sits in the
+  // distribution, this one asks whether the work is about to stall. Reusing one number for
+  // both made every below-median attempt an alarm.
   // Designs with a sequence-confirmed winner / already succeeded are never flagged.
   // Colony risk is a statement about work that is STILL LIVE. A design or attempt that
   // has already failed or been canceled is over — its colony counts are history, and
@@ -1009,10 +1030,10 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     // `n` is assigned chronologically when attempts are built, so highest n = newest.
     var cur=counted[0];
     counted.forEach(function(a){{ if((a.n||0) > (cur.n||0)) cur=a; }});
-    var pick=cur.pickable||0;
+    var pick=_perStrain(cur);          // per strain, so 1- and 2-strain attempts compare fairly
     var pend=_pending(d);
-    if(pick<=PICK_LOW_MAX) return {{level:'HIGH',cur:pick,pend:pend.st,pstage:pend.stage}};
-    if(pick<=PICK_MED_MAX) return {{level:'MED',cur:pick,pend:pend.st,pstage:pend.stage}};
+    if(pick<=RISK_HIGH_MAX) return {{level:'HIGH',cur:pick,pend:pend.st,pstage:pend.stage}};
+    if(pick<=RISK_MED_MAX) return {{level:'MED',cur:pick,pend:pend.st,pstage:pend.stage}};
     return {{level:'',cur:pick,pend:pend.st,pstage:pend.stage}};
   }}
   // level is the RISK (High = bad); the LOW/MED/HIGH on the rows below is the pickable
@@ -1023,10 +1044,10 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       ? 'background:#FEE2E2;color:#991B1B;border:1px solid transparent;'
       : 'background:#FEF3C7;color:#92400E;border:1px solid transparent;';
     var tip = level==='HIGH'
-      ? 'The newest counted attempt is in the LOW pickable band (0–'+PICK_LOW_MAX+') with no sequence-confirmed colony — at risk of running out of viable picks. Failed/canceled attempts are excluded.'
-      : 'The newest counted attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable) with no sequence-confirmed colony — watch this one. Failed/canceled attempts are excluded.';
+      ? 'The newest counted attempt is at or below '+RISK_HIGH_MAX+' pickable per strain (25th percentile) with no sequence-confirmed colony — at risk of running out of viable picks. Failed/canceled attempts are excluded.'
+      : 'The newest counted attempt is at or below '+RISK_MED_MAX+' pickable per strain (the median) with no sequence-confirmed colony — watch this one. Failed/canceled attempts are excluded.';
     var L = level.charAt(0)+level.slice(1).toLowerCase();
-    var drv = (cur||cur===0) ? ' &middot; latest attempt '+(cur||0)+' pk' : '';
+    var drv = (cur||cur===0) ? ' &middot; latest attempt '+(cur||0)+' pk/strain' : '';
     // A queued/running retry is the single biggest thing that changes how urgent this is.
     var _sg = pstage ? (_STAGE_TXT[pstage]||pstage) : 'not started';
     var rt  = pend ? ' &middot; retry '+pend.toLowerCase()+' &middot; '+_sg : '';
@@ -1051,8 +1072,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     var st = level==='HIGH' ? 'background:#FEE2E2;color:#991B1B;border:1px solid transparent;'
                             : 'background:#FEF3C7;color:#92400E;border:1px solid transparent;';
     var tip = level==='HIGH'
-      ? 'Colony at risk: the newest counted attempt is LOW (0–'+PICK_LOW_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked across the design. Failed/canceled attempts excluded.'
-      : 'Colony watch: the newest counted attempt is only MEDIUM (≤'+PICK_MED_MAX+' pickable), no seq-confirmed clone. '+pick+' pickable, '+picked+' picked across the design. Failed/canceled attempts excluded.';
+      ? 'Colony at risk: the newest counted attempt is at or below '+RISK_HIGH_MAX+' pickable per strain, no seq-confirmed clone. '+pick+' pickable, '+picked+' picked across the design. Failed/canceled attempts excluded.'
+      : 'Colony watch: the newest counted attempt is at or below '+RISK_MED_MAX+' pickable per strain, no seq-confirmed clone. '+pick+' pickable, '+picked+' picked across the design. Failed/canceled attempts excluded.';
     var L = level.charAt(0)+level.slice(1).toLowerCase();
     // Same retry qualifier the Colony Tracking badge carries — the standard view was
     // showing the alarm without the one fact that says whether it needs you today.
@@ -1235,7 +1256,8 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     // attempt designs band each attempt row instead (the design total is a sum).
     // Zero-attempt designs (WAITING/CANCELED with no colony work) have no pickable
     // data to band — pickBand(0) would falsely read "LOW", so suppress it.
-    var band = ((d.attempts||[]).length === 1 && _counted(d)) ? pickBand(d.pickable) : '';
+    var band = ((d.attempts||[]).length === 1 && _counted(d))
+             ? pickBand(_perStrain((d.attempts||[])[0] || d)) : '';
     var _dr = designRisk(d);
     var warn = riskBadge(_dr.level, _dr.cur, _dr.pend, _dr.pstage);
     return '<tr class="if-att-row" data-tk="'+esc(r.req_id+'|'+d.anchor)+'"'+click+'>'
@@ -1288,7 +1310,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       + '<td style="'+TD+'"></td>'
       + '<td style="'+TD+'padding-left:38px;" colspan="4">'+lbl+'</td>'
       + '<td style="'+TD+'"></td>'
-      + '<td style="'+TD+'white-space:nowrap;">'+(_counted(a)?pickBand(a.pickable):'')+'</td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+(_counted(a)?pickBand(_perStrain(a)):'')+'</td>'
       + '<td style="'+TD+'">'+ccell(a.pickable,a)+'</td>'
       + '<td style="'+TD+'">'+ccell(a.picked,a)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(a.seq,a.tot,false,a.status,a.picked)+'</td>'

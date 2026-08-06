@@ -61,6 +61,25 @@ class PipelineConfig:
     # ── Colony Tracking view (Requests In Flight tab) ─────────────────────────
     MIN_PICKABLE_COLONIES: int = 3   # request-level pickable sum below this → red flag
 
+    # ── Colony pickable bands (Requests In Flight) ────────────────────────────
+    # Calibrated on 2,575 colony-bearing workorders / 1,342 attempts (Jan 2025-Jul 2026),
+    # measured PER STRAIN: median 11, p75 26, p25 3, p20 2.
+    #
+    # The unit matters. The old hardcoded 7/22 matched the per-workorder distribution but
+    # was applied to attempt TOTALS as well, where 7 is only the 22nd percentile. Since an
+    # attempt sums its strain transformations, a 1-strain attempt was judged against the
+    # same yardstick as a 2-strain one: 1-strain median 12 vs 2-strain 26, and 1-strain
+    # attempts were ~1.9x more likely to be called LOW (Fisher p=0.0002). Per-strain yield
+    # is near-identical between them (12 vs 13), so totals are roughly additive and dividing
+    # by the strain count compares like with like.
+    PICK_BAND_LOW_MAX: int = 11    # below the per-strain median
+    PICK_BAND_MED_MAX: int = 26    # median -> p75
+    # Risk is a stricter, separate question — "about to run out of viable picks" — so it does
+    # NOT reuse the descriptive band. p25 per strain is 3, which is what MIN_PICKABLE_COLONIES
+    # already uses for the per-row low-pick flag; MED watches up to the median.
+    COLONY_RISK_HIGH_MAX: int = 3
+    COLONY_RISK_MED_MAX:  int = 11
+
     # ── Parts restock buffer ──────────────────────────────────────────────────
     # Spare stock to hold on top of the immediate need, as a fraction of that need,
     # with REFILL_BUFFER_MIN as a floor for small needs.
