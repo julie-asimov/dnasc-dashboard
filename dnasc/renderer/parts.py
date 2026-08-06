@@ -860,23 +860,42 @@ def _render() -> str:
         return f'{pre}<span style="color:{col};font-weight:700">⚠ needs batch</span>'
 
     def _covered(x):
-        """Stock already meets the queued need + buffer — the row is listed only because the
-        worst case (every running build retrying) is not covered."""
+        """Every build actually WAITING on this part can run.
+
+        This deliberately ignores the buffer. Urgency is about whether work is blocked, not
+        whether the spare is topped up — testing against the full target (need + buffer) made
+        d8260 read "needs PCR" with 4 rxns on hand and only 2 builds waiting, while d8278 with
+        7 on hand read "covered". Same situation, opposite wording.
+        """
         if x.get("_blockedpart") or bool(x.get("_isbuild")): return False
-        return int(x["Reactions Available"]) >= _target(x)
+        return int(x["Reactions Available"]) >= int(x["Reactions Required"])
 
     def batch_cell(x):
         part=str(x["Part"]); act=x["Action Suggested"]
         if _covered(x):
-            # Never print "needs PCR"/"needs batch" on a part that covers its queue. That was
-            # the noisiest thing on the tab: d8272 read "Add PCR WO - needs PCR" with 11 rxns
-            # on hand and a queued need of 0.
-            _ex=exposure(part)
-            return ('<span style="color:#15803d;font-weight:600">covered for the queue</span>'
-                    + (f'<span style="color:#9ca3af"> · exposed only if the {_ex["drawn"]} '
-                       f'running build{"s" if _ex["drawn"]!=1 else ""} '
-                       f'{"retry" if _ex["drawn"]!=1 else "retries"}</span>'
-                       if _ex["drawn"] else ''))
+            # Never print "needs PCR"/"needs batch" on a part whose waiting builds can all run.
+            # One vocabulary for the calm states, so two rows in the same position cannot read
+            # as though one were urgent: "buffer only" when nothing is waiting at all, "queue
+            # covered" when something is waiting and the stock covers it. Any remaining gap is
+            # buffer and is stated as such, never as an alarm.
+            _ex=exposure(part); _nd=int(x["Reactions Required"]); _hv=int(x["Reactions Available"])
+            _short=max(0, _target(x)-_hv)
+            if _nd>0:
+                head=('<span style="color:#15803d;font-weight:600">queue covered</span>'
+                      f'<span style="color:#9ca3af"> · all {_nd} waiting build'
+                      f'{"s" if _nd!=1 else ""} can run</span>')
+            else:
+                head=('<span style="color:#6b7280;font-weight:600">buffer only</span>'
+                      '<span style="color:#9ca3af"> · nothing is waiting on it</span>')
+            tail=''
+            if _short:
+                tail=(f'<div style="color:#9ca3af;font-size:10px">{_short} below the buffer '
+                      f'target of {_target(x)} — spare stock, not blocked work</div>')
+            elif _ex["drawn"]:
+                tail=(f'<div style="color:#9ca3af;font-size:10px">exposed only if the '
+                      f'{_ex["drawn"]} running build{"s" if _ex["drawn"]!=1 else ""} '
+                      f'{"retry" if _ex["drawn"]!=1 else "retries"}</div>')
+            return head+tail
         if x.get("_blockedpart"):
             # Lead with the cost (how many WOs are stuck), because that is what makes one missing
             # part more urgent than another — the action itself is already in the Action column.
@@ -953,6 +972,33 @@ def _render() -> str:
         else:       lvl,bg,fg="LOW","#f0fdf4","#15803d"
         return f'<span title="feeds {d} downstream builds" style="background:{bg};color:{fg};font-size:8px;font-weight:700;padding:1px 5px;border-radius:8px;margin-left:5px">{lvl}</span>'
 
+    def stall_rank(x):
+        """0 = waiting builds CANNOT run (no stock), 1 = only some can, 2 = queue is covered.
+
+        The LOW/MED/HIGH badge bands the SIZE of demand, so a part with 0 on hand and 2 builds
+        waiting looked identical to one with 5 on hand and nothing waiting. This is the thing
+        that actually decides urgency: can the builds that are waiting on it proceed today.
+        """
+        if x.get("_blockedpart") or bool(x.get("_isbuild")): return 2
+        have=int(x["Reactions Available"]); need=int(x["Reactions Required"])
+        if need<=0:        return 2
+        if have<=0:        return 0
+        if have<need:      return 1
+        return 2
+
+    def stall_badge(x):
+        r=stall_rank(x)
+        if r==2: return ''
+        need=int(x["Reactions Required"]); have=int(x["Reactions Available"])
+        if r==0:
+            return (f'<span title="No stock and {need} build(s) waiting — they cannot run until '
+                    f'this is made" style="background:#b91c1c;color:#fff;font-size:8px;'
+                    f'font-weight:700;padding:1px 6px;border-radius:8px;margin-left:5px">'
+                    f'STALLS {need}</span>')
+        return (f'<span title="{have} on hand but {need} build(s) waiting — only {have} can run" '
+                f'style="background:#fef3c7;color:#92400e;font-size:8px;font-weight:700;'
+                f'padding:1px 6px;border-radius:8px;margin-left:5px">SHORT {need-have}</span>')
+
     def disp_act(x):
         """Action to SHOW. If flipping the make-available wells ON already clears the target,
         the job is 'Mark available', not 'Refill' — the pull can't reach this verdict because it
@@ -972,6 +1018,10 @@ def _render() -> str:
     _rowstate = {"i": 0}
     def row_html(i, x):
         part=str(x["Part"]); act=disp_act(x)
+        # Third number in the Have column: builds already running. Without it the column read
+        # "4 / 0" on a part whose own "Needed for" cell listed two RUNNING builds — technically
+        # right (nothing queued) but flatly contradicting the row beside it.
+        _ex_row=exposure(part)
         age=None
         bb=builds_for(part)
         if bb: summary=f'{bb[0][0]} ({bb[0][2]})'+(f' +{len(bb)-1} more' if len(bb)>1 else '')
@@ -981,8 +1031,23 @@ def _render() -> str:
         else: summary="—"
         return (f'<tr class="prow" onclick="partsToggle({i})" style="cursor:pointer">'
                 f'<td style="width:18px;color:#9ca3af" id="c{i}">▸</td>'
-                f'<td style="font-family:monospace;font-weight:700">{part}{repeat_badge(x["Reactions Required"])}</td>'
-                f'<td style="text-align:center">{int(x["Reactions Available"])} / <strong style="color:#b45309;font-size:13px">{int(x["Reactions Required"])}</strong></td>'
+                f'<td style="font-family:monospace;font-weight:700">{part}'
+                f'{stall_badge(x)}'
+                f'{repeat_badge(x["Reactions Required"]) if stall_rank(x)==2 else ""}</td>'
+                f'<td style="text-align:center;white-space:nowrap" '
+                f'title="{int(x["Reactions Available"])} rxns on hand'
+                f' · {int(x["Reactions Required"])} rxns for builds still WAITING to draw'
+                f' · {_ex_row["drawn"]} rxns already drawn by builds now RUNNING">'
+                # Bare "4 / 0" read as though the 0 were the stock. Label each number in place —
+                # a column header is too far away to disambiguate at a glance.
+                f'<span style="font-weight:700">{int(x["Reactions Available"])}</span>'
+                f'<span style="color:#9ca3af;font-size:9px"> on hand</span>'
+                f'<span style="color:#d1d5db"> · </span>'
+                f'<strong style="color:#b45309;font-size:13px">{int(x["Reactions Required"])}</strong>'
+                f'<span style="color:#9ca3af;font-size:9px"> waiting</span>'
+                f'<span style="color:#d1d5db"> · </span>'
+                f'<span style="color:#6b7280;font-weight:700">{_ex_row["drawn"]}</span>'
+                f'<span style="color:#9ca3af;font-size:9px"> running</span></td>'
                 f'<td>{act_badge(act,age,not_in_lims=bool(x.get("_blockedpart") and act=="True" and _no_lims_wells(part)),muted=_covered(x))}</td>'
                 f'<td style="font-size:11px">{batch_cell(x)}</td>'
                 f'<td style="font-size:11px;color:#374151">{html.escape(summary)}</td></tr>'
@@ -1113,8 +1178,11 @@ def _render() -> str:
     i = 0
     def part_exps(part):
         return sorted({e for _,_,_,e in builds_for(part) if e})
-    _PCOLS='<colgroup><col style="width:26px"><col style="width:19%"><col style="width:11%"><col style="width:12%"><col style="width:23%"><col></colgroup>'
-    _HDR='<tr><th></th><th>Part</th><th>Have / Need</th><th>Action</th><th>Batch / order</th><th>Needed for</th></tr>'
+    _PCOLS='<colgroup><col style="width:26px"><col style="width:19%"><col style="width:14%"><col style="width:12%"><col style="width:21%"><col></colgroup>'
+    _HDR=('<tr><th></th><th>Part</th>'
+          '<th title="rxns on hand / rxns for builds still waiting / rxns already drawn by '
+          'running builds">On hand / waiting / running</th>'
+          '<th>Action</th><th>Batch / order</th><th>Needed for</th></tr>')
     def _exp_group(title, rowobjs, accent="#7c3aed", desc="", open_=True):
         nonlocal i
         body=""
@@ -1135,10 +1203,13 @@ def _render() -> str:
             elif len(exps)==1: by.setdefault(exps[0],[]).append(x)
             else: multi.append(x)
         hh=""
-        for e in sorted(by, key=lambda e:-sum(int(x["Reactions Required"]) for x in by[e])):
-            hh+=_exp_group(e, sorted(by[e], key=lambda x:-int(x["Reactions Required"])), open_=open_)
+        # Group order follows the worst stall inside it: a part with builds that cannot run
+        # must not sit below a bigger-but-healthy group where nobody scrolls to it.
+        for e in sorted(by, key=lambda e:(min(stall_rank(x) for x in by[e]),
+                                          -sum(int(x["Reactions Required"]) for x in by[e]))):
+            hh+=_exp_group(e, sorted(by[e], key=lambda x:(stall_rank(x),-int(x["Reactions Required"]))), open_=open_)
         if multi:
-            hh+=_exp_group("Multi-project parts", sorted(multi,key=lambda x:-int(x["Reactions Required"])),
+            hh+=_exp_group("Multi-project parts", sorted(multi,key=lambda x:(stall_rank(x),-int(x["Reactions Required"]))),
                            accent=multi_accent, desc="feed more than one experiment — see “Needed for”", open_=open_)
         if noexp:
             hh+=_exp_group(noexp_title, noexp, open_=open_)
