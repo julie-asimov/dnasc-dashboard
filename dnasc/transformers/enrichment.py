@@ -82,10 +82,37 @@ _PROTO_MAP: dict[tuple[str, str], tuple[int, str]] = {
     (proto.LSP_RECEIVING,    'RU'): (66, 'LSP RECEIVING: RUNNING'),
     (proto.GLYCEROL_STOCKING,'RD'): (70, 'GLYCEROL STOCKING: READY'),
     (proto.GLYCEROL_STOCKING,'RU'): (71, 'GLYCEROL STOCKING: RUNNING'),
+    (proto.DIGEST,           'RD'): (75, 'DIGEST: READY'),
+    (proto.DIGEST,           'RU'): (76, 'DIGEST: RUNNING'),
     (proto.LSP_REVIEWING,    'RD'): (80, 'LSP REVIEWING: READY'),
     (proto.LSP_REVIEWING,    'RU'): (81, 'LSP REVIEWING: RUNNING'),
     (proto.LSP_RELEASING,    'RD'): (90, 'LSP RELEASING: READY'),
     (proto.LSP_RELEASING,    'RU'): (91, 'LSP RELEASING: RUNNING'),
+}
+
+# Phase a workorder type runs in — resolves which priority set applies to that
+# row's operations.  Unmapped types fall through to the base _PROTO_MAP.
+_TYPE_PHASE: dict[str, str] = {t: 'PARTS' for t in _PARTS_TYPES} | {
+    'golden_gate_workorder': 'ASM',
+    'gibson_workorder': 'ASM',
+    'transformation_workorder': 'ASM',
+    'transformation_offline_operation': 'ASM',
+    'streakout_operation': 'ASM',
+    'lsp_workorder': 'LSP',
+}
+
+# Phase-scoped priority overrides on _PROTO_MAP, keyed by the phase of the
+# workorder the operation belongs to (NOT the request's phase — a request in
+# LSP can still carry leftover RD parts operations).
+#
+# Fragment Analyzer runs in both phases and means something different in each:
+# PCR QC in PARTS (base priority 9, next to PCR) vs the digest-gel readout in
+# LSP, where it lands after Digest (75/76) and before LSP Reviewing (80/81).
+_PROTO_MAP_BY_PHASE: dict[str, dict[tuple[str, str], tuple[int, str]]] = {
+    'LSP': {
+        (proto.FRAGMENT_ANALYZER, 'RD'): (77, 'FRAGMENT ANALYZER: READY'),
+        (proto.FRAGMENT_ANALYZER, 'RU'): (78, 'FRAGMENT ANALYZER: RUNNING'),
+    },
 }
 
 
@@ -150,7 +177,7 @@ def _infer_stage(
         p = _active_protocols(lsp_s.iloc[0])
         if proto.LSP_RELEASING in p:                                                return 'Releasing'
         if proto.LSP_REVIEWING in p:                                                return 'Reviewing'
-        if p & {proto.DNA_QUANT, proto.NGS, proto.FRAGMENT_ANALYZER}:              return 'LSP QC'
+        if p & {proto.DNA_QUANT, proto.NGS, proto.FRAGMENT_ANALYZER, proto.DIGEST}: return 'LSP QC'
         return 'LSP'
 
     # ── Assembly phase ───────────────────────────────────────────────
@@ -409,13 +436,21 @@ class EnrichmentTransformer:
             # pandas Series per row (the dominant cost of this step).
             _op_pn = _op_rows['protocol_name'].to_numpy()
             _op_st = _op_rows['operation_state'].to_numpy()
-            for _pn_cell, _st_cell in zip(_op_pn, _op_st):
+            _op_ty = _op_rows['type'].to_numpy()
+            for _pn_cell, _st_cell, _ty in zip(_op_pn, _op_st, _op_ty):
                 if not isinstance(_pn_cell, (list, np.ndarray)) or not isinstance(_st_cell, (list, np.ndarray)):
                     continue
+                # Priorities resolve against the phase of THIS row's workorder, so
+                # a PCR-workorder Fragment Analyzer and an LSP-workorder Fragment
+                # Analyzer active in the same request each score on their own scale.
+                _ovr = _PROTO_MAP_BY_PHASE.get(_TYPE_PHASE.get(str(_ty), ''))
                 for _p, _s in zip(_pn_cell, _st_cell):
                     _key = (str(_p), str(_s))
-                    if _key in _PROTO_MAP:
-                        _pri, _lbl = _PROTO_MAP[_key]
+                    _hit = _ovr.get(_key) if _ovr else None
+                    if _hit is None:
+                        _hit = _PROTO_MAP.get(_key)
+                    if _hit is not None:
+                        _pri, _lbl = _hit
                         if _pri > _best_pri:
                             _best_pri, _best_label, _best_state = _pri, _lbl, _s
             req_operation[req_id] = _best_label

@@ -36,6 +36,7 @@ LSP_RECEIVING     = "LSP Receiving"
 LSP_REVIEWING     = "LSP Reviewing"
 LSP_RELEASING     = "LSP Releasing"
 GLYCEROL_STOCKING = "Glycerol Stocking Scinomix"
+DIGEST            = "Digest"
 
 # ── Grouped sets ──────────────────────────────────────────────────────────────
 
