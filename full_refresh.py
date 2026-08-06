@@ -2,8 +2,14 @@
 ============================================================================
 FULL REFRESH — Script Server Entry Point
 ============================================================================
-Runs the complete pipeline from scratch, saves baseline.parquet,
-then renders and writes the dashboard HTML to www/.
+Runs the complete pipeline from scratch, saves baseline.parquet, refreshes the
+Parts tab data, then renders and writes the dashboard HTML to www/.
+
+The Parts tab is a SEPARATE BigQuery pull (gen_parts_pkl) that also has its own
+cron on the server, so the two halves of the dashboard can age independently. That
+split meant a manual full refresh left the Parts tab stale — so it now runs here
+too, before the render. Pass --skip-parts to keep the old behaviour (e.g. on the
+server, where the dedicated parts cron already covers it).
 
 Schedule: Once daily (or on deploy / version bump)
 ============================================================================
@@ -41,6 +47,10 @@ MISSING_DUE_FILE = STATE_DIR / "missing_asana_dates.json"
 # ── Pipeline version (bump this string when you push new code) ───────────────
 PIPELINE_VERSION = PipelineConfig.PIPELINE_VERSION
 
+# The parts pull is ~250s on top of a ~640s refresh; skip it when a dedicated parts
+# cron already keeps parts_result.pkl fresh.
+SKIP_PARTS = "--skip-parts" in sys.argv
+
 def main():
     start = time.time()
     print("=" * 70)
@@ -61,6 +71,22 @@ def main():
     # 3. Fetch due dates from Google Sheet (or CSV fallback)
     print("\n📅 Fetching experiment due dates...")
     fetch_due_dates()
+
+    # 3b. Refresh the Parts tab data — MUST run before the render, since the render
+    #     reads parts_result.pkl. Non-fatal by design: gen_parts_pkl writes atomically,
+    #     so a failure leaves the previous good pkl in place and the tab simply renders
+    #     a little stale rather than taking the whole refresh down with it.
+    if SKIP_PARTS:
+        print("\n🧬 Parts data: skipped (--skip-parts)")
+    else:
+        print("\n🧬 Refreshing Parts tab data (separate BigQuery pull)...")
+        _pt = time.time()
+        try:
+            import gen_parts_pkl
+            gen_parts_pkl.main()
+            print(f"   ✅ Parts data refreshed in {time.time() - _pt:.1f}s")
+        except Exception as e:
+            print(f"   ⚠️  Parts pull failed ({e}) — keeping the previous parts_result.pkl")
 
     # 4. Render HTML
     print("\n🎨 Rendering dashboard...")
