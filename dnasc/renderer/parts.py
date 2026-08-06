@@ -880,7 +880,14 @@ def _render() -> str:
             # buffer and is stated as such, never as an alarm.
             _ex=exposure(part); _nd=int(x["Reactions Required"]); _hv=int(x["Reactions Available"])
             _short=max(0, _target(x)-_hv)
-            if _nd>0:
+            if part in ctrl_related:
+                # Controls carry the pull's own reaction figure, not a count of waiting builds
+                # (they are stocked regardless of demand), so "N waiting builds can run" would be
+                # invented — pAI-13500 has zero open workorders consuming it.
+                head=('<span style="color:#6b7280;font-weight:600">control stock</span>'
+                      f'<span style="color:#9ca3af"> · held at {_target(x)} rxns regardless of '
+                      f'live demand</span>')
+            elif _nd>0:
                 head=('<span style="color:#15803d;font-weight:600">queue covered</span>'
                       f'<span style="color:#9ca3af"> · all {_nd} waiting build'
                       f'{"s" if _nd!=1 else ""} can run</span>')
@@ -1029,25 +1036,43 @@ def _render() -> str:
         elif part in ctrl_related: summary="primer/template for a control dPart"
         elif [d for d in tmpl_kids.get(part,[]) if d in flagged]: summary="template for "+", ".join(d for d in tmpl_kids.get(part,[]) if d in flagged)
         else: summary="—"
+        # Build the stock cell as its own value. It was previously an `A if cond else B`
+        # inline in the return's f-string chain — adjacent f-strings concatenate, so the
+        # conditional split the WHOLE row rather than just this cell, and control rows
+        # rendered only their first three <td>s with no closing tags.
+        _hv=int(x["Reactions Available"]); _rq=int(x["Reactions Required"])
+        _lbl='color:#9ca3af;font-size:9px'
+        if part in ctrl_related:
+            # Controls hold the pull's own reaction figure, not a count of waiting builds —
+            # they are stocked to a fixed target regardless of live demand.
+            stock_cell=(f'<td style="text-align:center;white-space:nowrap" '
+                        f'title="Control part — kept permanently stocked at {_target(x)} rxns '
+                        f'regardless of live demand. {_hv} rxns on hand.">'
+                        f'<span style="font-weight:700">{_hv}</span>'
+                        f'<span style="{_lbl}"> on hand</span>'
+                        f'<span style="color:#d1d5db"> · </span>'
+                        f'<span style="color:#6b7280;font-size:9px">control · target '
+                        f'{_target(x)}</span></td>')
+        else:
+            # Bare "4 / 0" read as though the 0 were the stock, so each number is labelled
+            # in place — a column header is too far away to disambiguate at a glance.
+            stock_cell=(f'<td style="text-align:center;white-space:nowrap" '
+                        f'title="{_hv} rxns on hand · {_rq} rxns for builds still WAITING to '
+                        f'draw · {_ex_row["drawn"]} rxns already drawn by builds now RUNNING">'
+                        f'<span style="font-weight:700">{_hv}</span>'
+                        f'<span style="{_lbl}"> on hand</span>'
+                        f'<span style="color:#d1d5db"> · </span>'
+                        f'<strong style="color:#b45309;font-size:13px">{_rq}</strong>'
+                        f'<span style="{_lbl}"> waiting</span>'
+                        f'<span style="color:#d1d5db"> · </span>'
+                        f'<span style="color:#6b7280;font-weight:700">{_ex_row["drawn"]}</span>'
+                        f'<span style="{_lbl}"> running</span></td>')
         return (f'<tr class="prow" onclick="partsToggle({i})" style="cursor:pointer">'
                 f'<td style="width:18px;color:#9ca3af" id="c{i}">▸</td>'
                 f'<td style="font-family:monospace;font-weight:700">{part}'
                 f'{stall_badge(x)}'
                 f'{repeat_badge(x["Reactions Required"]) if stall_rank(x)==2 else ""}</td>'
-                f'<td style="text-align:center;white-space:nowrap" '
-                f'title="{int(x["Reactions Available"])} rxns on hand'
-                f' · {int(x["Reactions Required"])} rxns for builds still WAITING to draw'
-                f' · {_ex_row["drawn"]} rxns already drawn by builds now RUNNING">'
-                # Bare "4 / 0" read as though the 0 were the stock. Label each number in place —
-                # a column header is too far away to disambiguate at a glance.
-                f'<span style="font-weight:700">{int(x["Reactions Available"])}</span>'
-                f'<span style="color:#9ca3af;font-size:9px"> on hand</span>'
-                f'<span style="color:#d1d5db"> · </span>'
-                f'<strong style="color:#b45309;font-size:13px">{int(x["Reactions Required"])}</strong>'
-                f'<span style="color:#9ca3af;font-size:9px"> waiting</span>'
-                f'<span style="color:#d1d5db"> · </span>'
-                f'<span style="color:#6b7280;font-weight:700">{_ex_row["drawn"]}</span>'
-                f'<span style="color:#9ca3af;font-size:9px"> running</span></td>'
+                f'{stock_cell}'
                 f'<td>{act_badge(act,age,not_in_lims=bool(x.get("_blockedpart") and act=="True" and _no_lims_wells(part)),muted=_covered(x))}</td>'
                 f'<td style="font-size:11px">{batch_cell(x)}</td>'
                 f'<td style="font-size:11px;color:#374151">{html.escape(summary)}</td></tr>'
