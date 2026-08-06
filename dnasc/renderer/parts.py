@@ -360,7 +360,7 @@ def _render() -> str:
         """Not one well on record for this part — LIMS has never held any of it."""
         return not len(apd[apd["STOCK_ID"].astype(str)==str(part)])
 
-    def act_badge(a, age=None, not_in_lims=False):
+    def act_badge(a, age=None, not_in_lims=False, muted=False):
         # "Reorder" is wrong for a part LIMS has never held: there is nothing to RE-order, and the
         # row's real state is that it isn't there at all. Say that instead of naming an action.
         if not_in_lims: lbl,bg,fg = "Not in LIMS","#f3f4f6","#b91c1c"
@@ -370,6 +370,10 @@ def _render() -> str:
         elif a=="Transform": lbl,bg,fg = "Transform","#fff7ed","#c2410c"
         elif a=="True":   lbl,bg,fg = "Reorder","#fff1f5","#be185d"
         else: lbl,bg,fg = str(a),"#f3f4f6","#6b7280"
+        # Covered for its queued need: the row is only here because of worst-case exposure, so
+        # the action is what you WOULD do, not what you must do today. Grey it out rather than
+        # letting "Add PCR WO" shout next to 11 rxns on hand for a need of 2.
+        if muted and not not_in_lims: bg,fg = "#f3f4f6","#9ca3af"
         return f'<span style="background:{bg};color:{fg};font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;white-space:nowrap">{lbl}</span>'
 
     def coord384(wn):
@@ -855,8 +859,24 @@ def _render() -> str:
                     f'<span style="color:#9ca3af">{tail}</span>')
         return f'{pre}<span style="color:{col};font-weight:700">⚠ needs batch</span>'
 
+    def _covered(x):
+        """Stock already meets the queued need + buffer — the row is listed only because the
+        worst case (every running build retrying) is not covered."""
+        if x.get("_blockedpart") or bool(x.get("_isbuild")): return False
+        return int(x["Reactions Available"]) >= _target(x)
+
     def batch_cell(x):
         part=str(x["Part"]); act=x["Action Suggested"]
+        if _covered(x):
+            # Never print "needs PCR"/"needs batch" on a part that covers its queue. That was
+            # the noisiest thing on the tab: d8272 read "Add PCR WO - needs PCR" with 11 rxns
+            # on hand and a queued need of 0.
+            _ex=exposure(part)
+            return ('<span style="color:#15803d;font-weight:600">covered for the queue</span>'
+                    + (f'<span style="color:#9ca3af"> · exposed only if the {_ex["drawn"]} '
+                       f'running build{"s" if _ex["drawn"]!=1 else ""} '
+                       f'{"retry" if _ex["drawn"]!=1 else "retries"}</span>'
+                       if _ex["drawn"] else ''))
         if x.get("_blockedpart"):
             # Lead with the cost (how many WOs are stuck), because that is what makes one missing
             # part more urgent than another — the action itself is already in the Action column.
@@ -963,7 +983,7 @@ def _render() -> str:
                 f'<td style="width:18px;color:#9ca3af" id="c{i}">▸</td>'
                 f'<td style="font-family:monospace;font-weight:700">{part}{repeat_badge(x["Reactions Required"])}</td>'
                 f'<td style="text-align:center">{int(x["Reactions Available"])} / <strong style="color:#b45309;font-size:13px">{int(x["Reactions Required"])}</strong></td>'
-                f'<td>{act_badge(act,age,not_in_lims=bool(x.get("_blockedpart") and act=="True" and _no_lims_wells(part)))}</td>'
+                f'<td>{act_badge(act,age,not_in_lims=bool(x.get("_blockedpart") and act=="True" and _no_lims_wells(part)),muted=_covered(x))}</td>'
                 f'<td style="font-size:11px">{batch_cell(x)}</td>'
                 f'<td style="font-size:11px;color:#374151">{html.escape(summary)}</td></tr>'
                 f'<tr id="d{i}" style="display:none"><td></td><td colspan="5">{detail_html(x)}</td></tr>')

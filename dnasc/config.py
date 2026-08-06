@@ -72,9 +72,12 @@ class PipelineConfig:
     # already shown explicitly as the upper end of the target range, so counting it
     # here too double-counted the pessimism.
     #
-    # The floor governs until the need reaches 13 (0.8 * 13 > 10).
+    # The floor was 10, which was a huge ask for a dPart consumed 2 at a time: parts with
+    # 3.5x-5.5x coverage (d8269 at 11 on hand for a need of 2) were told to run a PCR.
+    # At 5 those clear while genuinely thin stock (d8260, 4 on hand for a need of 2) still
+    # flags. The floor governs until the need reaches 7 (0.8 * 7 > 5).
     REFILL_BUFFER_FRAC: float = 0.80
-    REFILL_BUFFER_MIN:  int   = 10
+    REFILL_BUFFER_MIN:  int   = 5
 
     # ── Pinned infrastructure experiments ────────────────────────────────────
     # Ongoing reference/infra projects (not normal customer experiments). Single
