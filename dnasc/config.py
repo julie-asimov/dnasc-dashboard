@@ -80,6 +80,19 @@ class PipelineConfig:
     COLONY_RISK_HIGH_MAX: int = 3
     COLONY_RISK_MED_MAX:  int = 11
 
+    # ── Parts pull freshness ──────────────────────────────────────────────────
+    # full_refresh refreshes parts_result.pkl only if the dedicated parts cron did NOT just run.
+    # Measured from when the full refresh STARTS, not from when it reaches the parts step — by
+    # then the pipeline has already burned ~11 minutes and every pkl would look stale.
+    #
+    # Schedule: parts cron 12:50, full refresh 13:00. A pull that ran takes ~3-4 min and lands
+    # at ~12:54, so at refresh-start the pkl is ~6 min old -> skip. If the cron failed, the pkl
+    # is yesterday's (~1446 min) -> pull it. 15 rather than 10 because the cron cannot finish
+    # before it starts, so a 10-minute window sits exactly on the boundary and any clock skew
+    # or a cron firing a few seconds early would trip it. Nothing real lands between 15 min and
+    # a full day, so the slack costs nothing.
+    PARTS_MAX_AGE_MINUTES: int = 15
+
     # ── Parts restock buffer ──────────────────────────────────────────────────
     # Spare stock to hold on top of the immediate need, as a fraction of that need,
     # with REFILL_BUFFER_MIN as a floor for small needs.
@@ -111,7 +124,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.11.26"
+    PIPELINE_VERSION: str = "1.11.27"
 
     @classmethod
     def get_date_filter(cls) -> str:

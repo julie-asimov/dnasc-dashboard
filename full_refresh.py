@@ -7,9 +7,16 @@ Parts tab data, then renders and writes the dashboard HTML to www/.
 
 The Parts tab is a SEPARATE BigQuery pull (gen_parts_pkl) that also has its own
 cron on the server, so the two halves of the dashboard can age independently. That
-split meant a manual full refresh left the Parts tab stale — so it now runs here
-too, before the render. Pass --skip-parts to keep the old behaviour (e.g. on the
-server, where the dedicated parts cron already covers it).
+split meant a manual full refresh left the Parts tab stale — so it is refreshed
+here too, before the render, but ONLY IF the dedicated parts cron did not just run
+(PipelineConfig.PARTS_MAX_AGE_MINUTES, measured from when THIS refresh started —
+not from when it reaches the parts step, which is ~11 min later once the pipeline
+has run). On the server the parts cron fires 10 min before this, so it is a no-op;
+locally there is no such cron, so one command covers both halves. If the cron
+failed, the pkl is yesterday's and this picks up the slack.
+
+    --skip-parts    never touch the parts pkl
+    --force-parts   pull it even if it is fresh
 
 Schedule: Once daily (or on deploy / version bump)
 ============================================================================
@@ -47,9 +54,22 @@ MISSING_DUE_FILE = STATE_DIR / "missing_asana_dates.json"
 # ── Pipeline version (bump this string when you push new code) ───────────────
 PIPELINE_VERSION = PipelineConfig.PIPELINE_VERSION
 
-# The parts pull is ~250s on top of a ~640s refresh; skip it when a dedicated parts
-# cron already keeps parts_result.pkl fresh.
-SKIP_PARTS = "--skip-parts" in sys.argv
+# The parts pull is ~250s on top of a ~640s refresh, so it runs only when the pkl is stale.
+SKIP_PARTS  = "--skip-parts" in sys.argv
+FORCE_PARTS = "--force-parts" in sys.argv
+PARTS_PKL   = STATE_DIR / "parts_result.pkl"
+
+
+def _parts_age_minutes(ref_ts):
+    """Age of parts_result.pkl in minutes AS OF ref_ts, or None if it does not exist.
+
+    ref_ts is the refresh start, not now: the pipeline runs first, so measuring at the parts
+    step would add ~11 minutes to every reading and make a just-run cron look stale.
+    """
+    try:
+        return (ref_ts - PARTS_PKL.stat().st_mtime) / 60.0
+    except FileNotFoundError:
+        return None
 
 def main():
     start = time.time()
@@ -76,10 +96,18 @@ def main():
     #     reads parts_result.pkl. Non-fatal by design: gen_parts_pkl writes atomically,
     #     so a failure leaves the previous good pkl in place and the tab simply renders
     #     a little stale rather than taking the whole refresh down with it.
+    _age = _parts_age_minutes(start)          # `start` = when this refresh began
+    _limit = PipelineConfig.PARTS_MAX_AGE_MINUTES
     if SKIP_PARTS:
         print("\n🧬 Parts data: skipped (--skip-parts)")
+    elif not FORCE_PARTS and _age is not None and _age <= _limit:
+        print(f"\n🧬 Parts data: parts cron ran {_age:.1f} min before this refresh "
+              f"(limit {_limit}) — skipping the pull")
     else:
-        print("\n🧬 Refreshing Parts tab data (separate BigQuery pull)...")
+        why = ("missing" if _age is None else
+               "forced" if FORCE_PARTS else
+               f"{_age:.1f} min old at refresh start (limit {_limit})")
+        print(f"\n🧬 Refreshing Parts tab data — {why}...")
         _pt = time.time()
         try:
             import gen_parts_pkl
