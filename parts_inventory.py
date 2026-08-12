@@ -1228,6 +1228,12 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
         oligos/unquantified wells have null ng/µL so they never match this clause)
     DISCARDED plates are skipped; blank-location wells ('in the bin, no home yet') ARE included.
     Already-unavailable wells are skipped (marking them is a no-op).
+
+    dParts (STOCK_ID 'd...') are EXEMPT FROM THE LOW-CONCENTRATION CLAUSE ONLY. A PCR product is
+    expected to come off dilute, and that is not a reason to retire it — the well is still usable
+    and its only maker is another PCR. The other two clauses still apply to dParts in full: a
+    dPart well ≤ CLEAN_INVENTORY_VOL_MAX µL, or past the FRESHNESS_DAYS window, is queued like
+    any other well.
     """
     if all_plate_data.empty:
         return []
@@ -1244,7 +1250,9 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
     exp_days = np.where(sid.str.startswith("o"), OLIGO_FRESHNESS_DAYS, FRESHNESS_DAYS)
     near_empty = vol <= CLEAN_INVENTORY_VOL_MAX
     expired = age > exp_days                      # NaT age → NaN > x → False (kept available)
-    low_conc = conc.notna() & (conc < LOW_CONC_MIN_NGUL)
+    # dParts are PCR products — coming off dilute is normal for them, so a low ng/µL reading is
+    # not a reason to retire the well. They stay subject to near_empty and expired.
+    low_conc = conc.notna() & (conc < LOW_CONC_MIN_NGUL) & ~sid.str.startswith("d")
     loc = (all_plate_data["PLATE_LOCATION_BOX"] if "PLATE_LOCATION_BOX" in all_plate_data.columns
            else pd.Series("", index=all_plate_data.index)).fillna("").astype(str)
     mask = (
@@ -1255,6 +1263,25 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
     )
     if exclude_oligos:
         mask &= ~sid.str.startswith("o")
+    return _well_tokens(all_plate_data[mask])
+
+
+def build_discarded_available_queue(all_plate_data: pd.DataFrame) -> list[str]:
+    """
+    Whole-inventory queue: every well still switched ON (available=True) on a plate whose
+    location reads DISCARDED. The plate is physically gone, so the well cannot be usable —
+    it must be OFF, unconditionally. No volume / concentration / age test applies, and no
+    part type is exempt: a discarded plate's wells are discarded.
+
+    This is the counterpart to the DISCARD gate on the other unavailable queues. Those queues
+    skip DISCARD plates on purpose (nothing left to go find), which left these wells in a blind
+    spot: still reading as available stock, but named by no list. Any labware, any well type.
+    """
+    if all_plate_data.empty:
+        return []
+    loc = (all_plate_data["PLATE_LOCATION_BOX"] if "PLATE_LOCATION_BOX" in all_plate_data.columns
+           else pd.Series("", index=all_plate_data.index)).fillna("").astype(str)
+    mask = (all_plate_data["AVAILABLE"] == "True") & loc.str.upper().str.contains("DISCARD")
     return _well_tokens(all_plate_data[mask])
 
 

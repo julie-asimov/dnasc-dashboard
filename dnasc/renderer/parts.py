@@ -1202,7 +1202,13 @@ def _render() -> str:
 
     i = 0
     def part_exps(part):
-        return sorted({e for _,_,_,e in builds_for(part) if e})
+        # cons stores a missing experiment as the literal "—" (see the `EXP or "—"` above), which
+        # is truthy — so a bare `if e` treated "unknown experiment" as an experiment NAMED "—" and
+        # gave the part its own one-row group titled with a dash. That group also shadowed the
+        # no-demand bucket: pAI-13500 (template for control dPart d4674, whose PCR workorders
+        # carry no EXP) was split off from d4674 instead of sitting with it. Drop the sentinel so
+        # those rows fall through to the `not exps` branch.
+        return sorted({e for _,_,_,e in builds_for(part) if e and e != "—"})
     _PCOLS='<colgroup><col style="width:26px"><col style="width:19%"><col style="width:14%"><col style="width:12%"><col style="width:21%"><col></colgroup>'
     _HDR=('<tr><th></th><th>Part</th>'
           '<th title="rxns on hand / rxns for builds still waiting / rxns already drawn by '
@@ -1220,7 +1226,7 @@ def _render() -> str:
                 f'<span class="egcount">{len(rowobjs)}</span>'
                 f'{repeat_badge(md)}{dsc}</summary>'
                 f'<table class="ptbl">{_PCOLS}<tbody>{body}</tbody></table></details>')
-    def grouped_by_experiment(rowobjs, multi_accent="#7c3aed", noexp_title="Controls / no live demand", open_=True):
+    def grouped_by_experiment(rowobjs, multi_accent="#7c3aed", noexp_title="Controls & no live demand", open_=True):
         by={}; multi=[]; noexp=[]
         for x in rowobjs:
             exps=part_exps(str(x["Part"]))
@@ -1256,6 +1262,7 @@ def _render() -> str:
 
     clean_wells = P.build_clean_inventory_queue(apd, now, exclude_oligos=True)
     mp_wells    = P.build_miniprep_unavail_queue(apd, now)
+    disc_wells  = P.build_discarded_available_queue(apd)
     exhausted   = P.build_exhausted_plates_queue(apd)
     dispose     = [d for d in P.build_dispose_queue(lsp_plates, now)
                    if d["old"] and str(d["location"]) not in ("(no location)","None","","nan")]
@@ -1338,9 +1345,16 @@ def _render() -> str:
               "to reach target without batching · includes blocked parts, where flipping is what "
               "un-blocks their stuck workorders","#1d4ed8", mk_avail, show_plates=False)
     extra += wells_section("mk_un","Make Unavailable · 384 Echo source",
-              "available Echo source wells that are ≤25µL (near-empty), past expiration (200d), OR &lt;5 ng/µL (too dilute) → flip OFF in LIMS","#be185d", clean_wells, show_plates=False)
+              "available Echo source wells that are ≤25µL (near-empty), past expiration (200d), OR &lt;5 ng/µL (too dilute) → flip OFF in LIMS "
+              "· <b>dParts are exempt from the &lt;5 ng/µL rule only</b> (a PCR product is expected to come off dilute) — "
+              "they still flip OFF at ≤25µL or 200d","#be185d", clean_wells, show_plates=False)
     extra += wells_section("mk_un_mp","Make Unavailable · 96-well miniprep stock",
               "available miniprep-stock wells (96-well) past expiration (200d) → flip OFF in LIMS","#9d174d", mp_wells, show_plates=False)
+    extra += wells_section("mk_un_disc","Make Unavailable · wells on DISCARDED plates",
+              "wells still switched ON where the plate location reads DISCARDED → flip OFF in LIMS · the plate is gone, so the "
+              "well cannot be usable · <b>no exemptions</b>: any labware, any part type, regardless of volume, ng/µL or age · "
+              "the other lists skip DISCARDED plates (nothing left to find), which is what let these keep reading as available stock",
+              "#7f1d1d", disc_wells, show_plates=False)
 
     # Trash — LSP Echo plates >2mo
     if dispose:
@@ -1541,7 +1555,7 @@ def _render() -> str:
   <div class="ovc"><div class="ovn" style="color:#0e7490">{_n_pcr}</div><div class="ovl">Add PCR WO</div></div>
   <div class="ovc"><div class="ovn" style="color:#be185d">{_n_nosrc}</div><div class="ovl">Reorder</div></div>
   <div class="ovc"><div class="ovn" style="color:#b91c1c">{_n_bp}</div><div class="ovl">Blocked parts &rarr; {_n_bp_wo} WOs</div></div>
-  <div class="ovc"><div class="ovn" style="color:#be185d">{len(clean_wells)+len(mp_wells)}</div><div class="ovl">Wells → unavailable</div></div>
+  <div class="ovc"><div class="ovn" style="color:#be185d">{len(set(clean_wells)|set(mp_wells)|set(disc_wells))}</div><div class="ovl">Wells → unavailable</div></div>
   <div class="ovc"><div class="ovn" style="color:#6b7280">{_n_trash}</div><div class="ovl">Plates to trash</div></div>
 </div>
 {section_card("Parts needing attention", ("#fffbeb","#b45309","#fde68a"), _pa_count, parts_html, "restock / refill / reorder — grouped by experiment · Need = in-flight builds that have not drawn their material yet (RUNNING ones already did)", colhdr=_PHDR_ROW)}

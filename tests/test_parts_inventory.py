@@ -17,6 +17,7 @@ from parts_inventory import (
     _action_badge,
     _pcr_csv_block,
     build_clean_inventory_queue,
+    build_discarded_available_queue,
     build_dispose_queue,
     build_mark_available_queue,
     build_output,
@@ -663,11 +664,15 @@ class TestActionBadge:
 # Defaults make a "live" well: fresh plate (relative to NOW), real location, ok conc.
 def _q_well(well_id, vol, available, seq_confirmed=True, labware="384 Echo Source Plate",
             conc=100.0, location="4B-ECHO1", created_at=pd.Timestamp("2025-12-01", tz="UTC"),
-            plate_id=1):
+            plate_id=1, stock_id="", well_count=384):
     return {
         "WELL_ID": well_id,
         "PLATE_ID": plate_id,
+        "STOCK_ID": stock_id,
         "LABWARE": labware,
+        # An Echo-source well is identified by well_count, not the labware string (a plate labelled
+        # "384 Echo Source Plate" can physically be 96-well), so the queues need this column.
+        "PLATE_NUMBER_OF_WELLS": well_count,
         "VOLUME_UL": vol,
         "AVAILABLE": "True" if available else "False",
         "SEQ_CONFIRMED": "True" if seq_confirmed else "False",
@@ -747,21 +752,35 @@ class TestCleanInventoryQueue:
             _q_well(401, 25, available=True),   # ✓ (<=25, available)
             _q_well(402, 10, available=True),   # ✓
         ])
-        assert build_clean_inventory_queue(df) == ["well401", "well402"]
+        assert build_clean_inventory_queue(df, now=NOW) == ["well401", "well402"]
 
     def test_excludes_already_unavailable_and_high_volume(self):
         df = pd.DataFrame([
             _q_well(501, 10, available=False),   # ✗ already unavailable (no-op to re-mark)
-            _q_well(502, 26, available=True),    # ✗ >25
+            _q_well(502, 26, available=True),    # ✗ >25, and fresh relative to NOW
         ])
-        assert build_clean_inventory_queue(df) == []
+        assert build_clean_inventory_queue(df, now=NOW) == []
 
-    def test_excludes_disposed_location(self):
+    def test_excludes_disposed_location_but_keeps_blank(self):
+        # Only DISCARDED is 'already gone'. A blank location is a well in the bin with no home
+        # yet — still physically there, so it is still worth flipping OFF.
         df = pd.DataFrame([
             _q_well(601, 10, available=True, location="DISCARDED"),  # ✗ already gone
-            _q_well(602, 10, available=True, location=""),           # ✗ blank loc
+            _q_well(602, 10, available=True, location=""),           # ✓ no home yet, still real
         ])
-        assert build_clean_inventory_queue(df) == []
+        assert build_clean_inventory_queue(df, now=NOW) == ["well602"]
+
+    def test_dparts_exempt_from_low_conc_only(self):
+        # A PCR product is expected to come off dilute, so ng/µL alone must not retire a dPart
+        # well. Volume and age still do — and a plasmid well at the same conc still gets queued.
+        old = pd.Timestamp("2025-01-01", tz="UTC")          # > FRESHNESS_DAYS before NOW
+        df = pd.DataFrame([
+            _q_well(801, 40, available=True, stock_id="d6473", conc=1.0),           # ✗ dilute dPart — stays ON
+            _q_well(802, 10, available=True, stock_id="d6474"),                     # ✓ near-empty dPart
+            _q_well(803, 40, available=True, stock_id="d6475", created_at=old),     # ✓ expired dPart
+            _q_well(804, 40, available=True, stock_id="pAI-900", conc=1.0),         # ✓ dilute plasmid
+        ])
+        assert build_clean_inventory_queue(df, now=NOW) == ["well802", "well803", "well804"]
 
     def test_mutually_exclusive_with_mark_available(self):
         # No well should appear in both queues (disjoint by the 25 µL threshold).
@@ -773,6 +792,29 @@ class TestCleanInventoryQueue:
         mark = set(build_mark_available_queue(df, now=NOW))
         clean = set(build_clean_inventory_queue(df))
         assert mark.isdisjoint(clean)
+
+
+class TestDiscardedAvailableQueue:
+    def test_lists_every_available_well_on_a_discarded_plate(self):
+        # The plate is gone, so the well cannot be usable — no volume/conc/age/type exemption.
+        df = pd.DataFrame([
+            _q_well(901, 40, available=True,  location="DISCARDED"),                      # ✓ healthy but gone
+            _q_well(902, 40, available=True,  location="DISCARDED", stock_id="d6473"),     # ✓ dParts too
+            _q_well(903, 40, available=True,  location="DISCARDED", labware="Micronic Plate",
+                    well_count=96),                                                       # ✓ any labware
+            _q_well(904, 40, available=False, location="DISCARDED"),                       # ✗ already OFF
+            _q_well(905, 40, available=True,  location="4B-ECHO1"),                        # ✗ real box
+        ])
+        assert build_discarded_available_queue(df) == ["well901", "well902", "well903"]
+
+    def test_disjoint_from_the_other_unavailable_queues(self):
+        # The other queues skip DISCARD plates; this one is only DISCARD plates.
+        df = pd.DataFrame([
+            _q_well(911, 10, available=True, location="DISCARDED"),
+            _q_well(912, 10, available=True, location="4B-ECHO1"),
+        ])
+        assert build_discarded_available_queue(df) == ["well911"]
+        assert build_clean_inventory_queue(df, now=NOW) == ["well912"]
 
 
 class TestPcrCsvBlock:
