@@ -60,7 +60,10 @@ def _echo_well(stock_id, vol=100.0, conc=100.0, seq_len=3000, available="True",
         "WELL_TYPE": "Stock",
         "PLATE_PROTOCOL": "",
         "WELL_NUMBER": "1",
-        "PLATE_NUMBER_OF_WELLS": "96",
+        # Must be 384 to match the "384 Echo Source Plate" labware above: _echo384() keys on
+        # well_count, not the labware string, so a 96 here makes every well in these tests a
+        # mislabeled plate that the code correctly refuses to count.
+        "PLATE_NUMBER_OF_WELLS": "384",
         "ANTI_KAN": "False",
         "ANTI_SPEC": "False",
         "ANTI_CARB": "False",
@@ -257,7 +260,9 @@ class TestRunOptimizedLabWorkflow:
         assert result.loc[0, "Reactions Available"] == 0
         assert result.loc[0, "Reactions Available Old"] > 0
 
-    def test_deli_left_always_fresh(self):
+    def test_deli_left_ages_out_like_any_other_plate(self):
+        # Deli Left / DVs used to be exempt from the freshness window. They are not any more
+        # (see _is_fresh) — an old plate counts as old wherever it is stored.
         plate_data = _make_plate_data([
             _echo_well("pAI-100", vol=100, conc=100, seq_len=3000, available="True",
                        created_at=OLD_DATE, location="Deli Left (DVs)")
@@ -265,7 +270,8 @@ class TestRunOptimizedLabWorkflow:
         result = run_optimized_lab_workflow(
             self._base_parts(), plate_data, self._dpart_data(), NOW
         )
-        assert result.loc[0, "Reactions Available"] > 0
+        assert result.loc[0, "Reactions Available"] == 0
+        assert result.loc[0, "Reactions Available Old"] > 0
 
     def test_unavailable_seq_confirmed_goes_to_confirmed(self):
         plate_data = _make_plate_data([
@@ -647,9 +653,11 @@ class TestActionBadge:
         html = _action_badge("Mark seq confirmed wells available ['well1']")
         assert "Mark Available" in html
 
-    def test_true_no_source_badge(self):
+    def test_true_renders_reorder_badge(self):
+        # The "True" action means no DNA on hand at all. Its label is "Reorder" (it read
+        # "No Source" before _ACTION_LABEL named the action instead of the condition).
         html = _action_badge("True")
-        assert "No Source" in html
+        assert "Reorder" in html
 
     def test_unknown_action_uses_raw_text(self):
         html = _action_badge("pcr_workorder is BLOCKED")
@@ -721,12 +729,15 @@ class TestMarkAvailableQueue:
         ])
         assert build_mark_available_queue(df, now=NOW) == []
 
-    def test_deli_left_is_live_even_when_old(self):
+    def test_deli_left_is_not_exempt_from_freshness(self):
+        # No storage location earns a freshness exemption any more — an old Deli Left plate is
+        # not a mark-available candidate, same as an old plate anywhere else.
         df = pd.DataFrame([
             _q_well(401, 40, available=False, seq_confirmed=True, location="Deli Left (DVs)",
-                    created_at=pd.Timestamp("2023-01-01", tz="UTC")),   # ✓ old but Deli Left
+                    created_at=pd.Timestamp("2023-01-01", tz="UTC")),   # ✗ old, Deli Left or not
+            _q_well(402, 40, available=False, seq_confirmed=True, location="Deli Left (DVs)"),  # ✓ fresh
         ])
-        assert build_mark_available_queue(df, now=NOW) == ["well401"]
+        assert build_mark_available_queue(df, now=NOW) == ["well402"]
 
     def test_null_volume_excluded(self):
         df = pd.DataFrame([_q_well(501, None, available=False, seq_confirmed=True)])

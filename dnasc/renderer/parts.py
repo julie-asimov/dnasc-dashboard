@@ -1107,10 +1107,23 @@ def _render() -> str:
             p=pcr_status(part);  return bool(p and p["open"])
         o=order_status(part);    return bool(o and o["active"])
 
+    _avail_by_part=dict(zip(out["Part"].astype(str),
+                            pd.to_numeric(out["Reactions Available"], errors="coerce").fillna(0)))
+
     def _blocked_only(part):
         bb=builds_for(part)
-        return (bool(bb) and all(s=="BLOCKED" for _p,_t,s,_e in bb)
-                and not _has_open_maker(part))
+        if not bb or _has_open_maker(part):
+            return False
+        if all(s=="BLOCKED" for _p,_t,s,_e in bb):
+            return True
+        # "EVERY consumer is blocked" was too strict. A part with nothing on hand and nothing
+        # queued to make it is missing even when other consumers read RUNNING — those either
+        # already drew their material or sit ahead of the draw, which is no evidence the part
+        # exists. d8260 fell through exactly here: 0 rxns, no PCR workorder ever, consumed by
+        # 1 BLOCKED + 2 RUNNING Gibsons. It stayed in the restock list, so the BLOCKED WO it
+        # holds up matched no blocked part and landed in "Blocked workorders — cause unknown",
+        # which then claimed no missing part explained a WO whose missing part was listed above.
+        return any(s=="BLOCKED" for _p,_t,s,_e in bb) and _avail_by_part.get(str(part), 0) <= 0
     # A part with nothing queued to make it is BLOCKED: it can't be refilled (there is no stock to
     # top up and no workorder in flight), and everything downstream of it stops. So it does not
     # belong in the restock list — but it must not disappear either, which is what dropping it as
