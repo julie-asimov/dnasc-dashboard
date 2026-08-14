@@ -232,19 +232,20 @@ class LIMSExtractor:
             w.process_id AS workorder_id,
             w.plate_id, w.position, p.well_count,
             SUM(cpc.imaged) AS well_imaged,
-            -- GREATEST, not a sum. The two columns are two ASSESSMENTS of the same plate, not
-            -- two disjoint sets of colonies. When QPix judges 4 pickable and takes 2, a human
-            -- picking the 2 it left behind gets recorded as pickable_manual=2 — those 2 are
-            -- already inside the 4, so adding them reported 6 pickable on a plate that only ever
-            -- grew 4. Same for the other shape, where a human re-scores the whole plate
-            -- (automated 20, manual 30): the truth is 30, not 50. 462 of 1709 rows since June
-            -- summed to more pickable than the plate had imaged colonies.
-            -- ...and never fewer than were actually PICKED. A colony that ended up in a tube was
-            -- by definition pickable, whichever column happened to record it.
-            SUM(GREATEST(COALESCE(cpc.pickable_automated, 0),
-                         COALESCE(cpc.pickable_manual,    0),
-                         COALESCE(cpc.picked_automated,   0)
-                       + COALESCE(cpc.picked_manual,      0))) AS well_pickable,
+            -- SUM, deliberately: this mirrors what LIMS holds and what OpTracker and the retry
+            -- service compute, so the dashboard cannot silently disagree with them. The sum can
+            -- be inflated — a blank Manual Pickable inherits the Manual Picked value, and that
+            -- colony is already inside the QPix count, so 3 pickable with 1 leftover picked
+            -- reads 4. Correcting it here would hide a discrepancy the lab needs to SEE, so the
+            -- count stays as LIMS reports it and is flagged instead (see pickable_suspect).
+            SUM(COALESCE(cpc.pickable_automated, 0) + COALESCE(cpc.pickable_manual, 0)) AS well_pickable,
+            -- Flag the rows where that sum counts a colony twice: the summed figure exceeds what
+            -- any single assessment, or the picked total, can account for.
+            MAX(CASE WHEN COALESCE(cpc.pickable_automated,0) + COALESCE(cpc.pickable_manual,0)
+                        > GREATEST(COALESCE(cpc.pickable_automated,0),
+                                   COALESCE(cpc.pickable_manual,0),
+                                   COALESCE(cpc.picked_automated,0) + COALESCE(cpc.picked_manual,0))
+                     THEN 1 ELSE 0 END) AS well_pickable_suspect,
             SUM(COALESCE(cpc.picked_automated,   0) + COALESCE(cpc.picked_manual,   0)) AS well_picked
           FROM `{proj}.bios__src.colonypickingcounts` cpc
           JOIN `{proj}.lims__src.well`  w ON w.id = cpc.well_id
@@ -261,7 +262,8 @@ class LIMSExtractor:
           ARRAY_AGG(well_count  ORDER BY well_imaged DESC, plate_id ASC LIMIT 1)[OFFSET(0)] AS colony_plate_well_count,
           SUM(well_imaged)   AS imaged_colonies,
           SUM(well_pickable) AS pickable_colonies,
-          SUM(well_picked)   AS picked_colonies
+          SUM(well_picked)   AS picked_colonies,
+          MAX(well_pickable_suspect) AS pickable_suspect
         FROM per_well
         GROUP BY workorder_id
         """

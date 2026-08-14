@@ -140,9 +140,6 @@ _FRAGMENT = r"""
   <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
     <button class="cp-btn" onclick="cpScore()">Score</button>
     <button class="cp-btn sec" id="cp-sheets" onclick="cpCopySheets()" title="Paste into a blank Google Sheet, select the range and copy again — pasting THAT into Slack gives a real table. Slack only builds tables from a Sheets clipboard, not from this page.">Copy high risk &rarr; Sheets</button>
-    <button class="cp-btn sec" onclick="cpLoadFile('a')">Load file &rarr; 1</button>
-    <button class="cp-btn sec" onclick="cpLoadFile('b')">Load file &rarr; 2</button>
-    <input type="file" id="cp-file" accept=".tsv,.csv,.txt" style="display:none">
     <button class="cp-btn sec" onclick="cpClear()">Clear both</button>
     <span id="cp-thr" style="font-size:10px;color:#9ca3af"></span>
   </div>
@@ -584,7 +581,17 @@ _FRAGMENT = r"""
   function highRiskTsv(){
     // High risk OR falling through the auto-retry — the second group is the one nobody is
     // watching, so it belongs in the same message even when its yield was not flagged.
-    var hi=GROUPS.filter(function(g){ return g.risk==='HIGH' || g.needsManual; });
+    // Also carry MED attempts whose GIBSON / GOLDEN GATE arm came in at or under the retry
+    // threshold. Risk is the attempt total over its strain count, so a healthy Transformation
+    // plate can average a thin assembly arm up into MED and hide it. Only the assembly arm is
+    // tested — a thin Transformation plate is not something the retry would ever act on.
+    // Attempt-total thinness cannot be the test: per-strain never exceeds the total, so anything
+    // under the threshold overall is already HIGH.
+    var hi=GROUPS.filter(function(g){
+      return g.risk==='HIGH' || g.needsManual
+          || (g.risk==='MED' && g.rows.some(function(r){
+               return isAutoType(r) && r.pickable<=AUTO_UNDER; }));
+    });
     if(!hi.length) return null;
     // Grouped by experiment so one message can be actioned project by project, and worst first
     // within each: thinnest plate at the top, and where two are equally thin the one furthest
@@ -610,18 +617,36 @@ _FRAGMENT = r"""
     // picks is what pushes a Gibson/Golden Gate over the threshold and switches the auto-retry
     // OFF, so a row reporting the planned picks while reporting the CURRENT retry state would
     // say "5 picked" and "auto" side by side when 5 picked is precisely why it is no longer auto.
+    // The retry rule as the pipeline actually applies it: fewer than 4 PICKABLE colonies on the
+    // Gibson / Golden Gate arm. Not the picked count, and not the pick target — those are this
+    // tab's own notion of "enough", and they are a different question from "will anything re-run
+    // this". Pickable is taken from the sheet, where a blank Manual Pickable means zero, so it is
+    // free of the inherited value that makes the pipeline read 3+1=4 and skip the retry.
+    function assemblyPickable(g){
+      return g.rows.filter(isAutoType).reduce(function(a,r){ return a+r.pickable; }, 0);
+    }
     function plannedPutBack(g){
-      if(!g.typeKnown || g.risk!=='HIGH') return '-';
-      var autoPicked=g.rows.filter(isAutoType).reduce(function(a,r){
-        return a+r.qpd+plannedOf(r); }, 0);
-      var willAuto = g.typeOk && autoPicked<AUTO_UNDER;
-      return willAuto ? 'auto' : 'BY HAND';
+      if(!g.typeKnown || !g.rows.some(isAutoType)) return '-';   // nothing the retry can act on
+      if(assemblyPickable(g) < AUTO_UNDER) return 'auto';
+      return plannedTotal(g) >= g.want ? '-' : 'BY HAND';
     }
     var COLS=[
       {h:'Plasmid',    get:function(g){ return g.plasmid; }},
       {h:'Experiment', get:function(g){ return trunc(g.exp||'', 40); }},
       {h:'Total pickable', get:function(g){ return ''+g.pickable; }},
       {h:'Total picked',   get:function(g){ return ''+plannedTotal(g); }},
+      // Assembly type, because it is half the reason the next column says what it says: only
+      // Gibson and Golden Gate are ever re-run automatically.
+      {h:'Risk', get:function(g){
+        return g.risk==='HIGH' ? 'HIGH' : (g.risk==='MED' ? 'MED' : 'ok');
+      }},
+      {h:'Assembly', get:function(g){
+        // Gibson / Golden Gate only. Every attempt carries a Transformation row too, so listing
+        // it added a word to every cell without distinguishing anything.
+        var t={}; g.rows.filter(isAutoType).forEach(function(r){ t[r.atype.trim()]=1; });
+        var k=Object.keys(t).sort();
+        return k.length ? k.join(' + ') : '-';
+      }},
       {h:'Put back in',    get:function(g){ return plannedPutBack(g); }}
     ];
     // Tab-separated, header in row 1, no summary line — this is pasted into a blank sheet, and
@@ -756,18 +781,6 @@ _FRAGMENT = r"""
     }
     fallback();
   }
-  window.cpLoadFile=function(src){
-    var f=document.getElementById('cp-file');
-    f.value='';
-    f.onchange=function(){
-      var file=f.files && f.files[0]; if(!file) return;
-      var rd=new FileReader();
-      rd.onload=function(){ document.getElementById('cp-paste-'+src).value=rd.result; cpScore(); };
-      rd.readAsText(file);
-    };
-    f.click();
-  };
-
   restore();
 })();
 </script>
