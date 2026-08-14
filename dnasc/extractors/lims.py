@@ -232,7 +232,19 @@ class LIMSExtractor:
             w.process_id AS workorder_id,
             w.plate_id, w.position, p.well_count,
             SUM(cpc.imaged) AS well_imaged,
-            SUM(COALESCE(cpc.pickable_automated, 0) + COALESCE(cpc.pickable_manual, 0)) AS well_pickable,
+            -- GREATEST, not a sum. The two columns are two ASSESSMENTS of the same plate, not
+            -- two disjoint sets of colonies. When QPix judges 4 pickable and takes 2, a human
+            -- picking the 2 it left behind gets recorded as pickable_manual=2 — those 2 are
+            -- already inside the 4, so adding them reported 6 pickable on a plate that only ever
+            -- grew 4. Same for the other shape, where a human re-scores the whole plate
+            -- (automated 20, manual 30): the truth is 30, not 50. 462 of 1709 rows since June
+            -- summed to more pickable than the plate had imaged colonies.
+            -- ...and never fewer than were actually PICKED. A colony that ended up in a tube was
+            -- by definition pickable, whichever column happened to record it.
+            SUM(GREATEST(COALESCE(cpc.pickable_automated, 0),
+                         COALESCE(cpc.pickable_manual,    0),
+                         COALESCE(cpc.picked_automated,   0)
+                       + COALESCE(cpc.picked_manual,      0))) AS well_pickable,
             SUM(COALESCE(cpc.picked_automated,   0) + COALESCE(cpc.picked_manual,   0)) AS well_picked
           FROM `{proj}.bios__src.colonypickingcounts` cpc
           JOIN `{proj}.lims__src.well`  w ON w.id = cpc.well_id
