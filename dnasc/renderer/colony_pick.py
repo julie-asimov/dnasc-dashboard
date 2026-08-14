@@ -627,7 +627,12 @@ _FRAGMENT = r"""
     }
     function plannedPutBack(g){
       if(!g.typeKnown || !g.rows.some(isAutoType)) return '-';   // nothing the retry can act on
-      if(assemblyPickable(g) < AUTO_UNDER) return 'auto';
+      if(assemblyPickable(g) < AUTO_UNDER){
+        // The rule will re-run it either way, but an attempt already at its pick target does not
+        // obviously need re-running — a thin assembly arm can sit alongside a healthy one that
+        // already produced enough colonies. Say so rather than implying the retry is wanted.
+        return plannedTotal(g) >= g.want ? 'auto - check if necessary' : 'auto';
+      }
       return plannedTotal(g) >= g.want ? '-' : 'BY HAND';
     }
     var COLS=[

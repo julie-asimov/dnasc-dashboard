@@ -239,8 +239,11 @@ class LIMSExtractor:
             -- reads 4. Correcting it here would hide a discrepancy the lab needs to SEE, so the
             -- count stays as LIMS reports it and is flagged instead (see pickable_suspect).
             SUM(COALESCE(cpc.pickable_automated, 0) + COALESCE(cpc.pickable_manual, 0)) AS well_pickable,
-            -- Flag the rows where that sum counts a colony twice: the summed figure exceeds what
-            -- any single assessment, or the picked total, can account for.
+            -- Flags the rows where that sum counts a colony twice: the summed figure exceeds
+            -- what any single assessment, or the picked total, can account for. Nothing renders
+            -- it at the moment — the '?' marker was pulled until the upstream inheritance is
+            -- fixed and we can see what that does to the data. Kept because it costs nothing to
+            -- compute and puts the marker one render away instead of one full refresh away.
             MAX(CASE WHEN COALESCE(cpc.pickable_automated,0) + COALESCE(cpc.pickable_manual,0)
                         > GREATEST(COALESCE(cpc.pickable_automated,0),
                                    COALESCE(cpc.pickable_manual,0),

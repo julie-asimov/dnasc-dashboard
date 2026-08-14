@@ -55,11 +55,6 @@ _STATUS_RANK = {'SUCCEEDED': 0, 'RUNNING': 1, 'READY': 1, 'WAITING': 2,
                 'IN_PROGRESS': 2, 'FAILED': 3, 'CANCELED': 4, 'DRAFT': 5}
 _COLONY_METRICS = ['imaged_colonies', 'pickable_colonies', 'picked_colonies',
                    'total_colonies', 'seq_confirmed']
-# Set when LIMS' pickable figure double-counts a colony: a blank Manual Pickable inherits the
-# Manual Picked value, and that colony is already inside the QPix count. The count is shown as
-# LIMS reports it — deliberately, so the dashboard matches OpTracker and the retry service — and
-# marked with a ? rather than quietly corrected.
-_SUSPECT_COL = 'pickable_suspect'
 
 
 def _kind(wtype: str) -> str:
@@ -308,7 +303,6 @@ def _build_colony_rollup(base: pd.DataFrame, today: date, req_ids: set | None = 
                         'hascol':  _has_colony(ar),
                         'imaged':  _i(ar.get('imaged_colonies')),
                         'pickable':_i(raw_pick),
-                        'suspect': bool(_i(ar.get(_SUSPECT_COL))),
                         'picked':  _i(ar.get('picked_colonies')),
                         'seq':     _i(ar.get('seq_confirmed')),
                         'totc':    _i(ar.get('total_colonies')),
@@ -344,7 +338,6 @@ def _build_colony_rollup(base: pd.DataFrame, today: date, req_ids: set | None = 
                     'strains': sorted({r['strain'] for r in col if r['strain']}),
                     'imaged':  sum(r['imaged']   for r in col),
                     'pickable':sum(r['pickable'] for r in col),
-                    'suspect': any(r.get('suspect') for r in col),
                     'picked':  sum(r['picked']   for r in col),
                     'seq':     sum(r['seq']      for r in col),
                     'tot':     sum(r['totc']     for r in col),
@@ -395,7 +388,6 @@ def _build_colony_rollup(base: pd.DataFrame, today: date, req_ids: set | None = 
                 'has_winner': any(r['seq'] > 0 for r in all_col),
                 'imaged':   sum(r['imaged']   for r in all_col),
                 'pickable': sum(r['pickable'] for r in all_col),
-                'suspect':  any(r.get('suspect') for r in all_col),
                 'picked':   sum(r['picked']   for r in all_col),
                 'seq':      sum(r['seq']      for r in all_col),
                 'tot':      sum(r['totc']     for r in all_col),
@@ -961,17 +953,6 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   // "—"; counted → the real number, never greyed (even a genuine 0).
   function _counted(o){{return ((o.imaged||0)+(o.pickable||0)+(o.picked||0)+(o.seq||0)+(o.tot||0)+(o.totc||0))>0;}}
   function ccell(n,o){{return _counted(o)?num(n):_dash();}}
-  // Pickable cell: same number LIMS holds, with a ? when that number double-counts a colony.
-  // Correcting it here would put the dashboard silently at odds with OpTracker and the retry
-  // service, which read the same inflated figure — the point is to make the disagreement visible.
-  function pcell(n,o){{
-    if(!_counted(o)) return _dash();
-    if(!o.suspect)   return num(n);
-    return '<span title="LIMS reports '+num(n)+', but a blank Manual Pickable inherited the '
-         + 'Manual Picked value, so a colony already counted by QPix is counted twice. The real '
-         + 'figure is lower. OpTracker and the retry check use this same inflated number." '
-         + 'style="color:#b45309;font-weight:600;cursor:help">'+num(n)+'&thinsp;?</span>';
-  }}
   // Pickable risk band for an attempt's pickable count (see legend in the toolbar):
   //   Low 0–7 (below median), Medium 8–22 (median→75th pct), High 23+ (top quartile).
   var PICK_LOW_MAX={PICK_LOW_MAX}, PICK_MED_MAX={PICK_MED_MAX};
@@ -1252,7 +1233,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       + '<td style="'+TD+'white-space:nowrap;">'+custBadge(r.customer,r.fp)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+rwarn+'</td>'
-      + '<td style="'+TD+'">'+pcell(c.pickable,c)+'</td>'
+      + '<td style="'+TD+'">'+ccell(c.pickable,c)+'</td>'
       + '<td style="'+TD+'">'+ccell(c.picked,c)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(c.seq,c.tot,c.has_winner,reqSeqStatus(r),c.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(r.status)+'</td>'
@@ -1284,7 +1265,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       + '<td style="'+TD+'" colspan="4"><span style="font-size:10px;font-weight:700;color:#334155;">Design '+(di+1)+' &middot; '+esc(d.dtype||'Design')+'</span>'+natt+parts+'</td>'
       + '<td style="'+TD+'"></td>'
       + '<td style="'+TD+'white-space:nowrap;">'+(warn||band)+'</td>'
-      + '<td style="'+TD+'">'+pcell(d.pickable,d)+'</td>'
+      + '<td style="'+TD+'">'+ccell(d.pickable,d)+'</td>'
       + '<td style="'+TD+'">'+ccell(d.picked,d)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(d.seq,d.tot,false,d.status,d.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(d.status)+win+'</td>'
@@ -1330,7 +1311,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       + '<td style="'+TD+'padding-left:38px;" colspan="4">'+lbl+'</td>'
       + '<td style="'+TD+'"></td>'
       + '<td style="'+TD+'white-space:nowrap;">'+(_counted(a)?pickBand(_perStrain(a)):'')+'</td>'
-      + '<td style="'+TD+'">'+pcell(a.pickable,a)+'</td>'
+      + '<td style="'+TD+'">'+ccell(a.pickable,a)+'</td>'
       + '<td style="'+TD+'">'+ccell(a.picked,a)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+seqBdg(a.seq,a.tot,false,a.status,a.picked)+'</td>'
       + '<td style="'+TD+'white-space:nowrap;">'+statusBdg(a.status)+'</td>'
