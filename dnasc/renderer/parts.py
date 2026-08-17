@@ -586,7 +586,10 @@ def _render() -> str:
     ST_CHIP={"RUNNING":"#1d4ed8","WAITING":"#b45309","READY":"#15803d","BLOCKED":"#b91c1c"}
 
     def _block(label, body):
-        return f'<tr><th class="d-lab">{label}</th><td class="d-cell">{body}</td></tr>'
+        # Body goes in its own scroll box: the wide nowrap .d-tbl tables are routinely wider than
+        # the panel, and without this they clip (the Location column fell off the right edge).
+        return (f'<tr><th class="d-lab">{label}</th>'
+                f'<td class="d-cell"><div class="d-body">{body}</div></td></tr>')
 
     # --- assign each part to a section ---
     ctrl_related = set(ctrl)
@@ -609,7 +612,7 @@ def _render() -> str:
         win = 730 if part.startswith("o") else 200
         nage = newest_age(part)
         is_ctrl = part in ctrl_related
-        target = _target(x)      # buffer = min 10, else 2× (buffer == need over 10); 96 for controls
+        target = _target(x)      # need + spare (REFILL_BUFFER_MIN floor, else the frac); 96 for controls
         n_flip, flip_rxns, after_flip = flip_gain(part, have)
 
         if act=="Mark available" and not n_flip:
@@ -649,11 +652,18 @@ def _render() -> str:
         _bf=_buffer(need)
         _rate=(f" @ {int(round(100*PipelineConfig.REFILL_BUFFER_FRAC))}%"
                if _bf > PipelineConfig.REFILL_BUFFER_MIN else " floor")
-        note = f"{need} needed + {_bf} buffer{_rate}" if not is_ctrl else "control buffer"
-        # What the shortfall really is: buffer-only shortfalls are not the same urgency as a
-        # part live builds are waiting on.
+        note = f"{need} needed + {_bf} spare{_rate}" if not is_ctrl else "control buffer"
+        # What the shortfall really is: a spare-only shortfall is not the same urgency as a part
+        # live builds are waiting on. Said with "spare", never "buffer" — the control buffer is a
+        # separate mechanism (fixed 96-rxn target), and sharing the word made this row read as
+        # though the part were being stocked as a control.
         if not is_ctrl and need == 0:
-            note += " · nothing live needs it — shortfall is buffer only"
+            note += " · nothing live needs it — shortfall is spare only"
+        elif not is_ctrl and not direct_need(part) and template_need(part):
+            # Need is template duty, not builds queued on this part — say whose PCR it is for,
+            # so "N needed" can't be read as N builds waiting on the plasmid itself.
+            _kn=", ".join(d for d in tmpl_kids.get(part,[]) if d in flagged)
+            note += f" · needed to PCR {_kn}" if _kn else " · needed as a PCR template"
         # The post-flip number, on the same line as "on hand", so the free stock can't be missed.
         flip_line = ""
         if n_flip:
@@ -890,13 +900,15 @@ def _render() -> str:
     def batch_state(part, need, is_ctrl):
         """The batch half of the 'Batch / order' cell — never claims a dead batch is running.
 
-        A shortfall that is pure buffer (nothing live needs the part) is called that, so it
-        doesn't read as urgent as a part that real builds are waiting on.
+        A shortfall that is pure spare stock (nothing live needs the part) is called that, so it
+        doesn't read as urgent as a part that real builds are waiting on. "Spare", not "buffer" —
+        the control buffer is a different thing (a fixed 96-rxn target), and one word for both
+        made an ordinary restock row read as though the part were a stocked control.
         """
         rs = refill_status(part)
         urgent = bool(need > 0 or is_ctrl)
         col = "#be185d" if urgent else "#6b7280"
-        pre = "" if urgent else '<span style="color:#9ca3af">buffer only · </span>'
+        pre = "" if urgent else '<span style="color:#9ca3af">spare stock only · </span>'
         if rs["state"] == "inflight":
             if rs.get("sequencing"):
                 return (f'<span style="color:#15803d;font-weight:700">⟳ batch in progress</span>'
@@ -926,8 +938,8 @@ def _render() -> str:
     def _covered(x):
         """Every build actually WAITING on this part can run.
 
-        This deliberately ignores the buffer. Urgency is about whether work is blocked, not
-        whether the spare is topped up — testing against the full target (need + buffer) made
+        This deliberately ignores the spare. Urgency is about whether work is blocked, not
+        whether the spare is topped up — testing against the full target (need + spare) made
         d8260 read "needs PCR" with 4 rxns on hand and only 2 builds waiting, while d8278 with
         7 on hand read "covered". Same situation, opposite wording.
         """
@@ -939,9 +951,9 @@ def _render() -> str:
         if _covered(x):
             # Never print "needs PCR"/"needs batch" on a part whose waiting builds can all run.
             # One vocabulary for the calm states, so two rows in the same position cannot read
-            # as though one were urgent: "buffer only" when nothing is waiting at all, "queue
-            # covered" when something is waiting and the stock covers it. Any remaining gap is
-            # buffer and is stated as such, never as an alarm.
+            # as though one were urgent: "spare stock only" when nothing is waiting at all,
+            # "queue covered" when something is waiting and the stock covers it. Any remaining
+            # gap is spare and is stated as such, never as an alarm.
             _ex=exposure(part); _nd=int(x["Reactions Required"]); _hv=int(x["Reactions Available"])
             _short=max(0, _target(x)-_hv)
             if part in ctrl_related:
@@ -951,17 +963,25 @@ def _render() -> str:
                 head=('<span style="color:#6b7280;font-weight:600">control stock</span>'
                       f'<span style="color:#9ca3af"> · held at {_target(x)} rxns regardless of '
                       f'live demand</span>')
+            elif _nd>0 and not direct_need(part):
+                # Need inherited from the dParts this templates. "All N waiting builds can run"
+                # would be a claim about builds that do not exist — nothing waits on a template
+                # directly; the PCR it feeds does.
+                _kids=", ".join(d for d in tmpl_kids.get(part,[]) if d in flagged)
+                head=('<span style="color:#15803d;font-weight:600">PCR covered</span>'
+                      f'<span style="color:#9ca3af"> · enough template to PCR '
+                      f'{html.escape(_kids) if _kids else "its dParts"}</span>')
             elif _nd>0:
                 head=('<span style="color:#15803d;font-weight:600">queue covered</span>'
                       f'<span style="color:#9ca3af"> · all {_nd} waiting build'
                       f'{"s" if _nd!=1 else ""} can run</span>')
             else:
-                head=('<span style="color:#6b7280;font-weight:600">buffer only</span>'
+                head=('<span style="color:#6b7280;font-weight:600">spare stock only</span>'
                       '<span style="color:#9ca3af"> · nothing is waiting on it</span>')
             tail=''
             if _short:
-                tail=(f'<div style="color:#9ca3af;font-size:10px">{_short} below the buffer '
-                      f'target of {_target(x)} — spare stock, not blocked work</div>')
+                tail=(f'<div style="color:#9ca3af;font-size:10px">{_short} below the spare-stock '
+                      f'target of {_target(x)} — topping up spare, not blocked work</div>')
             elif _ex["drawn"]:
                 tail=(f'<div style="color:#9ca3af;font-size:10px">exposed only if the '
                       f'{_ex["drawn"]} running build{"s" if _ex["drawn"]!=1 else ""} '
@@ -1073,7 +1093,7 @@ def _render() -> str:
     def disp_act(x):
         """Action to SHOW. If flipping the make-available wells ON already clears the target,
         the job is 'Mark available', not 'Refill' — the pull can't reach this verdict because it
-        picks the action from raw demand while the target (need + buffer) is computed here."""
+        picks the action from raw demand while the target (need + spare) is computed here."""
         act=x["Action Suggested"]
         if str(act).startswith("Mark"): return "Mark available"    # the pull already reached it
         # "True" means no fresh source to make more from. For a dPart that is never an order —
@@ -1120,14 +1140,26 @@ def _render() -> str:
         else:
             # Bare "4 / 0" read as though the 0 were the stock, so each number is labelled
             # in place — a column header is too far away to disambiguate at a glance.
+            # A template's need is inherited from the dParts it makes, not from builds waiting
+            # on it directly, so it is labelled for what it is: printing 2 rxns of template duty
+            # as "2 waiting" puts a number under a label that nothing on the row supports.
+            _dn=direct_need(part); _tn=template_need(part)
+            _kids=", ".join(d for d in tmpl_kids.get(part,[]) if d in flagged)
+            if _rq and not _dn and _tn:
+                _nlbl=" to PCR"
+                _ntip=f'{_rq} rxns to PCR {_kids}' if _kids else f'{_rq} rxns of template duty'
+            else:
+                _nlbl=" waiting"
+                _ntip=(f'{_dn} rxns for builds still WAITING to draw'
+                       + (f' + {_tn} to PCR {_kids}' if _tn else ''))
             stock_cell=(f'<td style="text-align:center;white-space:nowrap" '
-                        f'title="{_hv} rxns on hand · {_rq} rxns for builds still WAITING to '
-                        f'draw · {_ex_row["drawn"]} rxns already drawn by builds now RUNNING">'
+                        f'title="{_hv} rxns on hand · {_ntip} · '
+                        f'{_ex_row["drawn"]} rxns already drawn by builds now RUNNING">'
                         f'<span style="font-weight:700">{_hv}</span>'
                         f'<span style="{_lbl}"> on hand</span>'
                         f'<span style="color:#d1d5db"> · </span>'
                         f'<strong style="color:#b45309;font-size:13px">{_rq}</strong>'
-                        f'<span style="{_lbl}"> waiting</span>'
+                        f'<span style="{_lbl}">{_nlbl}</span>'
                         f'<span style="color:#d1d5db"> · </span>'
                         f'<span style="color:#6b7280;font-weight:700">{_ex_row["drawn"]}</span>'
                         f'<span style="{_lbl}"> running</span></td>')
@@ -1224,6 +1256,43 @@ def _render() -> str:
     def direct_need(part):
         return sum(1 for _p,_t,st,_e in builds_for(str(part)) if st in _NOT_DRAWN)
 
+    def template_need(part):
+        """Demand a PCR template inherits from the dParts it is PCR'd into.
+
+        A plasmid used only as a template has no consumer workorder of its own: the Gibson
+        that needs d8261 names d8261, not pAI-22468. direct_need() therefore read 0 for the
+        template while the row beside it said "template for d8261" and the batch cell called
+        a real shortfall spare-stock-only. Demand flows up one hop from any child that is
+        itself short, at the same rate the pull uses: ceil(need/10)+1 rxns of template per
+        dPart to make (parts_inventory.py, template expansion).
+
+        This counts only children the pull actually reported (`flagged`) — anything above its
+        own target needs no PCR, so it draws nothing. It is built on direct_need(), so it
+        inherits that basis exactly: RUNNING builds are not re-billed, and DRAFT workorders
+        contribute nothing (the pull never collects them).
+
+        A child whose PCR workorder EXISTS is skipped: that workorder already names this part as
+        its template, so direct_need() has counted it and inheriting would bill the same PCR
+        twice — pAI-22332 read 12 waiting (4 real BLOCKED PCRs + 4 kids inherited) instead of 4.
+        Inheritance only covers the gap where there is no PCR workorder to count.
+        """
+        _has_pcr_wo = {p for p,t,_st,_e in builds_for(str(part)) if t == "PCR"}
+        tot = 0
+        for kid in tmpl_kids.get(str(part), []):
+            if kid not in flagged or kid in _has_pcr_wo: continue
+            kid_need = direct_need(kid)
+            if kid_need > _avail_by_part.get(str(kid), 0):
+                tot += math.ceil(kid_need / 10) + 1
+        return tot
+
+    def total_need(part):
+        """What has to be covered: this part's own waiting builds plus template duty.
+
+        Deliberately one hop, not recursive — a template's own template is the pull's job,
+        and one level is all the pull propagates.
+        """
+        return direct_need(part) + template_need(part)
+
     def exposure(part):
         """Queued vs already-drawn demand, with NO assumed failure rate.
 
@@ -1241,10 +1310,10 @@ def _render() -> str:
         drawn=len(bb)-queued
         return {"queued":queued,"drawn":drawn,"total":len(bb)}
     out["Reactions Required"]=out.apply(
-        lambda x: int(x["Reactions Required"]) if str(x["Part"]) in ctrl_related else direct_need(x["Part"]),
+        lambda x: int(x["Reactions Required"]) if str(x["Part"]) in ctrl_related else total_need(x["Part"]),
         axis=1)
     builds_all["Reactions Required"]=builds_all.apply(
-        lambda x: int(x["Reactions Required"]) if str(x["Part"]) in ctrl_related else direct_need(x["Part"]),
+        lambda x: int(x["Reactions Required"]) if str(x["Part"]) in ctrl_related else total_need(x["Part"]),
         axis=1)
     # The blocked rows were lifted out of `out` ABOVE this recompute, so they kept the pull's raw
     # demand figure while every other section switched to direct in-flight builds — pAI-22332 read
@@ -1252,7 +1321,7 @@ def _render() -> str:
     # every section, so Need, the target, and the WO count can't contradict each other.
     for _x in _ph_rows:
         if str(_x["Part"]) not in ctrl_related:
-            _x["Reactions Required"]=direct_need(_x["Part"])
+            _x["Reactions Required"]=total_need(_x["Part"])
 
     def _buffer(n):
         """Spare stock to hold on top of `n`, per the configured stocking policy."""
@@ -1264,9 +1333,15 @@ def _render() -> str:
         return 96 if str(x["Part"]) in ctrl_related else need + _buffer(need)
 
     def _target_max(x):
-        """Target if every RUNNING build came back for another attempt — the worst case."""
+        """Target if every RUNNING build came back for another attempt — the worst case.
+
+        Floored at the row's own need, because exposure() counts consumer workorders only: a
+        template whose need is inherited from the dParts it makes has none of its own, so the
+        bare count would put the worst case BELOW the immediate target and the visibility
+        filter below would drop a genuinely short template off the tab.
+        """
         if str(x["Part"]) in ctrl_related: return 96
-        tot=exposure(x["Part"])["total"]
+        tot=max(exposure(x["Part"])["total"], int(x["Reactions Required"]))
         return tot + _buffer(tot)
 
     # Visibility uses the WORST case, urgency uses the immediate need. Filtering on the
@@ -1285,7 +1360,21 @@ def _render() -> str:
         # no-demand bucket: pAI-13500 (template for control dPart d4674, whose PCR workorders
         # carry no EXP) was split off from d4674 instead of sitting with it. Drop the sentinel so
         # those rows fall through to the `not exps` branch.
-        return sorted({e for _,_,_,e in builds_for(part) if e and e != "—"})
+        exps = {e for _,_,_,e in builds_for(part) if e and e != "—"}
+        # A pure PCR template has NO consumer workorder of its own — the Gibson names d8261, not
+        # its template pAI-22468, and the PCR that does name the template has already closed (or
+        # is a draft), so it is not in the open-workorder pull. That left every template with an
+        # empty experiment set, which routed it to the `noexp` bucket titled "Controls & …" and
+        # made an ordinary campaign template read as a stocked control. It also put templates out
+        # of reach of the "Multi-project parts" group, which needs at least one experiment to
+        # route on — pAI-21789 feeds five dParts across LV Edge Rev, LV Edge VSV-G, A768 and A762
+        # and was still filed under no project at all. So a template inherits the experiments of
+        # the dParts it makes, the same one-hop walk template_need() bills demand over.
+        if not exps:
+            for kid in tmpl_kids.get(str(part), []):
+                if kid in flagged:
+                    exps |= {e for _,_,_,e in builds_for(kid) if e and e != "—"}
+        return sorted(exps)
     _PCOLS='<colgroup><col style="width:26px"><col style="width:19%"><col style="width:14%"><col style="width:12%"><col style="width:21%"><col></colgroup>'
     _HDR=('<tr><th></th><th>Part</th>'
           '<th title="rxns on hand / rxns for builds still waiting / rxns already drawn by '
@@ -1303,7 +1392,10 @@ def _render() -> str:
                 f'<span class="egcount">{len(rowobjs)}</span>'
                 f'{repeat_badge(md)}{dsc}</summary>'
                 f'<table class="ptbl">{_PCOLS}<tbody>{body}</tbody></table></details>')
-    def grouped_by_experiment(rowobjs, multi_accent="#7c3aed", noexp_title="Controls & no live demand", open_=True):
+    # Bucket title leads with "Controls" no longer: a part lands here for want of a project, which
+    # is a different thing, and heading the group with "Controls" was read as the tab classifying
+    # the part as one.
+    def grouped_by_experiment(rowobjs, multi_accent="#7c3aed", noexp_title="Controls & parts with no project", open_=True):
         by={}; multi=[]; noexp=[]
         for x in rowobjs:
             exps=part_exps(str(x["Part"]))
@@ -1604,9 +1696,14 @@ def _render() -> str:
  #tab-parts .ov{{display:flex;gap:10px;flex-wrap:wrap;margin:14px 16px 4px}}
  #tab-parts .ovc{{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:10px 16px;min-width:96px}}
  #tab-parts .ovn{{font-size:24px;font-weight:800;line-height:1}} #tab-parts .ovl{{font-size:11px;color:#6b7280;margin-top:3px}}
- #tab-parts table.detail{{width:100%;border-collapse:collapse;background:#fbfaff;border-top:1px solid #d9d4ea}}
- #tab-parts table.detail th.d-lab{{width:118px;text-align:left;vertical-align:top;padding:10px 14px;font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#9ca3af;border-bottom:1px solid #e7e3f2;border-right:1px solid #e7e3f2;background:#f6f4fc}}
- #tab-parts table.detail td.d-cell{{padding:10px 14px;border-bottom:1px solid #e7e3f2;vertical-align:top}}
+ /* table-layout:fixed pins the label column at 118px. Auto layout let the wide nowrap .d-tbl
+    bodies over-constrain the row, and the th collapsed to its min-content width — which the
+    inherited .ptbl td{{overflow-wrap:anywhere}} had made a single character, so labels rendered
+    one letter per line. Both the fixed layout and the overflow-wrap reset below are needed. */
+ #tab-parts table.detail{{width:100%;table-layout:fixed;border-collapse:collapse;background:#fbfaff;border-top:1px solid #d9d4ea}}
+ #tab-parts table.detail th.d-lab{{width:118px;overflow-wrap:normal;word-break:normal;text-align:left;vertical-align:top;padding:10px 14px;font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#9ca3af;border-bottom:1px solid #e7e3f2;border-right:1px solid #e7e3f2;background:#f6f4fc}}
+ #tab-parts table.detail td.d-cell{{padding:10px 14px;border-bottom:1px solid #e7e3f2;vertical-align:top;overflow-wrap:normal;word-break:normal}}
+ #tab-parts .d-body{{max-width:100%;overflow-x:auto}}
  #tab-parts .d-stat{{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}}
  #tab-parts .d-have{{font-size:22px;font-weight:800}} #tab-parts .d-of{{font-size:12px;color:#374151}} #tab-parts .d-note{{font-size:11px;color:#9ca3af}}
  #tab-parts .d-barwrap{{height:6px;background:#eceaf3;border-radius:4px;margin:6px 0 4px;max-width:320px;overflow:hidden;display:flex}} #tab-parts .d-bar{{height:100%;border-radius:4px}}
