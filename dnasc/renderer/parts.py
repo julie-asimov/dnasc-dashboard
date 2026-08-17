@@ -31,101 +31,50 @@ _FALLBACK = ('<div style="padding:24px;color:#6b7280;font:14px -apple-system,san
              'Parts inventory data unavailable — the parts pull (gen_parts_pkl.py) has not run '
              'yet or failed. Check the parts cron / logs/parts_pull.log.</div>')
 
+# --- "already started?" refill signal: wells tagged REFILL_* in PROCESS_ID ---
+# A refill is finished when it has rearrayed into the 384 Echo source plate — that step is what
+# CREATES the Echo stock wells, so "this process has Echo wells" is the completion test. It is
+# exact, not a heuristic: across all 317 refill processes in the pull, every one that reached
+# NGS or rearray has Echo wells (17 + 293) and every one that has not (7, all at miniprep) has
+# none. Age is reported but never decides the state — a batch that went through NGS is done
+# whether that was yesterday or two years ago, which is why an 80-day-old refill used to sit
+# here claiming to be in progress.
+_REFILL_TYPICAL_DAYS = 9        # p95 of first→last well span (median 3d); "looks stalled" past this
+# Furthest stage reached, in real refill order (streak → overnights → miniprep → quant →
+# NGS confirm → rearray into the 384 Echo source). Rank by the LAST stage reached, never by
+# the newest well's protocol — a process touches several plates on the same day, so
+# "newest well" picks an arbitrary one and mislabels the stage.
+_STAGE_RANK = {"Overnight Culture":1, "Bank Overnights":1, "Miniprep":2, "DNA Quant":3,
+               "Sequence Plasmid":4, "NGS Sequence Confirmation":4, "Rearray 96 to 384":5}
+_STAGE_LABEL = {1:"overnight culture", 2:"miniprep", 3:"DNA quant",
+                4:"NGS (sequencing)", 5:"rearray into 384 Echo"}
 
-def render_parts_tab() -> str:
-    """Return the Parts tab fragment (<style scoped> + content + <script>). Never raises."""
-    try:
-        return _render()
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        return _FALLBACK
+
+def _is_echo384(d):
+    # A REAL Echo source plate is 384-well. Some plates carry the '384 Echo
+    # Source Plate' labware while being physically 96-well (LIMS data error) —
+    # those are not Echo sources and must never enter the Echo-source flows
+    # (make-available, on-hand, trash). Gate on the actual well_count.
+    return ((d["LABWARE"] == "384 Echo Source Plate")
+            & (pd.to_numeric(d["PLATE_NUMBER_OF_WELLS"], errors="coerce") == 384))
 
 
-def _render() -> str:
-    import parts_inventory as P
-    from dnasc.utils import parse_parts, parse_backbone, extract_pcr_info
+def _make_refill_status(apd, ngs_df, now):
+    """Build the refill_status(part) reader over a loaded pull.
 
-    r = pickle.load(open(_PKL, "rb"))
-    apd, dpd, now = r["all_plate_data"], r["dpart_data"], r["generated_at"]
-    render_ts = datetime.datetime.now(_ET)   # when THIS html was built (Eastern, so freshness is visible)
-    # data-pull time → Eastern. generated_at may be a plain datetime (tz-aware UTC) OR a pandas
-    # Timestamp; .astimezone() works on both. tz-naive values are assumed UTC first.
-    try:
-        _n = now if getattr(now, "tzinfo", None) else pd.Timestamp(now).tz_localize("UTC")
-        now_et = _n.astimezone(_ET)
-    except Exception:
-        now_et = now
-    ctrl = set(P.CONTROL_PARTS)
-    # LSP-dedicated Echo plates (rearrays in the 4B-LSP rack) are allocated to specific LSP
-    # orders — NOT general stock. Exclude them from inventory counts AND the on-hand display.
-    _lsp = r.get("lsp_plates")
-    LSP_PLATE_IDS = set(_lsp["PLATE_ID"].astype(str)) if _lsp is not None and "PLATE_ID" in getattr(_lsp, "columns", []) else set()
-    dmeta = dpd.drop_duplicates("DPART_NAME").set_index("DPART_NAME")
-    apd = apd.copy(); apd["CREATED_AT"] = pd.to_datetime(apd["CREATED_AT"], errors="coerce", utc=True)
-
-    # Use the parts list straight from the data pull (result["parts"]) instead of re-querying
-    # workorders and re-deriving here. The rebuild used to run its own live workorder query, which
-    # drifts from the pull as the lab generates/completes workorders between the two — so parts the
-    # pull found (e.g. BLOCKED gibson plasmids, in-demand dParts) would silently vanish on rebuild.
-    out = r["parts"].copy()
-    # Oligos are still TBD — exclude o- parts from the actionable views for now.
-    out = out[~out["Part"].astype(str).str.startswith("o")].reset_index(drop=True)
-
-    # All workorder inputs come from the PULL (parts_result.pkl) — the render does ZERO BigQuery.
-    wod = r["wod_df"]                                  # active GG/Gibson/PCR workorders
-    _blk = r["blk_df"]                                 # blocked workorder queue
-
-    # (blocked WOs are indexed by product LATER — after builds_for/cons exist — so each missing
-    #  part can list the workorders it is holding up. There is no standalone blocked-WO section.)
-
-    TY = {"golden_gate_workorder":"GG","gibson_workorder":"Gibson","pcr_workorder":"PCR"}
-    def _n(s): return [i.split(":")[0] for i in s.split(", ") if i.split(":")[0]]
-    cons = {}
-    for _, w in wod.iterrows():
-        wt = w["WT"]; names = []
-        if wt in ("golden_gate_workorder","gibson_workorder"):
-            names = _n(parse_parts(w.get("parts_json")))
-            bb = parse_backbone(w.get("backbone_json"))
-            if bb: names.append(bb.split(":")[0])
-        elif wt == "pcr_workorder":
-            names = _n(extract_pcr_info(w))
-        for n in names:
-            cons.setdefault(n, []).append((str(w["PRODUCT"]), TY[wt], str(w["ST"]), str(w.get("EXP") or "—")))
-
-    tmpl_kids = {}
-    for d, row in dmeta.iterrows():
-        t = row.get("DPART_TEMPLATE")
-        if pd.notna(t): tmpl_kids.setdefault(str(t), []).append(d)
-    flagged = set(out["Part"].astype(str))
-
-    # --- "already started?" refill signal: wells tagged REFILL_* in PROCESS_ID ---
-    # A refill is finished when it has rearrayed into the 384 Echo source plate — that step is what
-    # CREATES the Echo stock wells, so "this process has Echo wells" is the completion test. It is
-    # exact, not a heuristic: across all 317 refill processes in the pull, every one that reached
-    # NGS or rearray has Echo wells (17 + 293) and every one that has not (7, all at miniprep) has
-    # none. Age is reported but never decides the state — a batch that went through NGS is done
-    # whether that was yesterday or two years ago, which is why an 80-day-old refill used to sit
-    # here claiming to be in progress.
-    _REFILL_TYPICAL_DAYS = 9            # p95 of first→last well span (median 3d); "looks stalled" past this
-    # NGS job state per well, from the pull. This is the real "is it still running?" signal: a plate
-    # sitting on an NGS protocol only means the samples were submitted. RUNNING = still sequencing,
-    # SUCCEEDED/FAILED/CANCELED = the job closed and the answer is in. Older pkls have no ngs_df.
-    _ngs = r.get("ngs_df")
+    Module-level (not a closure inside _render) so the in-flight tab can ask the same question
+    about a part that is blocking a request without re-deriving any of it.
+    """
+    # NGS job state per well, from the pull. This is the real "is it still running?" signal: a
+    # plate sitting on an NGS protocol only means the samples were submitted. RUNNING = still
+    # sequencing, SUCCEEDED/FAILED/CANCELED = the job closed and the answer is in. Older pkls
+    # have no ngs_df.
     _ngs_by_well = {}
-    if _ngs is not None and len(_ngs):
-        _n = _ngs.copy()
+    if ngs_df is not None and len(ngs_df):
+        _n = ngs_df.copy()
         _n["WELL_ID"] = pd.to_numeric(_n["WELL_ID"], errors="coerce")
         for _w, _g in _n.dropna(subset=["WELL_ID"]).groupby("WELL_ID"):
             _ngs_by_well[int(_w)] = (set(_g["STATUS"].astype(str)), _g["UPDATED"].max())
-    # Furthest stage reached, in real refill order (streak → overnights → miniprep → quant →
-    # NGS confirm → rearray into the 384 Echo source). Rank by the LAST stage reached, never by
-    # the newest well's protocol — a process touches several plates on the same day, so
-    # "newest well" picks an arbitrary one and mislabels the stage.
-    _STAGE_RANK = {"Overnight Culture":1, "Bank Overnights":1, "Miniprep":2, "DNA Quant":3,
-                   "Sequence Plasmid":4, "NGS Sequence Confirmation":4, "Rearray 96 to 384":5}
-    _STAGE_LABEL = {1:"overnight culture", 2:"miniprep", 3:"DNA quant",
-                    4:"NGS (sequencing)", 5:"rearray into 384 Echo"}
     _refill = apd[apd["PROCESS_ID"].astype(str).str.contains("REFILL", case=False, na=False)].copy()
     _refill["age"]=(now-_refill["CREATED_AT"]).dt.days
 
@@ -191,6 +140,129 @@ def _render() -> str:
                     "gone":int((disc|(vol<=0)).sum())}
         return {"state":"done","age":age,"proc":proc,"stage":stage,"rank":rank,
                 "landed":landed,"ngs":ngs,"seq_ok":seq_ok}
+
+    return refill_status
+
+
+def _consumers(wod):
+    """{part: [(product, type_label, workorder_status, experiment), ...]} over the active GG /
+    Gibson / PCR workorders in the pull. Module-level so both the Parts tab and the in-flight
+    tab read consumption the same way."""
+    from dnasc.utils import parse_parts, parse_backbone, extract_pcr_info
+    TY = {"golden_gate_workorder":"GG","gibson_workorder":"Gibson","pcr_workorder":"PCR"}
+    def _n(s): return [i.split(":")[0] for i in s.split(", ") if i.split(":")[0]]
+    cons = {}
+    for _, w in wod.iterrows():
+        wt = w["WT"]; names = []
+        if wt in ("golden_gate_workorder","gibson_workorder"):
+            names = _n(parse_parts(w.get("parts_json")))
+            bb = parse_backbone(w.get("backbone_json"))
+            if bb: names.append(bb.split(":")[0])
+        elif wt == "pcr_workorder":
+            names = _n(extract_pcr_info(w))
+        for n in names:
+            cons.setdefault(n, []).append((str(w["PRODUCT"]), TY[wt], str(w["ST"]), str(w.get("EXP") or "—")))
+    return cons
+
+
+def blocking_refill_progress() -> dict:
+    """{product: [{part, stage, age, proc, sequencing, stalled}, ...]} — for every product whose
+    build is BLOCKED on a flagged part, where that part's refill batch stands right now.
+
+    The in-flight tab shows this in the Operation column: a request sitting BLOCKED/STALLED with
+    an empty operation is not idle if the part it waits on is mid-refill, and that batch is the
+    only thing that will move it. Only parts with a batch actually in flight are returned — a
+    missing part with nothing running has nothing to report here (the Parts tab says that).
+
+    Reads parts_result.pkl on its own (like the Parts and NGS tabs do) and frees it on the way
+    out, so it adds no lasting memory to the render. Never raises: {} on any failure.
+    """
+    try:
+        r = pickle.load(open(_PKL, "rb"))
+        # Only the REFILL wells are needed here, and every well refill_status looks at carries a
+        # REFILL process id (including the Echo wells it checks for, which it finds by process id).
+        # Narrowing first keeps this off the 1.2M-row frame — the whole call runs in ~1s.
+        apd = r["all_plate_data"]
+        apd = apd[apd["PROCESS_ID"].astype(str).str.contains("REFILL", case=False, na=False)].copy()
+        apd["CREATED_AT"] = pd.to_datetime(apd["CREATED_AT"], errors="coerce", utc=True)
+        refill_status = _make_refill_status(apd, r.get("ngs_df"), r["generated_at"])
+        cons = _consumers(r["wod_df"])
+        # Only parts the pull already flagged as needing action — those are the ones a blocked
+        # build is actually waiting on. Oligos are excluded from the Parts tab, so skip them here
+        # too rather than reporting a refill nobody can see.
+        flagged = [p for p in r["parts"]["Part"].astype(str) if not p.startswith("o")]
+        out: dict = {}
+        for part in flagged:
+            blocked = sorted({prod for prod, _t, st, _e in cons.get(part, []) if st == "BLOCKED"})
+            if not blocked: continue
+            rs = refill_status(part)
+            if rs.get("state") != "inflight": continue
+            note = {"part": part, "stage": rs["stage"], "age": rs["age"], "proc": rs["proc"],
+                    "sequencing": bool(rs.get("sequencing")), "stalled": bool(rs.get("stalled"))}
+            for prod in blocked:
+                out.setdefault(prod, []).append(note)
+        return out
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def render_parts_tab() -> str:
+    """Return the Parts tab fragment (<style scoped> + content + <script>). Never raises."""
+    try:
+        return _render()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return _FALLBACK
+
+
+def _render() -> str:
+    import parts_inventory as P
+
+    r = pickle.load(open(_PKL, "rb"))
+    apd, dpd, now = r["all_plate_data"], r["dpart_data"], r["generated_at"]
+    render_ts = datetime.datetime.now(_ET)   # when THIS html was built (Eastern, so freshness is visible)
+    # data-pull time → Eastern. generated_at may be a plain datetime (tz-aware UTC) OR a pandas
+    # Timestamp; .astimezone() works on both. tz-naive values are assumed UTC first.
+    try:
+        _n = now if getattr(now, "tzinfo", None) else pd.Timestamp(now).tz_localize("UTC")
+        now_et = _n.astimezone(_ET)
+    except Exception:
+        now_et = now
+    ctrl = set(P.CONTROL_PARTS)
+    # LSP-dedicated Echo plates (rearrays in the 4B-LSP rack) are allocated to specific LSP
+    # orders — NOT general stock. Exclude them from inventory counts AND the on-hand display.
+    _lsp = r.get("lsp_plates")
+    LSP_PLATE_IDS = set(_lsp["PLATE_ID"].astype(str)) if _lsp is not None and "PLATE_ID" in getattr(_lsp, "columns", []) else set()
+    dmeta = dpd.drop_duplicates("DPART_NAME").set_index("DPART_NAME")
+    apd = apd.copy(); apd["CREATED_AT"] = pd.to_datetime(apd["CREATED_AT"], errors="coerce", utc=True)
+
+    # Use the parts list straight from the data pull (result["parts"]) instead of re-querying
+    # workorders and re-deriving here. The rebuild used to run its own live workorder query, which
+    # drifts from the pull as the lab generates/completes workorders between the two — so parts the
+    # pull found (e.g. BLOCKED gibson plasmids, in-demand dParts) would silently vanish on rebuild.
+    out = r["parts"].copy()
+    # Oligos are still TBD — exclude o- parts from the actionable views for now.
+    out = out[~out["Part"].astype(str).str.startswith("o")].reset_index(drop=True)
+
+    # All workorder inputs come from the PULL (parts_result.pkl) — the render does ZERO BigQuery.
+    wod = r["wod_df"]                                  # active GG/Gibson/PCR workorders
+    _blk = r["blk_df"]                                 # blocked workorder queue
+
+    # (blocked WOs are indexed by product LATER — after builds_for/cons exist — so each missing
+    #  part can list the workorders it is holding up. There is no standalone blocked-WO section.)
+
+    cons = _consumers(wod)
+
+    tmpl_kids = {}
+    for d, row in dmeta.iterrows():
+        t = row.get("DPART_TEMPLATE")
+        if pd.notna(t): tmpl_kids.setdefault(str(t), []).append(d)
+    flagged = set(out["Part"].astype(str))
+
+    refill_status = _make_refill_status(apd, r.get("ngs_df"), now)
 
     # --- "already ordered?" vendor-order signal (Reorder) — from the pull ---
     _ord = r["ord_df"].copy()
@@ -389,14 +461,6 @@ def _render() -> str:
         # plate carries it while being physically 96-well. Pick the layout from the
         # plate's real well_count, never from the labware name.
         return coord96(wn) if pd.to_numeric(nwells, errors="coerce")==96 else coord384(wn)
-
-    def _is_echo384(d):
-        # A REAL Echo source plate is 384-well. Some plates carry the '384 Echo
-        # Source Plate' labware while being physically 96-well (LIMS data error) —
-        # those are not Echo sources and must never enter the Echo-source flows
-        # (make-available, on-hand, trash). Gate on the actual well_count.
-        return ((d["LABWARE"] == "384 Echo Source Plate")
-                & (pd.to_numeric(d["PLATE_NUMBER_OF_WELLS"], errors="coerce") == 384))
 
     def glycerol_streak(part):
         _loc=apd["PLATE_LOCATION_BOX"].fillna("").astype(str)

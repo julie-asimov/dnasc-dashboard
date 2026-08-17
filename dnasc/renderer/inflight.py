@@ -572,6 +572,17 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     # (e.g. pAI-22328: 2 PCRs RUNNING + 1 BLOCKED → op "PCR: RUNNING" + BLOCKED badge).
     req_blocked = set(base.loc[base['visual_status'] == 'BLOCKED', 'req_id'].astype(str))
 
+    # A build BLOCKED on a missing part is not idle when that part is already mid-refill — the
+    # batch is the only thing that will unblock it, and today that fact lives on the Parts tab
+    # while the request here shows an empty Operation next to BLOCKED/STALLED. Same reader as the
+    # Parts tab (parts_result.pkl), keyed by the product the blocked workorder makes = the pAI.
+    # Optional by design: a missing/failed parts pull just leaves the column as it was.
+    try:
+        from dnasc.renderer.parts import blocking_refill_progress
+        _part_batches = blocking_refill_progress()
+    except Exception:
+        _part_batches = {}
+
     records = []
     for _, row in req_rows.iterrows():
         fp     = str(row.get('for_partner', '')).lower() == 'true'
@@ -619,6 +630,12 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         construct = str(row.get('construct_name', '') or '')
         _grp = any(tag in exp_name for tag in _VARIANT_GROUP_EXPS)
         _vm  = re.search(r'_(v\d+)$', construct) if _grp else None
+        # Refill batches running for the part(s) this request's build is blocked on. A request can
+        # carry several pAIs, and one build can be short more than one part, so this is a list.
+        _batches: list = []
+        for _p in (s.strip() for s in str(pai_map.get(req_id, '')).split(',')):
+            for _b in _part_batches.get(_p, []):
+                if _b not in _batches: _batches.append(_b)
         records.append({
             'exp':       str(row.get('experiment_name', '') or ''),
             'construct': construct,
@@ -631,6 +648,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
             'status':    status,
             'phase':     phase_display,
             'operation': op_display,
+            'batches':   _batches,
             'flags':     flags,
             'vendor_out': vendor_out,
             'req_id':    req_id,
@@ -1158,7 +1176,9 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     if ((q=_flt.pAI)       && r.pAI.toLowerCase().indexOf(q)===-1)       return false;
     if ((q=_flt.customer)  && r.customer.toLowerCase().indexOf(q)===-1)  return false;
     if ((q=_flt.submitter) && r.submitter.toLowerCase().indexOf(q)===-1) return false;
-    if ((q=_flt.operation) && r.operation.toLowerCase().indexOf(q)===-1) return false;
+    // The refill-batch lines live in this column too, so the Operation filter has to see them —
+    // "19132" or "stalled" should find the requests those batches are holding up.
+    if ((q=_flt.operation) && opText(r).toLowerCase().indexOf(q)===-1) return false;
     if ((q=_flt.req_id)    && r.req_id.toLowerCase().indexOf(q)===-1)    return false;
     return true;
   }}
@@ -1187,6 +1207,39 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
          + 'font-weight:600;color:#475569;white-space:normal;word-break:break-word;line-height:1.3;">'
          + esc(base) + '</td></tr>';
   }}
+  // ── Operation cell ────────────────────────────────────────────────────────
+  // Below the OpTracker operation, the refill batches running for the part(s) this build is
+  // blocked on. The flags say a request is stuck; this says what is being done about it — and
+  // for a BLOCKED/STALLED row (operation blank by design) it is the only movement there is.
+  function opText(r){{
+    var t=r.operation||'';
+    (r.batches||[]).forEach(function(b){{
+      t+=' '+b.part+' '+b.stage+' '+b.proc+(b.stalled?' stalled':' refill running');
+    }});
+    return t;
+  }}
+  function batchLines(r){{
+    var b=r.batches||[]; if(!b.length) return '';
+    var out='';
+    for(var i=0;i<b.length;i++){{
+      var x=b[i];
+      var tip=x.part+' — furthest stage '+x.stage+', last activity '+x.age+'d ago · '+x.proc
+            + (x.sequencing?' · its NGS job is still open — the result lands when that job closes':'');
+      out+='<div title="'+esc(tip)+'" style="font-size:9px;line-height:1.35;margin-top:2px;color:'
+         + (x.stalled?'#b91c1c':'#15803d')+';font-weight:600;">'
+         + (x.stalled?'⚠ refill stalled':'⟳ refill running')
+         + ' <span style="font-family:monospace">'+esc(x.part)+'</span>'
+         + '<span style="color:#6b7280;font-weight:400;"> · '+esc(x.stage)+' · '+x.age+'d ago'
+         + (x.sequencing?' · NGS open':'')+'</span></div>';
+    }}
+    return out;
+  }}
+  function opCell(r){{
+    // Wider than it used to be (was a 160px nowrap ellipsis): the room was going to Flags, and
+    // the batch lines need to read as sentences, not as truncated fragments.
+    return '<td style="'+TD+'min-width:180px;max-width:300px;white-space:normal;word-break:break-word;">'
+         + '<span title="'+esc(r.operation)+'">'+esc(r.operation)+'</span>'+batchLines(r)+'</td>';
+  }}
   function _rowHtml(r, grouped) {{
     var bg='';
     for(var fi=0;fi<r.flags.length;fi++){{if(F_BG[r.flags[fi]]){{bg='background:'+F_BG[r.flags[fi]]+';';break;}}}}
@@ -1207,7 +1260,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
           + '<td style="'+TD+'max-width:110px;">'+fmtSubmitter(r.submitter)+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+st+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+ph+'</td>'
-          + '<td style="'+TD+'max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+esc(r.operation)+'</td>'
+          + opCell(r)
           + '<td style="'+TD+'white-space:nowrap;">'+fl+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.assembly)+'</td>'
           + '<td style="'+TD+'white-space:nowrap;">'+fmtDate(r.lsp_scaleup)+'</td>'
