@@ -707,6 +707,20 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     blocked   = sum(1 for r in _ip if 'BLOCKED'   in r['flags'])
     stalled   = sum(1 for r in _ip if 'STALLED'   in r['flags'])
 
+    # Where the in-flight work actually sits, plus what's already done. Static for
+    # the whole tab (deliberately NOT filter-reactive like Flagged / Colony risk) —
+    # this row is the standing shape of the queue, not a read-out of the current view.
+    # Phase is read off _ip because active statuses are never terminal, so their
+    # phase label survives the terminal-row blanking above. NEW requests have no
+    # phase yet (nothing has been planned), which is why the three phases don't
+    # sum to `in_prog` — the remainder is still in design.
+    ph_asm       = sum(1 for r in _ip if r['phase'] == 'ASM')
+    ph_lsp       = sum(1 for r in _ip if r['phase'] == 'LSP')
+    ph_parts     = sum(1 for r in _ip if r['phase'] == 'PARTS')
+    ph_design    = in_prog - ph_asm - ph_lsp - ph_parts
+    fulfilled_ct = sum(1 for r in records if r['status'] == 'FULFILLED')
+    total_ct     = len(records)
+
     data_json          = json.dumps(records, ensure_ascii=False)
     excl_exp_json      = json.dumps(sorted(_DEFAULT_EXCLUDED_EXP))
 
@@ -755,6 +769,11 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
                                 for k, (lbl, bg, txt) in tok.CUSTOMER.items()) + "}"
     GEO_STATUS = _geo("status")
     GEO_PHASE  = _geo("phase")
+    # For the per-experiment phase split on the experiment header row: the active
+    # statuses (single source = _ACTIVE_REQ_STATUS) and the DESIGN chip style,
+    # which reuses the NEW status tint exactly like the tab-wide pill does.
+    IF_ACT_JSON = json.dumps({s: 1 for s in sorted(_ACTIVE_REQ_STATUS)})
+    DESIGN_CHIP = GEO_PHASE + _tint(_status_map['NEW'])
     GEO_CUST   = _geo("customer")
     _pg = tok.GEOM["pai"]
     PAI_STYLE = (f"display:inline-block;background:{tok.PURPLE_BG_2};color:{tok.PURPLE};"
@@ -835,6 +854,20 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     <span class="kpill"><span class="kk">Blocked</span><b style="color:#b91c1c;">{blocked}</b></span>
     <span class="kpill"><span class="kk">Stalled</span><b style="color:#dc2626;">{stalled}</b></span>
     <span class="kpill"><span class="kk">Colony risk</span><b id="if-colrisk-ct" style="color:#991b1b;">0</b></span>
+  </div>
+
+  <!-- Phase split of the in-flight work + fulfilled / tab total. Static for the whole
+       tab (does not follow the filter bar) — see the Python comment above. -->
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+    <span class="kpill" style="gap:9px;">
+      <span class="kk">In phase</span>
+      <span style="display:inline-flex;align-items:center;gap:4px;"><span style="{GEO_PHASE}{_tint(tok.PHASE['ASM'])}">ASM</span><b>{ph_asm}</b></span>
+      <span style="display:inline-flex;align-items:center;gap:4px;"><span style="{GEO_PHASE}{_tint(tok.PHASE['LSP'])}">LSP</span><b>{ph_lsp}</b></span>
+      <span style="display:inline-flex;align-items:center;gap:4px;"><span style="{GEO_PHASE}{_tint(tok.PHASE['PARTS'])}">PARTS</span><b>{ph_parts}</b></span>
+      <span style="display:inline-flex;align-items:center;gap:4px;" title="NEW requests — no phase yet, still in design"><span style="{GEO_PHASE}{_tint(_status_map['NEW'])}">DESIGN</span><b>{ph_design}</b></span>
+    </span>
+    <span class="kpill" title="Requests in this tab already delivered"><span class="kk">Fulfilled</span><b style="color:#15803d;">{fulfilled_ct}</b></span>
+    <span class="kpill" title="Every request shown in this tab, all statuses"><span class="kk">Total</span><b>{total_ct}</b></span>
   </div>
 
   <!-- View toggle -->
@@ -933,6 +966,59 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     return '<span style="'+PILL+'display:inline-flex;align-items:center;'+(S_ST[s]||_ST_GRAY)+'">'+ic+esc(lbl)+'</span>';}}
   // phase pill: solid brand-sweep fill, own geometry.
   function phaseBdg(p){{return P_ST[p]?'<span style="'+GEO_PHASE+P_ST[p]+'">'+esc(p)+'</span>':'';}}
+  // Per-experiment summary for the experiment header row — the same three pills
+  // the tab-wide bar carries at the top (In phase split, Fulfilled, Total), one
+  // line per project. It is an OVERVIEW: static, tallied off every row of the
+  // experiment, so the filter bar never moves it — same contract as the top bar
+  // (see the Python comment on ph_asm/ph_lsp). The phase split uses the identical
+  // rule as the top pill: anything active that is not ASM/LSP/PARTS is DESIGN (a
+  // NEW request has no phase yet). Fulfilled is status == FULFILLED, Total is
+  // every row regardless of status.
+  var _IF_ACT={IF_ACT_JSON};                   // mirror of _ACTIVE_REQ_STATUS
+  var _DESIGN_ST='{DESIGN_CHIP}';
+  // Same chip vocabulary as the top bar: one .kpill holding the "In phase" split,
+  // then a .kpill each for Fulfilled and Total. Reusing the class (rather than
+  // restyling here) is what keeps the two rows reading as the same system, and
+  // gives the counts their own surface so they stop blending into the Partner pill.
+  function _expKpill(lbl,n,col){{
+    return '<span class="kpill" style="margin-left:6px;"><span class="kk">'+lbl+'</span>'
+         + '<b'+(col?' style="color:'+col+';"':'')+'>'+n+'</b></span>';
+  }}
+  // Tallied ONCE off the full record set, not off the filtered rows — these are the
+  // standing shape of each experiment, exactly like the tab-wide bar at the top, so
+  // clicking IN PROGRESS or any flag filter never moves them. Keyed by experiment.
+  var _EXP_STAT=(function(){{
+    var m={{}};
+    _IFD.forEach(function(r){{
+      var s=m[r.exp]||(m[r.exp]={{ASM:0,LSP:0,PARTS:0,DESIGN:0,ful:0,total:0,ip:0}});
+      s.total++;
+      if(r.status==='FULFILLED') s.ful++;
+      if(_IF_ACT[r.status]){{
+        s[(r.phase==='ASM'||r.phase==='LSP'||r.phase==='PARTS')?r.phase:'DESIGN']++;
+        s.ip++;
+      }}
+    }});
+    return m;
+  }})();
+  function _expSummary(exp){{
+    var s=_EXP_STAT[exp];
+    if(!s) return '';
+    var out='';
+    if(s.ip){{
+      var chips='';
+      ['ASM','LSP','PARTS','DESIGN'].forEach(function(k){{
+        if(!s[k]) return;
+        var sty=(k==='DESIGN')?_DESIGN_ST:(GEO_PHASE+P_ST[k]);
+        chips+='<span style="display:inline-flex;align-items:center;gap:4px;">'
+             + '<span style="'+sty+'">'+k+'</span><b>'+s[k]+'</b></span>';
+      }});
+      out+='<span class="kpill" style="gap:9px;margin-left:10px;"><span class="kk">In phase</span>'
+         + chips + '</span>';
+    }}
+    out += _expKpill('Fulfilled', s.ful, '#15803d') + _expKpill('Total', s.total, '');
+    return '<span title="This experiment: in-progress requests by phase, plus fulfilled and total.'
+         + ' Static — does not change with the filters, same as the bar at the top.">'+out+'</span>';
+  }}
   var PAI_STY   ='{PAI_STYLE}';
   var PAI_STY_RD='{PAI_STYLE_RD}';
   function paiBadges(s,cust){{if(!s)return'';var st=cust==='R_D'?PAI_STY_RD:PAI_STY;return s.split(',').map(function(p){{p=p.trim();return p?'<span style="'+st+'">'+esc(p)+'</span>':'';}}).join('');}}
@@ -1453,7 +1539,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
         : '';
       html += '<tr class="if-grp"><td colspan="'+NCOL+'" style="padding:16px 14px 7px;font-size:13px;'
             + 'font-weight:700;color:#111827;background:#fff;border-top:1px solid #e5e7eb;">'
-            + esc(exp) + partnerPill + '</td></tr>';
+            + esc(exp) + partnerPill + _expSummary(exp) + '</td></tr>';
       // Sub-group rows by base construct so an original + its v2/v3 redo render as
       // one section (shared header). Grouping is by base regardless of adjacency,
       // so it survives column re-sorts; singletons render exactly as before.

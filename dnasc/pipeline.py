@@ -1044,7 +1044,10 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
     if "input_well_id" in df.columns and "source_lsp_process_id" in df.columns:
         lsp_well_mask = (df["type"] == "lsp_workorder") & df["input_well_id"].notna()
         if lsp_well_mask.any():
-            for col in ["source_lsp_process_id", "lsp_input_well"]:
+            for col in ["source_lsp_process_id", "lsp_input_well",
+                        "order_well_plate_id", "order_well_position",
+                        "order_well_count", "order_well_labware",
+                        "order_well_protocol", "order_well_plate_location"]:
                 if col not in df.columns:
                     continue
                 filled = (

@@ -41,7 +41,19 @@ class LSPExtractor:
                 COALESCE(ps.process_id, st.process_id, well.process_id) AS source_lsp_process_id,
                 'LSP' AS data_source,
                 COALESCE(source_wo_ps.id, source_wo_st.id, source_wo.id) AS source_workorder_id,
+                -- The well recorded on the LSP order at submission time. This is
+                -- the GLYCEROL STOCKING input (the temp overnight well), not the
+                -- LSP input: stocking consumes it and moves the material to the
+                -- Micronic that the LSP prep is pulled from (see input_well_id in
+                -- get_lsp_aliquots). Carry its plate context so the dashboard can
+                -- show plate:coord for it the same way.
                 lsp.input_lims_record AS lsp_input_well,
+                well.plate_id AS order_well_plate_id,
+                well.position AS order_well_position,
+                well_pl.well_count AS order_well_count,
+                well_pl.labware AS order_well_labware,
+                well_pl.protocol AS order_well_protocol,
+                well_pl.location AS order_well_plate_location,
                 CASE
                     WHEN lsp.lsp_batch_key IS NOT NULL AND lsp.lsp_batch_key != 'null'
                     THEN CONCAT('LSP-', JSON_VALUE(lsp.lsp_batch_key, '$.id'))
@@ -52,6 +64,7 @@ class LSPExtractor:
             LEFT JOIN `{proj}.bios__src.lspworkorder` lsp ON wo.id = lsp.id
             LEFT JOIN `{proj}.lims__src.well` AS well
                 ON well.id = SAFE_CAST(JSON_VALUE(lsp.input_lims_record, '$.id') AS INT64)
+            LEFT JOIN `{proj}.lims__src.plate` AS well_pl ON well_pl.id = well.plate_id
             LEFT JOIN `{proj}.lims__src.well_content` AS wc ON wc.well_id = well.id
             LEFT JOIN `{proj}.lims__src.plasmid_stock` AS ps ON ps.id = wc.plasmid_stock_id
             LEFT JOIN `{proj}.lims__src.strain` AS st ON st.id = wc.strain_id
@@ -104,7 +117,19 @@ class LSPExtractor:
         query = f"""
         SELECT
             COALESCE(aliq.process_id, w.process_id) AS lsp_process_id,
+            -- The well that physically HOLDS the source strain. This is the well
+            -- the prep is pulled from (normally the Micronic glycerol stock), NOT
+            -- the well recorded on the LSP order at submission time — Glycerol
+            -- Stocking consumes that earlier overnight well and moves the material
+            -- to a Micronic, so the order well's location goes stale (temp rack).
+            -- strain -> well is 1:1 here (verified: 2852/2852 batches, 1 well each).
             w.id AS input_well_id,
+            w.plate_id AS input_well_plate_id,
+            w.position AS input_well_position,
+            pl.well_count AS input_well_count,
+            pl.labware AS input_well_labware,
+            pl.protocol AS input_well_protocol,
+            pl.location AS input_well_plate_location,
             CONCAT('LSP-', CAST(batch.id AS STRING)) AS lsp_batch_id,
             COALESCE(
                 CONCAT('strain', CAST(source.strain_id AS STRING)),
@@ -138,12 +163,14 @@ class LSPExtractor:
         LEFT JOIN `{proj}.lims__src.strain` AS p ON p.id = source.strain_id
         LEFT JOIN `{proj}.lims__src.well_content` AS wc ON wc.strain_id = p.id
         LEFT JOIN `{proj}.lims__src.well` AS w ON w.id = wc.well_id
+        LEFT JOIN `{proj}.lims__src.plate` AS pl ON pl.id = w.plate_id
         LEFT JOIN `{proj}.lims__src.plasmid_stock` AS qc_ps
             ON qc_ps.plasmid_id = batch.plasmid_id
             AND qc_ps.comments = CONCAT('LSP-', CAST(batch.id AS STRING))
             AND qc_ps.location IS NOT NULL
         WHERE batch.created_at >= '{date_filter}'
-        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26
+        GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,
+                 25,26,27,28,29,30,31,32
         """
 
         df = pd.read_gbq(query, project_id=proj, dialect="standard")

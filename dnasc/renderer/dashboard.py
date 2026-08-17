@@ -2744,17 +2744,83 @@ def render_all_projects_dashboard(
                         proc_href = f"https://bios.asimov.io/inbox/work-orders?filter_-l=%5B%7B%22id%22%3A%22workOrderId%22%2C%22value%22%3A%22{proc_id}%22%7D%5D"
                         proc_label = proc_id
 
-                    # Resolve input well ID for Source Info popover
-                    _input_well_raw = row.get('lsp_input_well')
-                    if pd.isna(_input_well_raw) or str(_input_well_raw) == 'nan':
-                        _input_well_raw = row.get('input_well_id')
+                    # Input wells for the Source Info popover — TWO wells, one per
+                    # step of the chain, each labeled by the step it feeds:
+                    #
+                    #   Stocking input — the temp overnight well (Armadillo / V Bottom,
+                    #                    protocol Bank Overnights). This is what
+                    #                    Glycerol Stocking consumed; it is the well
+                    #                    recorded on the LSP ORDER at submission time
+                    #                    (lspworkorder.input_lims_record), which is why
+                    #                    it used to show up as the LSP input and read as
+                    #                    a temp rack. It is NOT where the material is.
+                    #   LSP input      — the Micronic the stocking step produced and the
+                    #                    LSP prep is actually pulled from, resolved via
+                    #                    lsp_batch_source.strain_id → well_content.
+                    #
+                    # Both lines carry plate:coord + labware + protocol + rack location.
+                    def _well_link(_wid):
+                        return (f'<a href="https://bios.asimov.io/inventory/wells/{_wid}"'
+                                f' target="_blank" class="u12">well{_wid}</a>')
+
+                    def _well_ctx(_plate_f, _pos_f, _wc_f, _lw_f, _proto_f, _loc_f):
+                        """Grey sub-line: plate <id>:<coord> · labware · protocol · location."""
+                        _p_id, _pos = row.get(_plate_f), row.get(_pos_f)
+                        _coord = ''
+                        if pd.notna(_pos):
+                            _key = str(int(float(_pos)) + 1)
+                            _wc = row.get(_wc_f)
+                            _wcn = int(float(_wc)) if pd.notna(_wc) else 96
+                            if _wcn == 384:
+                                _coord = _WELL_MAP_384.get(_key, _key)
+                            elif _wcn == 8:
+                                _coord = _WELL_MAP_AGAR.get(_key, _key)
+                            else:
+                                _coord = _WELL_MAP_96.get(_key, _key)
+                        _bits = []
+                        if pd.notna(_p_id) and str(_p_id) not in ('nan', ''):
+                            _bits.append(f"plate {int(float(_p_id))}"
+                                         + (f":{_coord}" if _coord else ""))
+                        elif _coord:
+                            _bits.append(_coord)
+                        for _f in (_lw_f, _proto_f, _loc_f):
+                            _v = row.get(_f)
+                            if pd.notna(_v) and str(_v) not in ('nan', ''):
+                                _bits.append(str(_v))
+                        if not _bits:
+                            return ''
+                        return ('<div style="font-size:9px;color:#9ca3af;margin-top:3px;'
+                                'padding-left:2px;">' + ' &nbsp;·&nbsp; '.join(_bits) + '</div>')
+
+                    _lsp_wid, _stock_wid = None, None
+                    _lsp_raw = row.get('input_well_id')
+                    if pd.notna(_lsp_raw) and str(_lsp_raw) not in ('nan', ''):
+                        try:
+                            _lsp_wid = str(int(float(_lsp_raw)))
+                        except (TypeError, ValueError):
+                            _lsp_wid = str(_lsp_raw)
+                    _stock_raw = row.get('lsp_input_well')
+                    if pd.notna(_stock_raw) and str(_stock_raw) not in ('nan', ''):
+                        _om = re.search(r'"id":\s*(\d+)', str(_stock_raw))
+                        _stock_wid = _om.group(1) if _om else str(_stock_raw)
+
+                    _rowdiv = 'font-size:11px;padding:4px 0;border-bottom:1px solid #f1f5f9;'
                     _input_well_html = ""
-                    if pd.notna(_input_well_raw) and str(_input_well_raw) != 'nan':
-                        _wm = re.search(r'"id":\s*(\d+)', str(_input_well_raw))
-                        _fid = _wm.group(1) if _wm else str(_input_well_raw)
+                    # Chronological: what fed stocking, then what stocking produced.
+                    if _stock_wid and _stock_wid != _lsp_wid:
+                        _input_well_html += f"""
+                                    <span class="u1">Stocking input:</span>
+                                    <div style="{_rowdiv}">{_well_link(_stock_wid)}{_well_ctx('order_well_plate_id', 'order_well_position', 'order_well_count', 'order_well_labware', 'order_well_protocol', 'order_well_plate_location')}</div>"""
+                    if _lsp_wid:
+                        _input_well_html += f"""
+                                    <span class="u1">LSP input:</span>
+                                    <div style="{_rowdiv}">{_well_link(_lsp_wid)}{_well_ctx('input_well_plate_id', 'input_well_position', 'input_well_count', 'input_well_labware', 'input_well_protocol', 'input_well_plate_location')}</div>"""
+                    elif _stock_wid:
+                        # No source strain resolved — the order well is all we have, and
+                        # it is the LSP order's own record, so label it as the LSP input.
                         _input_well_html = f"""
-                                    <span class="u1">Input:</span>
-                                    <span style="font-size:11px;padding:4px 0;border-bottom:1px solid #f1f5f9;"><a href="https://bios.asimov.io/inventory/wells/{_fid}" target="_blank" class="u12">well{_fid}</a></span>"""
+                                    <span class="u1">LSP input:</span>
+                                    <div style="{_rowdiv}">{_well_link(_stock_wid)}{_well_ctx('order_well_plate_id', 'order_well_position', 'order_well_count', 'order_well_labware', 'order_well_protocol', 'order_well_plate_location')}</div>"""
 
                     lsp_parts.append(f"""
                         <div class="plate-hover-container" style="display: inline-block; margin-bottom: 6px;">

@@ -138,6 +138,8 @@ def upsert_baseline(delta_df: pd.DataFrame) -> pd.DataFrame:
     # have null aliquot data in the delta — restore from baseline to avoid wiping.
     ALIQUOT_COLS = [
         "lsp_batch_id", "lsp_process_id", "input_well_id", "source_material",
+        "input_well_plate_id", "input_well_position", "input_well_count",
+        "input_well_labware", "input_well_protocol", "input_well_plate_location",
         "plasmid_id", "comp_cell", "deposited_by",
         "available", "batch_created_at", "batch_comments",
         "prep_method", "buffer", "vendor_order_id",
