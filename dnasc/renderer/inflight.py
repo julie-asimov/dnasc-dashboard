@@ -719,7 +719,11 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
     ph_parts     = sum(1 for r in _ip if r['phase'] == 'PARTS')
     ph_design    = in_prog - ph_asm - ph_lsp - ph_parts
     fulfilled_ct = sum(1 for r in records if r['status'] == 'FULFILLED')
-    total_ct     = len(records)
+    # Total deliberately EXCLUDES CANCELED so the row reconciles: in-flight +
+    # fulfilled = total. Canceled requests are still listed in the table (and
+    # reachable from the Status filter) — they're just not work we ever owed, so
+    # counting them here left an unexplained gap between the tiles.
+    total_ct     = sum(1 for r in records if r['status'] != 'CANCELED')
 
     data_json          = json.dumps(records, ensure_ascii=False)
     excl_exp_json      = json.dumps(sorted(_DEFAULT_EXCLUDED_EXP))
@@ -847,7 +851,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
   <!-- Metadata clouds (Kernel-style) -->
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
     <span class="kpill"><span class="kk">In progress</span><b style="color:#1d4ed8;">{in_prog}</b></span>
-    <span class="kpill"><span class="kk">Flagged</span><b id="if-flagged-ct">{flagged}</b></span>
+    <span class="kpill" title="Requests carrying at least one flag. A request can carry several, so the individual flag counts sum higher than this."><span class="kk">Flagged</span><b id="if-flagged-ct">{flagged}</b></span>
     <span class="kpill"><span class="kk">Past due</span><b style="color:#991b1b;">{past_due}</b></span>
     <span class="kpill"><span class="kk">At vendor</span><b style="color:#3730a3;">{at_vendor}</b></span>
     <span class="kpill"><span class="kk">Behind schedule</span><b style="color:#854d0e;">{at_risk}</b></span>
@@ -867,7 +871,7 @@ def render_inflight_tab(df: pd.DataFrame) -> str:
       <span style="display:inline-flex;align-items:center;gap:4px;" title="NEW requests — no phase yet, still in design"><span style="{GEO_PHASE}{_tint(_status_map['NEW'])}">DESIGN</span><b>{ph_design}</b></span>
     </span>
     <span class="kpill" title="Requests in this tab already delivered"><span class="kk">Fulfilled</span><b style="color:#15803d;">{fulfilled_ct}</b></span>
-    <span class="kpill" title="Every request shown in this tab, all statuses"><span class="kk">Total</span><b>{total_ct}</b></span>
+    <span class="kpill" title="In-flight + fulfilled requests in this tab. Canceled requests are listed in the table but not counted here."><span class="kk">Total</span><b>{total_ct}</b></span>
   </div>
 
   <!-- View toggle -->
