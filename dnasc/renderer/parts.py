@@ -993,9 +993,21 @@ def _render() -> str:
             ws=blocked_wos_for(part)
             nd=sum(1 for w in ws if w["twin"] and not w["succ"])
             ns=sum(1 for w in ws if w["succ"])
+            # The second clause has to be the REAL maker state, not an assumption. This branch used
+            # to hardcode "nothing queued to make it" and return before ever calling refill_status,
+            # so a part with a refill batch mid-flight asserted the opposite of its own panel:
+            # pAI-19132 read "nothing queued to make it" on the row while the panel showed
+            # DV_REFILL_STREAK_12Aug2026 at rearray-into-384-Echo with its NGS job still open.
+            # batch_state() is the one place that turns refill_status into words, so defer to it
+            # and the row can never drift from the panel again.
+            _rs_bp=refill_status(part)
+            if _rs_bp["state"]=="inflight":
+                _mk=' · '+batch_state(part, int(x["Reactions Required"]),
+                                      str(part) in ctrl_related)
+            else:
+                _mk='<span style="color:#9ca3af"> · nothing queued to make it</span>'
             cell=(f'<span style="color:#b91c1c;font-weight:700">⚠ blocking {len(ws)} '
-                  f'WO{"s" if len(ws)!=1 else ""}</span>'
-                  f'<span style="color:#9ca3af"> · nothing queued to make it</span>')
+                  f'WO{"s" if len(ws)!=1 else ""}</span>{_mk}')
             if ns:
                 cell+=(f'<div style="color:#15803d;font-size:10px">{ns} already produced '
                        f'elsewhere → cancelable</div>')
@@ -1242,6 +1254,11 @@ def _render() -> str:
     _n_bp_wo   = len(_bp_wos)                                         # distinct WOs they block
     _n_bp_twin = sum(1 for w in _bp_wos.values() if w["twin"] and not w["succ"])
     _n_bp_succ = sum(1 for w in _bp_wos.values() if w["succ"])
+    # Blocked parts that already have a refill mid-flight. They still belong in this section — they
+    # ARE holding up workorders — but they need no order and no PCR, so the card must not tell the
+    # reader to queue one on top of a batch that is already running.
+    _n_bp_inflight = sum(1 for _x in _ph_rows
+                         if refill_status(str(_x["Part"]))["state"] == "inflight")
     # A blocked WO that no missing part accounts for would silently vanish now that the standalone
     # blocked-WO list is gone. Today that set is empty (all 15 resolve to one of the 8 parts), but
     # it is not guaranteed — so orphans still get shown, in their own small section.
@@ -1647,6 +1664,10 @@ def _render() -> str:
         if _n_bp_twin:
             _bits.append(f'<b style="color:#b45309">{_n_bp_twin}</b> of those have another '
                          f'unblocked WO for the same final product → cancel the blocked one')
+        if _n_bp_inflight:
+            _bits.append(f'<b style="color:#15803d">{_n_bp_inflight}</b> already ha'
+                         f'{"ve" if _n_bp_inflight!=1 else "s"} a batch in flight → wait for it, '
+                         f'don&#39;t re-queue')
         _bp_strip=('<div style="margin:0 0 8px;padding:7px 10px;background:#fef2f2;'
                    'border:1px solid #fecaca;border-radius:6px;font-size:11.5px;color:#374151">'
                    + ' &nbsp;·&nbsp; '.join(_bits) + '</div>')
@@ -1733,7 +1754,7 @@ def _render() -> str:
   <div class="ovc"><div class="ovn" style="color:#6b7280">{_n_trash}</div><div class="ovl">Plates to trash</div></div>
 </div>
 {section_card("Parts needing attention", ("#fffbeb","#b45309","#fde68a"), _pa_count, parts_html, "restock / refill / reorder — grouped by experiment · Need = in-flight builds that have not drawn their material yet (RUNNING ones already did)", colhdr=_PHDR_ROW)}
-{section_card("Blocked — nothing queued to make it", ("#fef2f2","#b91c1c","#fca5a5"), _n_bp, _bp_strip+blockedparts_html, f"order or PCR these to unblock {_n_bp_wo} stuck workorder{'s' if _n_bp_wo!=1 else ''} · click a part to see exactly which WOs it stalls", colhdr=_PHDR_ROW)}
+{section_card("Blocked — missing parts holding up workorders", ("#fef2f2","#b91c1c","#fca5a5"), _n_bp, _bp_strip+blockedparts_html, f"no stock on hand, and {_n_bp_wo} workorder{'s' if _n_bp_wo!=1 else ''} stuck behind {'them' if _n_bp!=1 else 'it'} · each row says whether anything is queued to make it · click a part to see exactly which WOs it stalls", colhdr=_PHDR_ROW)}
 {section_card("Blocked workorders — cause unknown", ("#fef2f2","#b91c1c","#fca5a5"), len(_orphan_wos), _orphan_html, "stuck WOs that no missing part above explains — investigate the workorder itself")}
 {section_card("New builds — feed into requests", ("#f5f3ff","#6d28d9","#ddd6fe"), _nb_count, newbuilds_html, "net-new parts being assembled (workorder in flight) that feed downstream requests", colhdr=_PHDR_ROW)}
 <div class="secgroup-title">Well &amp; plate actions</div>
