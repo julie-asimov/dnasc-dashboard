@@ -633,7 +633,9 @@ _FRAGMENT = r"""
         // already produced enough colonies. Say so rather than implying the retry is wanted.
         return plannedTotal(g) >= g.want ? 'auto - check if necessary' : 'auto';
       }
-      return plannedTotal(g) >= g.want ? '-' : 'BY HAND';
+      // A bare '-' read as "no data". Say what it actually means: nothing re-runs, because the
+      // picks already meet the target and the arm was too healthy for the auto-retry rule.
+      return plannedTotal(g) >= g.want ? 'no - enough picked' : 'BY HAND';
     }
     var COLS=[
       {h:'Plasmid',    get:function(g){ return g.plasmid; }},
