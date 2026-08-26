@@ -3103,19 +3103,38 @@ def render_all_projects_dashboard(
                                         well_id, col_num, protocol_name = match.groups()
                                         if protocol_name.strip() not in protocol_wells: protocol_wells[protocol_name.strip()] = {}
                                         protocol_wells[protocol_name.strip()][col_num] = well_id
-                            protocol_order = [proto.LSP_RECEIVING, 'Miniprep', 'Bank Overnights', proto.REARRAY, proto.GLYCEROL_STOCKING, 'Glycerol'] if row['type'] == 'lsp_workorder' else ['Miniprep', 'Bank Overnights', proto.REARRAY, proto.GLYCEROL_STOCKING]
+                            protocol_order = [proto.LSP_RECEIVING, 'Bank Overnights', 'Miniprep', proto.REARRAY, proto.GLYCEROL_STOCKING, 'Glycerol'] if row['type'] == 'lsp_workorder' else ['Bank Overnights', 'Miniprep', proto.REARRAY, proto.GLYCEROL_STOCKING]
+                            # The glycerol is what you go and fetch — it re-streaks, where the
+                            # miniprep is DNA that gets consumed. Bank Overnights therefore leads,
+                            # and when it resolved we drop Miniprep entirely rather than show the
+                            # same colony twice under the less useful well. Miniprep still stands
+                            # alone for picks that were never banked.
+                            _gly_keys = {_p for _p in protocol_wells if 'bank overnights' in _p.lower()}
+                            _has_gly = any(protocol_wells[_p] for _p in _gly_keys)
                             popover_content = ""
+                            # Substring matching means a later, broader entry re-matches a key an
+                            # earlier one already claimed — 'Glycerol' matches 'Glycerol Stocking
+                            # Scinomix' after GLYCEROL_STOCKING took it — which rendered the same
+                            # group twice. Only ever show a well once.
+                            _seen_wells = set()
                             for protocol_name in protocol_order:
+                                if _has_gly and protocol_name == 'Miniprep': continue
                                 matching_wells = {}
                                 for _pkey, wells in protocol_wells.items():
                                     if protocol_name.lower() in _pkey.lower(): matching_wells.update(wells)
+                                matching_wells = {_c: _w for _c, _w in matching_wells.items()
+                                                  if _w not in _seen_wells}
+                                _seen_wells.update(matching_wells.values())
                                 if matching_wells:
                                     links = ""
                                     for col_num in sorted(matching_wells.keys(), key=lambda x: int(x)):
                                         w_id = matching_wells[col_num]; url = f"https://bios.asimov.io/inventory/wells/{w_id}"; label = f"well{w_id}_col{col_num}"
                                         if col_num == selected_col_num: links += f'<a href="{url}" target="_blank" class="popover-link" style="color:#0891b2;">★ {label}</a>'
                                         else: links += f'<a href="{url}" target="_blank" class="popover-link">{label}</a>'
-                                    popover_content += f'<div class="popover-group"><div class="popover-title">{protocol_name}</div>{links}</div>'
+                                    # 'Bank Overnights' is the protocol; what the row IS, and what
+                                    # you actually go and pull, is the V-bottom glycerol. Say that.
+                                    _ptitle = 'Glycerol (V bottom)' if protocol_name == 'Bank Overnights' else protocol_name
+                                    popover_content += f'<div class="popover-group"><div class="popover-title">{_ptitle}</div>{links}</div>'
                             if popover_content: details_info.append(f'<br><div class="plate-hover-container"><span class="colony-badge" style="background: {bg}; color: {color}; cursor:pointer;">{seq}/{tot} colonies seq confirmed</span><div class="plate-popover" data-pop="{_intern_popover(popover_content)}"></div></div>')
                             else: details_info.append(f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>')
                             if _n_repick > 0:

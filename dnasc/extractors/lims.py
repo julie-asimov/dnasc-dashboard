@@ -49,7 +49,13 @@ class LIMSExtractor:
             COALESCE(d.seq_confirmed, g.seq_confirmed) AS seq_confirmed,
             a.id AS well_id,
             b.id AS plate_id,
-            b.protocol AS plate_protocol
+            b.protocol AS plate_protocol,
+            -- Needed to tell the REAL glycerol from the temp one: a pick banks two
+            -- 'Bank Overnights' wells, a Thermo V Bottom / Eppendorf V (the keeper,
+            -- in an 80D rack) and an Armadillo in 80D_TEMP_GLY_RACK_*. Same protocol,
+            -- same colony, same seq_confirmed — only labware + location separate them.
+            b.labware AS plate_labware,
+            b.location AS plate_location
         FROM `{proj}.lims__src.well` a
         LEFT JOIN `{proj}.lims__src.plate` b ON a.plate_id = b.id
         LEFT JOIN `{proj}.lims__src.well_content` c ON c.well_id = a.id
@@ -108,8 +114,30 @@ class LIMSExtractor:
         )
 
         # ── Seq confirmed list ────────────────────────────────────────────────
-        seq_df = unique_colonies[unique_colonies["seq_confirmed"] == True]
+        # Built from the RAW rows, not `unique_colonies`. One colony is held in
+        # several wells at once — the glycerol the pick was banked into and the
+        # miniprep made from it both carry the same colony_number and the same
+        # seq_confirmed=True. `unique_colonies` keeps exactly one row per
+        # (workorder, colony), so whichever well won that tie was the only one
+        # this list could ever mention; with seq_confirmed and available equal
+        # across all of them the winner came down to raw row order, and it landed
+        # on the miniprep. The popover then had no glycerol to show even though
+        # its protocol_order asks for one. Emit every seq-confirmed well and let
+        # the renderer group them by protocol.
+        #
+        # The temp glycerol is dropped here rather than in the renderer: it is the
+        # same protocol string as the keeper ('Bank Overnights'), so the two are
+        # indistinguishable once the entry is serialised to well:col[protocol].
+        seq_df = raw_df[
+            (raw_df["seq_confirmed"] == True) & raw_df["colony_number"].notna()
+        ].copy()
         if not seq_df.empty:
+            _loc = seq_df["plate_location"].fillna("").astype(str).str.upper()
+            seq_df = seq_df[~_loc.str.contains("TEMP")]
+        if not seq_df.empty:
+            # A colony can still fan out to duplicate JOIN rows for the same well
+            # (plasmid_stock + strain); collapse on the well, not the colony.
+            seq_df = seq_df.drop_duplicates(subset=["workorder_id", "well_id"])
             seq_str = seq_df["well_col_combined"] + "[" + seq_df["plate_protocol"] + "]"
             seq_map = seq_str.groupby(seq_df["workorder_id"]).apply(", ".join)
             colony_summary["seq_confirmed_colonies"] = (
