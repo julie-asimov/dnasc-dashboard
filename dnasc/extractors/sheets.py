@@ -126,7 +126,13 @@ def append_experiment_names(names: list[str]) -> dict:
                 if row and str(row[0]).strip():
                     existing.add(str(row[0]).strip())
         else:
-            log.warning("append: could not read existing names (%d): %s", r.status_code, r.text[:200])
+            # A failed dedup read must abort the append, never fall through.
+            # Leaving `existing` empty makes to_add the whole input list, so every
+            # run re-appends every missing name — which is what filled the sheet
+            # with repeated blocks of the same wave2 experiments.
+            result["error"] = f"dedup read failed ({r.status_code}): {r.text[:200]}"
+            log.warning("append aborted, cannot dedup: %s", result["error"])
+            return result
 
         to_add = [n for n in dict.fromkeys(names) if n not in existing]
         result["skipped_existing"] = [n for n in names if n in existing]
@@ -200,7 +206,14 @@ def _try_csv_fallback() -> pd.DataFrame | None:
         log.warning("CSV fallback not found: %s", path)
         return None
     df = pd.read_csv(path)
-    log.info("Due dates loaded from CSV: %d rows", len(df))
+    age_days = (time.time() - path.stat().st_mtime) / 86400
+    # Loud, not info: silently substituting a stale CSV for the sheet makes the
+    # renderer report real due dates as "missing an Asana due date".
+    log.warning(
+        "Due dates came from the CSV FALLBACK, not the sheet: %s (%d rows, %.0f days old). "
+        "Any date added to the sheet since then is NOT in this render.",
+        path, len(df), age_days,
+    )
     return df
 
 
