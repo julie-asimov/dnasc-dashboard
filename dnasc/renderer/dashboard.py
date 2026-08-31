@@ -940,6 +940,12 @@ def render_all_projects_dashboard(
     #search_box:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.1); }
     .search-match td { background: #fef9c3 !important; }
     .search-match-section { outline: 2px solid #f59e0b !important; outline-offset: 1px; border-radius: 3px; }
+
+    /* LSP order handle — the "<job id>_<index>" the team names LSPs by. */
+    .lsp-oidx { display: inline-block; margin-left: 5px; padding: 0 4px; border-radius: 3px;
+                background: #eef2ff; border: 1px solid #c7d2fe; color: #4338ca;
+                font-size: 9px; font-weight: 700; text-decoration: none; vertical-align: 1px; }
+    a.lsp-oidx:hover { background: #e0e7ff; border-color: #a5b4fc; }
     </style>
 
     <script>
@@ -1011,13 +1017,19 @@ def render_all_projects_dashboard(
             document.getElementById('sort_due_btn').style.color = '#1d1d1f';
         }
     }
+    // The team names an LSP by its LSP Order job id and index — "9560: 8", or
+    // "9560 8". OpTracker's own form, and what the batch renders as, is "9560_8";
+    // fold the spoken forms onto it so either one finds the row.
+    function _normSearch(v) {
+        return v.toLowerCase().trim().replace(/^(\d{3,6})\s*[:\-\s]\s*(\d{1,3})$/, '$1_$2');
+    }
     var _filterTimer = null;
     function filterDashboardDebounced() {
         clearTimeout(_filterTimer);
         _filterTimer = setTimeout(filterDashboard, 400);
     }
     function filterDashboard() {
-        var searchTerm = document.getElementById('search_box').value.toLowerCase().trim();
+        var searchTerm = _normSearch(document.getElementById('search_box').value);
         var activeOnly = document.getElementById('active_toggle').checked;
         // Don't search on a single character — too many matches causes DOM freeze
         if (searchTerm.length === 1) { return; }
@@ -1128,7 +1140,7 @@ def render_all_projects_dashboard(
         }
     }
     function _searchMatchRows() {
-        var searchTerm = document.getElementById('search_box').value.trim().toLowerCase();
+        var searchTerm = _normSearch(document.getElementById('search_box').value);
         var typeLabels = {
             'golden_gate_workorder': 'Golden Gate', 'gibson_workorder': 'Gibson',
             'lsp_workorder': 'LSP', 'pcr_workorder': 'PCR',
@@ -1421,7 +1433,7 @@ def render_all_projects_dashboard(
             <div id="tab-tracking" class="tab-content active">
                 <div class="controls-container">
                     <div class="toggle-wrapper" style="margin-right: auto; flex-direction: column; align-items: flex-start; gap: 2px; position: relative;">
-                        <input type="text" id="search_box" placeholder="Search Stock ID, Experiment, or Construct..." oninput="filterDashboardDebounced()">
+                        <input type="text" id="search_box" placeholder="Search Stock ID, Experiment, Construct, or LSP 9560_8..." oninput="filterDashboardDebounced()">
                         <span id="search_count" style="font-size:10px;color:#64748b;white-space:nowrap;display:none;padding-left:2px;"></span>
                         <div style="display:flex;gap:4px;align-items:center;">
                             <button id="search_download" onclick="downloadSearchCSV()" style="display:none;font-size:9px;padding:2px 6px;border-radius:3px;border:1px solid #e5e7eb;background:#fff;color:#374151;cursor:pointer;white-space:nowrap;">&#8595; CSV</button>
@@ -1927,8 +1939,15 @@ def render_all_projects_dashboard(
                           and str(pc) != wid and not str(pc).upper().startswith('LSP-'):
                             parent = str(pc).strip()
                             break
-                elif row['type'] == 'transformation_offline_operation': parent = row.get('source_asm_process_id')
-                elif row['type'] == 'streakout_operation': parent = row.get('source_asm_process_id')
+                # Agar-derived synthetic rows all hang off the workorder that owns
+                # the agar plate they were picked from. Without optracker_operation
+                # here a manual repick gets no parent, falls into roots_in_view, and
+                # renders at depth 0 after the attempt banners — looking like it
+                # belongs to whichever attempt happened to be printed last.
+                elif row['type'] in ('transformation_offline_operation',
+                                     'streakout_operation',
+                                     'optracker_operation'):
+                    parent = row.get('source_asm_process_id')
                 if parent and isinstance(parent, str):
                     if parent in row_map: pass
                     else:
@@ -2661,6 +2680,30 @@ def render_all_projects_dashboard(
                         _batch_label = f'<a href="{_batch_href}" target="_blank" class="u12">{display_lsp_id}</a>'
                     else:
                         _batch_label = f'<span style="color:#4b5563;font-weight:700;">{display_lsp_id}</span>'
+
+                    # The team calls out LSPs by their LSP Order job id + row index
+                    # ("9560: 8"), not the batch ID — pin that handle to the batch so
+                    # a request can be found either way. Search normalises "9560: 8"
+                    # and "9560 8" to the "9560_8" rendered here (see filterDashboard).
+                    _oidx = row.get('lsp_order_index')
+                    _oidx = str(_oidx).strip() if pd.notna(_oidx) else ''
+                    if _oidx and _oidx.lower() not in ('nan', 'none'):
+                        _ojob, _, _oslot = _oidx.partition('_')
+                        _onum = row.get('lsp_order_number')
+                        _onum = str(_onum).strip() if pd.notna(_onum) else ''
+                        # Order Number is the job id unless the prep was outsourced,
+                        # in which case the operator overrides it with the vendor's.
+                        _otip = f'LSP Order job {_ojob}, #{_oslot}' if _oslot else f'LSP Order {_oidx}'
+                        if _onum and _onum.lower() not in ('nan', 'none') and _onum != _ojob:
+                            _otip += f' &#183; order {_onum}'
+                        _obadge = f'<span class="lsp-oidx" title="{_otip}">{_oidx}</span>'
+                        if _ojob.isdigit():
+                            _obadge = (
+                                f'<a href="https://op-tracker.asimov.io/job/{_ojob}/group/0/step/0/"'
+                                f' target="_blank" class="lsp-oidx" title="{_otip}">{_oidx}</a>'
+                            )
+                        _batch_label += _obadge
+
                     lsp_parts = [f'<div style="font-size: 10px; font-weight: 700; margin-bottom: 4px;">{_batch_label}</div>']
 
 
@@ -3000,7 +3043,7 @@ def render_all_projects_dashboard(
                         if _wc_clean and _wc_clean not in ('nan', 'None', '{;}'):
                             details_info.append(f"<div style='font-size:10px;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:3px;padding:2px 5px;margin-top:26px;'>&#9888; {_wc_clean}</div>")
 
-                elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation']:
+                elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation', 'optracker_operation']:
                     strain = row.get('cloning_strain')
                     if pd.notna(strain): details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Strain: {strain}</div>")
                     _ab = row.get('antibiotic')
@@ -3138,7 +3181,10 @@ def render_all_projects_dashboard(
                             if popover_content: details_info.append(f'<br><div class="plate-hover-container"><span class="colony-badge" style="background: {bg}; color: {color}; cursor:pointer;">{seq}/{tot} colonies seq confirmed</span><div class="plate-popover" data-pop="{_intern_popover(popover_content)}"></div></div>')
                             else: details_info.append(f'<br><span class="colony-badge" style="background: {bg}; color: {color};">{seq}/{tot} colonies seq confirmed</span>')
                             if _n_repick > 0:
-                                details_info.append(f'<br><span class="colony-badge" style="background:#ede9fe;color:#7c3aed;">Repick: 0/{_n_repick} colonies seq confirmed</span>')
+                                _rp_seq = row.get('repick_seq_confirmed', 0)
+                                try: _rp_seq = int(_rp_seq) if pd.notna(_rp_seq) else 0
+                                except Exception: _rp_seq = 0
+                                details_info.append(f'<br><span class="colony-badge" style="background:#ede9fe;color:#7c3aed;">Repick: {_rp_seq}/{_n_repick} colonies seq confirmed</span>')
                 _sid = row.get("STOCK_ID", "N/A")
                 _sid_str = str(_sid)
                 if _sid_str.startswith('#'):  # placeholder, not a real stock ID

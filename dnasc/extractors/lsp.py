@@ -177,6 +177,78 @@ class LSPExtractor:
         log.info("LSP aliquots retrieved: %d rows in %.2fs", len(df), time.time() - t0)
         return df
 
+    # ── Order handle (job id + index) ─────────────────────────────────────────
+
+    @staticmethod
+    def get_lsp_order_index() -> pd.DataFrame:
+        """Map each LSP batch to the "job id _ index" handle the team now uses.
+
+        The team stopped calling out LSPs by batch ID and now says "9560: 8" —
+        the OpTracker **LSP Order job** id plus that row's index within the job
+        (the "Job Index" column of the job's Gather Materials table). OpTracker
+        stamps the pair onto the downstream `LSP Receiving` operation as the
+        `LSP Order Index` parameter, e.g. "9560_8", next to `Order Number`
+        (normally the same job id, but the operator overrides it with the
+        vendor's number when the prep is outsourced — Azenta/Aldevron).
+
+        Verified 1:1 both ways against lsp_batch over every operation carrying
+        the parameter, so a single row per batch is safe. The parameter starts
+        2026-04-15; batches older than that simply have no handle.
+
+        Reads the operation tables directly rather than reusing
+        OpTrackerExtractor's frame on purpose: that query keeps only
+        SC / FA / RD / RU operations, and a plan whose operations were canceled
+        (CA) would silently lose its handle.
+
+        Sources `bios__src`, not the frozen legacy Op Tracker dataset, which
+        stopped taking writes at the 2026-08-28 cutover — see
+        tests/test_bios_migration.py.
+        """
+        t0 = time.time()
+        proj = PipelineConfig.PROJECT_ID
+        date_filter = PipelineConfig.get_date_filter()
+        log.info("Querying LSP order indices (since %s)...", date_filter)
+
+        query = f"""
+        WITH op_params AS (
+            SELECT
+                o.id AS operation_id,
+                MAX(CASE WHEN pt.name = 'LSP Order Index'
+                    THEN REPLACE(prm.value, '"', '') END)          AS lsp_order_index,
+                MAX(CASE WHEN pt.name = 'Order Number'
+                    THEN REPLACE(prm.value, '"', '') END)          AS lsp_order_number,
+                MAX(CASE WHEN pt.name = 'LSP Batch'
+                    THEN JSON_VALUE(prm.value, '$.name') END)      AS lsp_batch_id,
+                MAX(CASE WHEN pt.name = 'Process'
+                    THEN REPLACE(prm.value, '"', '') END)          AS lsp_order_process_id
+            FROM `{proj}.bios__src.operation` o
+            JOIN `{proj}.bios__src.parameter` prm
+                ON prm.operation_id = o.id
+            JOIN `{proj}.bios__src.parametertype` pt
+                ON pt.id = prm.parameter_type_id
+            WHERE o.date_created >= '{date_filter}'
+              AND pt.name IN ('LSP Order Index', 'Order Number', 'LSP Batch', 'Process')
+            GROUP BY o.id
+        )
+        SELECT
+            lsp_batch_id, lsp_order_index, lsp_order_number, lsp_order_process_id
+        FROM op_params
+        WHERE lsp_order_index IS NOT NULL
+          AND lsp_batch_id IS NOT NULL
+        -- A re-batched plan re-stamps the same index on a second operation;
+        -- keep the newest so the handle tracks the live operation.
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY lsp_batch_id ORDER BY operation_id DESC
+        ) = 1
+        """
+
+        df = pd.read_gbq(query, project_id=proj, dialect="standard")
+        log.info(
+            "LSP order indices retrieved: %d batches in %.2fs",
+            len(df), time.time() - t0,
+        )
+        return df
+
     # ── Lineage tracing ───────────────────────────────────────────────────────
 
     @staticmethod

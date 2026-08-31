@@ -176,3 +176,44 @@ class TestApplyColonyStatusOverrides:
         df = _make_df(wo_status="UNKNOWN", visual_status="IN_PROGRESS")
         result = _apply_colony_status_overrides(df)
         assert result["visual_status"].iloc[0] == "IN_PROGRESS"
+
+
+class TestOptrackerManualRepickStatus:
+    """
+    Manual repicks logged in LIMS under a hand-typed process id (e.g.
+    PICK_25Aug26_well2176911) surface as their own optracker_operation row.
+    They carry real colony counts from get_colony_data (matched on
+    well.process_id) but none of the transformation-shaped protocol sequence,
+    so only the seq-confirmed rescue applies to them.
+    """
+
+    def test_seq_confirmed_pick_reads_succeeded(self):
+        df = _make_df(type="optracker_operation", wo_status="SUCCEEDED",
+                      total_colonies=6, seq_confirmed=3, visual_status="FAILED")
+        result = _apply_colony_status_overrides(df)
+        assert result["visual_status"].iloc[0] == "SUCCEEDED"
+        assert result["is_software_fail"].iloc[0] == False
+
+    def test_bios_failed_but_seq_confirmed_is_software_fail(self):
+        df = _make_df(type="optracker_operation", wo_status="FAILED",
+                      total_colonies=8, seq_confirmed=4, visual_status="FAILED")
+        result = _apply_colony_status_overrides(df)
+        assert result["visual_status"].iloc[0] == "SUCCEEDED"
+        assert result["is_software_fail"].iloc[0] == True
+
+    def test_no_seq_confirmed_leaves_status_untouched(self):
+        """
+        The transformation-shaped SUCCEEDED logic must not run here — it would
+        flip a finished pick with no confirmed colony to IN_PROGRESS.
+        """
+        df = _make_df(type="optracker_operation", wo_status="SUCCEEDED",
+                      total_colonies=6, seq_confirmed=0, visual_status="SUCCEEDED",
+                      protocol_name=[proto.MINIPREP], operation_state=["SC"])
+        result = _apply_colony_status_overrides(df)
+        assert result["visual_status"].iloc[0] == "SUCCEEDED"
+
+    def test_zero_colonies_leaves_status_untouched(self):
+        df = _make_df(type="optracker_operation", wo_status="SUCCEEDED",
+                      total_colonies=0, seq_confirmed=0, visual_status="SUCCEEDED")
+        result = _apply_colony_status_overrides(df)
+        assert result["visual_status"].iloc[0] == "SUCCEEDED"

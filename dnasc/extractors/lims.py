@@ -316,7 +316,8 @@ class LIMSExtractor:
         These represent a repick of colonies from the original agar plate.
 
         workorder_cutoffs: {workorder_id: ngs_fa_timestamp_str}
-        Returns DataFrame with (workorder_id, plate_id, plate_created_at).
+        Returns DataFrame with (workorder_id, plate_id, plate_created_at,
+        colony_number, seq_confirmed).
         """
         if not workorder_cutoffs:
             return pd.DataFrame()
@@ -334,7 +335,8 @@ class LIMSExtractor:
             b.id AS plate_id,
             b.protocol AS plate_protocol,
             b.created_at AS plate_created_at,
-            COALESCE(d.colony_number, g.colony_number) AS colony_number
+            COALESCE(d.colony_number, g.colony_number) AS colony_number,
+            COALESCE(d.seq_confirmed, g.seq_confirmed) AS seq_confirmed
         FROM `{proj}.lims__src.well` a
         JOIN `{proj}.lims__src.plate` b ON a.plate_id = b.id
         LEFT JOIN `{proj}.lims__src.well_content` c ON c.well_id = a.id

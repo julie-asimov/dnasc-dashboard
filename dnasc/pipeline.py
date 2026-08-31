@@ -125,10 +125,12 @@ def run_pipeline() -> pd.DataFrame:
         f_lsp   = pool.submit(LSPExtractor.get_lsp_workorders)
         f_aliq  = pool.submit(LSPExtractor.get_lsp_aliquots)
         f_op    = pool.submit(OpTrackerExtractor.get_optracker_operations)
+        f_oidx  = pool.submit(LSPExtractor.get_lsp_order_index)
 
         bios_df      = f_bios.result()
         lsp_df       = f_lsp.result()
         aliq_df      = f_aliq.result()
+        lsp_idx_df   = f_oidx.result()
         optracker_raw, _excluded_pids = f_op.result()
     _step_times["1-extraction"] = time.time() - t
     log.info("Extraction complete in %.2fs", _step_times["1-extraction"])
@@ -354,6 +356,8 @@ def run_pipeline() -> pd.DataFrame:
                 "Filled OpTracker queue data for %d real LSPs via bios_batch_id",
                 _real_lsp_empty.sum(),
             )
+
+    final_df = _attach_lsp_order_index(final_df, lsp_idx_df)
     _step_times["9-merges"] = time.time() - t
     log.info("Final merges complete in %.2fs", _step_times["9-merges"])
 
@@ -379,6 +383,10 @@ def run_pipeline() -> pd.DataFrame:
     log.info("STEP 11 — Root repair & metadata backfill")
     t = time.time()
     final_df = RepairTransformer.repair_data(final_df, well_mapping=_well_mapping)
+    # Pull agar-derived synthetic rows (picks) onto the assembly root now that
+    # repair has collapsed roots. Before _assign_lsp_roots so an LSP hanging off
+    # a moved pick is re-resolved onto the same root in the next call.
+    final_df = _reroot_synthetic_picks(final_df)
     # Re-run LSP root assignment after repair — Step 6 ran before Step 11
     # resolved STREAK synthetic row roots, so legacy LSPs sourced via
     # lsp_process_id=STREAK_well* were left self-rooted. Now that repair has
@@ -471,7 +479,11 @@ def run_pipeline() -> pd.DataFrame:
             post_st = st[repick_idx + 1:]
             if not post_pn:
                 return "RUNNING"  # repick plates found, nothing downstream yet
-            seq = int(row.get("seq_confirmed") or 0)
+            # The repick's own confirmed count, not the original pick's. A repick
+            # only fires on a FAILED parent, so seq_confirmed here is 0 by
+            # construction — reading it alone made every confirmed repick resolve
+            # back to FAILED off the post-repick NGS op.
+            seq = int(row.get("seq_confirmed") or 0) + int(row.get("repick_seq_confirmed") or 0)
             # Active-op check must precede SC/FA check — the post-repick slice also
             # contains original-pick NGS ops (SC/FA) re-appended by
             # resolve_downstream_plates, so checking SC/FA first would falsely FAIL
@@ -542,6 +554,12 @@ def run_pipeline() -> pd.DataFrame:
 _COLONY_TYPES = frozenset({
     "gibson_workorder", "golden_gate_workorder", "transformation_workorder",
     "transformation_offline_operation", "streakout_operation",
+    # Manual repicks logged in LIMS under their own hand-typed process id
+    # (e.g. PICK_25Aug26_well2176911) surface as their own optracker_operation
+    # row rather than folding into the parent. get_colony_data already matches
+    # them on well.process_id, so they carry real colony counts — they just
+    # never got the status override that turns those counts into a verdict.
+    "optracker_operation",
 })
 
 
@@ -588,6 +606,17 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
             seq = int(row.get("seq_confirmed")) if pd.notna(row.get("seq_confirmed")) else 0
         except (TypeError, ValueError):
             seq = 0
+
+        # Manual-repick rows carry colony counts but none of the transformation-
+        # shaped protocol sequence the SUCCEEDED block below assumes (no Gibson,
+        # no STAR Transformation — just Miniprep/Glycerol/Rearray/Quant/NGS), so
+        # running that logic on them would flip finished picks to IN_PROGRESS.
+        # Only the seq-confirmed rescue applies: a pick with a confirmed colony
+        # is a success regardless of what the last op state happened to be.
+        if row.get("type") == "optracker_operation":
+            if seq > 0:
+                return "SUCCEEDED", wo == "FAILED", False
+            return row["visual_status"], False, False
 
         if wo == "FAILED" and seq > 0:
             return "SUCCEEDED", True, False
@@ -699,14 +728,26 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
     log.info("_detect_colony_repicks: repick plates found for %d workorders", repick_df["workorder_id"].nunique())
 
     # Count distinct colony_numbers per workorder from repick plates
-    repick_colony_counts = (
-        repick_df[repick_df["colony_number"].notna()]
-        .groupby("workorder_id")["colony_number"]
-        .nunique()
-    )
+    _named = repick_df[repick_df["colony_number"].notna()]
+    repick_colony_counts = _named.groupby("workorder_id")["colony_number"].nunique()
+
+    # ...and how many of those colonies came back sequence-confirmed. A colony is
+    # held in several wells (overnight, glycerol, miniprep) and only some carry
+    # the seq_confirmed flag, so count DISTINCT colony_numbers with any True row
+    # rather than counting rows.
+    if "seq_confirmed" in _named.columns:
+        repick_seq_counts = (
+            _named[_named["seq_confirmed"] == True]
+            .groupby("workorder_id")["colony_number"]
+            .nunique()
+        )
+    else:
+        repick_seq_counts = pd.Series(dtype=int)
 
     if "repick_total_colonies" not in df.columns:
         df["repick_total_colonies"] = 0
+    if "repick_seq_confirmed" not in df.columns:
+        df["repick_seq_confirmed"] = 0
 
     df = df.copy()
     for wo_id, plates in repick_df.groupby("workorder_id"):
@@ -714,8 +755,12 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
         if not mask.any():
             continue
         repick_ts = plates["plate_created_at"].min()
-        repick_plate_ids = ",".join(plates["plate_id"].dropna().astype(str).tolist())
+        # One row per (plate, colony) — dedupe so a 6-colony plate is listed once.
+        repick_plate_ids = ",".join(
+            dict.fromkeys(plates["plate_id"].dropna().astype(str).tolist())
+        )
         n_repick = int(repick_colony_counts.get(str(wo_id), 0))
+        n_repick_seq = int(repick_seq_counts.get(str(wo_id), 0))
 
         def _append_val(arr, val):
             if isinstance(arr, _np.ndarray): arr = list(arr)
@@ -742,6 +787,7 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
             _inject_repick_plates, plate_ids_str=repick_plate_ids
         )
         df.loc[mask, "repick_total_colonies"] = n_repick
+        df.loc[mask, "repick_seq_confirmed"]  = n_repick_seq
         # Clamp original colony count to total minus repick (floor 0)
         def _clamp_original(tot, n_rp=n_repick):
             try: return max(0, int(tot) - n_rp)
@@ -750,6 +796,56 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[mask, "visual_status"]      = "RUNNING"
 
     return df
+
+
+def _attach_lsp_order_index(
+    final_df: pd.DataFrame, lsp_idx_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Attach the team's "job id _ index" handle for an LSP (e.g. "9560_8").
+
+    See LSPExtractor.get_lsp_order_index for where the handle comes from. An LSP
+    row can be keyed three different ways depending on how it was recovered, so
+    try each in turn: the LIMS batch id, the BIOS batch id (real workorders that
+    lost the LIMS join), the workorder_id itself (synthetic "LSP-####" rows), and
+    finally the LSP Order operation's Process param → the lsp_workorder UUID.
+    """
+    for _col in ("lsp_order_index", "lsp_order_number"):
+        if _col not in final_df.columns:
+            final_df[_col] = None
+
+    if lsp_idx_df is None or lsp_idx_df.empty:
+        return final_df
+
+    _batch_keys = lsp_idx_df["lsp_batch_id"].astype(str).str.strip().str.upper()
+    _proc_keys  = lsp_idx_df["lsp_order_process_id"].astype(str).str.strip()
+
+    for _out, _src in (
+        ("lsp_order_index",  "lsp_order_index"),
+        ("lsp_order_number", "lsp_order_number"),
+    ):
+        _by_batch = dict(zip(_batch_keys, lsp_idx_df[_src]))
+        _by_proc  = dict(zip(_proc_keys,  lsp_idx_df[_src]))
+        _vals = pd.Series(pd.NA, index=final_df.index, dtype="object")
+        for _key_col, _lookup, _upper in (
+            ("lsp_batch_id",  _by_batch, True),
+            ("bios_batch_id", _by_batch, True),
+            ("workorder_id",  _by_batch, True),
+            ("workorder_id",  _by_proc,  False),
+        ):
+            if _key_col not in final_df.columns:
+                continue
+            _need = _vals.isna()
+            if not _need.any():
+                break
+            _keys = final_df.loc[_need, _key_col].astype(str).str.strip()
+            if _upper:
+                _keys = _keys.str.upper()
+            _vals.loc[_need] = _keys.map(_lookup)
+        final_df[_out] = _vals
+
+    _hits = final_df["lsp_order_index"].notna().sum()
+    log.info("Attached LSP order index to %d row(s)", _hits)
+    return final_df
 
 
 def _merge_lsp(lsp_df: pd.DataFrame, aliq_df: pd.DataFrame) -> pd.DataFrame:
@@ -882,6 +978,64 @@ def _merge_lsp(lsp_df: pd.DataFrame, aliq_df: pd.DataFrame) -> pd.DataFrame:
 
     log.info("LSP merge result: %d rows", len(result))
     return result
+
+
+# Synthetic rows created at Step 4 from an agar well (picks, offline
+# transformations, streakouts). They all carry source_asm_process_id.
+_SYNTHETIC_PICK_TYPES = frozenset({
+    "optracker_operation", "transformation_offline_operation", "streakout_operation",
+})
+
+
+def _reroot_synthetic_picks(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Re-root Step-4 synthetic rows onto their source workorder's assembly root.
+
+    create_synthetic_streakouts runs at Step 4, before Step 11 collapses
+    root_work_order_id onto the assembly-design root. A pick taken off a
+    TRANSFORMATION's agar plate therefore copies a root that is still the
+    transformation itself, and the row forms its own workflow group instead of
+    appearing under the assembly that agar belongs to. A pick off a GIBSON's agar
+    plate looks fine only by accident — a Gibson is already its own root.
+    Streakouts escape this because they are resolved later (Steps 7b/9b), once
+    roots are final; pAI-20778 shows both behaviours off the same transformation.
+
+    Scoped deliberately: a row moves only if its root IS its source workorder,
+    and only onto that source's own root. A synthetic row that streakout
+    resolution deliberately re-rooted somewhere else is left alone.
+
+    Must run before _assign_lsp_roots so LSPs hanging off a moved pick follow it.
+    """
+    import pandas as pd
+
+    if "source_asm_process_id" not in df.columns:
+        return df
+
+    id_to_root = (
+        df.dropna(subset=["root_work_order_id"])
+        .drop_duplicates(subset=["workorder_id"])
+        .set_index("workorder_id")["root_work_order_id"]
+        .astype(str)
+        .to_dict()
+    )
+
+    src      = df["source_asm_process_id"].astype(str)
+    src_root = src.map(id_to_root)
+    mask = (
+        df["type"].isin(_SYNTHETIC_PICK_TYPES)
+        & df["source_asm_process_id"].notna()
+        & (df["root_work_order_id"].astype(str) == src)   # still self-rooted on its source
+        & src_root.notna()
+        & (src_root != src)                               # and that source has a real root
+    )
+    if mask.any():
+        df = df.copy()
+        df.loc[mask, "root_work_order_id"] = src_root[mask]
+        log.info(
+            "_reroot_synthetic_picks: %d synthetic rows moved onto their assembly root",
+            int(mask.sum()),
+        )
+    return df
 
 
 def _assign_lsp_roots(df: pd.DataFrame) -> pd.DataFrame:
