@@ -60,7 +60,7 @@ class OpTrackerExtractor:
           -- Pattern 1: Failed Precheck where user chose "Retry all Operations" (user_input=0).
           -- user_input=1 means "Continue with manual protocol" — PCR still ran, not a kickback.
           SELECT id AS job_id
-          FROM `{proj}.op_tracker__src.op_tracker_api_job`
+          FROM `{proj}.bios__src.job`
           WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"manual-run"[^}}]*"user_input":\\s*0')
           UNION DISTINCT
           -- Pattern 2: Confirmation step where user actually chose Retry.
@@ -68,7 +68,7 @@ class OpTrackerExtractor:
           -- user_input>=1 means user chose "Retry all operations" — true kickback.
           -- Matching just the label text is too broad: it appears as an unselected option.
           SELECT id AS job_id
-          FROM `{proj}.op_tracker__src.op_tracker_api_job`
+          FROM `{proj}.bios__src.job`
           WHERE EXISTS (
             SELECT 1 FROM UNNEST(JSON_EXTRACT_ARRAY(step_groups)) AS sg
             WHERE JSON_EXTRACT_SCALAR(sg, '$.name') = 'Confirmation'
@@ -78,22 +78,22 @@ class OpTrackerExtractor:
           -- Pattern 4: PCR jobs that never completed (didn't reach Cleanup PCRs)
           -- Exclude jobs that still have active (RU/RD) operations — those are in progress, not kicked back
           SELECT j.id AS job_id
-          FROM `{proj}.op_tracker__src.op_tracker_api_job` j
-          JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON j.protocol_id = p.id
+          FROM `{proj}.bios__src.job` j
+          JOIN `{proj}.bios__src.protocol` p ON j.protocol_id = p.id
           WHERE p.name = '{proto.PCR}'
             AND NOT EXISTS (
               SELECT 1 FROM UNNEST(JSON_EXTRACT_ARRAY(j.step_groups)) AS sg
               WHERE JSON_EXTRACT_SCALAR(sg, '$.name') = 'Cleanup PCRs'
             )
             AND NOT EXISTS (
-              SELECT 1 FROM `{proj}.op_tracker__src.op_tracker_api_operation` o
+              SELECT 1 FROM `{proj}.bios__src.operation` o
               WHERE o.job_id = j.id AND o.state IN ('RU', 'RD')
             )
           UNION DISTINCT
           -- Pattern 3: Synthesis Order where all completion-toggles are False (nothing ordered)
           SELECT j.id AS job_id
-          FROM `{proj}.op_tracker__src.op_tracker_api_job` j
-          JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON j.protocol_id = p.id
+          FROM `{proj}.bios__src.job` j
+          JOIN `{proj}.bios__src.protocol` p ON j.protocol_id = p.id
           WHERE p.name = '{proto.SYNTHESIS_ORDER}'
             AND REGEXP_CONTAINS(j.step_groups, r'"tag":\\s*"completion-toggle"')
             AND NOT REGEXP_CONTAINS(j.step_groups, r'"tag":\\s*"completion-toggle"[^}}]*"user_input":\\s*true')
@@ -101,7 +101,7 @@ class OpTrackerExtractor:
           -- Pattern 5: NGS jobs where samples were missing at gather step — user chose
           -- "Samples missing, fail job and send operations back to queue" (user_input=1).
           SELECT id AS job_id
-          FROM `{proj}.op_tracker__src.op_tracker_api_job`
+          FROM `{proj}.bios__src.job`
           WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"gather-samples-success-or-fail-mode"[^}}]*"user_input":\\s*1')
         )
           SELECT
@@ -130,10 +130,10 @@ class OpTrackerExtractor:
             MAX(CASE WHEN pt.name = 'Fwd Primer Stock' THEN op_param.value END) AS pcr_fwd_primer_stock,
             MAX(CASE WHEN pt.name = 'Reverse Primer'  THEN op_param.value END) AS pcr_rev_primer,
             MAX(CASE WHEN pt.name = 'Rev Primer Stock' THEN op_param.value END) AS pcr_rev_primer_stock
-          FROM `{proj}.op_tracker__src.op_tracker_api_operation` o
-          JOIN `{proj}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
-          JOIN `{proj}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
-          JOIN `{proj}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
+          FROM `{proj}.bios__src.operation` o
+          JOIN `{proj}.bios__src.protocol` p ON o.protocol_id = p.id
+          JOIN `{proj}.bios__src.parameter` op_param ON o.id = op_param.operation_id
+          JOIN `{proj}.bios__src.parametertype` pt ON op_param.parameter_type_id = pt.id
           WHERE o.date_created >= '{date_filter}'
             AND (o.job_id IS NULL OR o.job_id NOT IN (SELECT job_id FROM kicked_back_jobs))
           GROUP BY o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready, p.name

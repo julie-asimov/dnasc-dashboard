@@ -536,7 +536,7 @@ def populate_synthetic_optracker_batch(
     # Fetch kicked-back job IDs once so Pass 1 results can be filtered before Pass 2.
     _kb_df = client.query(f"""
         SELECT id AS job_id
-        FROM `{project_id}.op_tracker__src.op_tracker_api_job`
+        FROM `{project_id}.bios__src.job`
         WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"gather-samples-success-or-fail-mode"[^}}]*"user_input":\\s*1')
     """).to_dataframe()
     _kicked_back_job_ids = set(_kb_df["job_id"].dropna().astype(int).tolist())
@@ -548,10 +548,10 @@ def populate_synthetic_optracker_batch(
                 o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
                 p.name AS protocol_name,
                 SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) AS ref_id
-            FROM `{project_id}.op_tracker__src.op_tracker_api_operation` o
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
+            FROM `{project_id}.bios__src.operation` o
+            JOIN `{project_id}.bios__src.protocol` p ON o.protocol_id = p.id
+            JOIN `{project_id}.bios__src.parameter` op_param ON o.id = op_param.operation_id
+            JOIN `{project_id}.bios__src.parametertype` pt ON op_param.parameter_type_id = pt.id
             WHERE pt.name = 'Plate ID'
               AND o.state IN ('SC', 'FA', 'RD', 'RU')
               AND o.date_created >= '{date_filter}'
@@ -578,10 +578,10 @@ def populate_synthetic_optracker_batch(
                 o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
                 p.name AS protocol_name,
                 ow.plate_id AS ref_id
-            FROM `{project_id}.op_tracker__src.op_tracker_api_operation` o
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
+            FROM `{project_id}.bios__src.operation` o
+            JOIN `{project_id}.bios__src.protocol` p ON o.protocol_id = p.id
+            JOIN `{project_id}.bios__src.parameter` op_param ON o.id = op_param.operation_id
+            JOIN `{project_id}.bios__src.parametertype` pt ON op_param.parameter_type_id = pt.id
             JOIN our_wells ow
                 ON SAFE_CAST(JSON_EXTRACT_SCALAR(op_param.value, '$.id') AS INT64) = ow.well_id
             WHERE pt.name IN ('Source Well', 'Well to Quant', 'Destination Well')
@@ -620,10 +620,10 @@ def populate_synthetic_optracker_batch(
                 o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
                 p.name AS protocol_name,
                 SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) AS ref_id
-            FROM `{project_id}.op_tracker__src.op_tracker_api_operation` o
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_protocol` p ON o.protocol_id = p.id
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param ON o.id = op_param.operation_id
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt ON op_param.parameter_type_id = pt.id
+            FROM `{project_id}.bios__src.operation` o
+            JOIN `{project_id}.bios__src.protocol` p ON o.protocol_id = p.id
+            JOIN `{project_id}.bios__src.parameter` op_param ON o.id = op_param.operation_id
+            JOIN `{project_id}.bios__src.parametertype` pt ON op_param.parameter_type_id = pt.id
             WHERE o.job_id IN ({job_ids_str})
               AND o.state IN ('SC', 'FA', 'RD', 'RU')
               AND o.date_created >= '{date_filter}'
@@ -650,8 +650,8 @@ def populate_synthetic_optracker_batch(
         run_num_df = client.query(f"""
             SELECT op_param.operation_id AS op_id,
                    REPLACE(op_param.value, '"', '') AS ngs_run_number
-            FROM `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param
-            JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt
+            FROM `{project_id}.bios__src.parameter` op_param
+            JOIN `{project_id}.bios__src.parametertype` pt
                 ON op_param.parameter_type_id = pt.id
             WHERE pt.name = 'Run Number'
               AND op_param.operation_id IN ({op_ids_str})
@@ -1182,7 +1182,7 @@ def resolve_downstream_plates(
     raw_ops = client.query(f"""
     WITH kicked_back_jobs AS (
       SELECT id AS job_id
-      FROM `{project_id}.op_tracker__src.op_tracker_api_job`
+      FROM `{project_id}.bios__src.job`
       WHERE REGEXP_CONTAINS(step_groups, r'"tag":\\s*"gather-samples-success-or-fail-mode"[^}}]*"user_input":\\s*1')
     ),
     all_ops AS (
@@ -1194,12 +1194,12 @@ def resolve_downstream_plates(
             MAX(CASE WHEN pt.name = 'Destination Well'  THEN op_param.value END) AS dw,
             MAX(CASE WHEN pt.name = 'Plate ID'
                 THEN CAST(REPLACE(op_param.value, '"', '') AS INT64) END) AS nps
-        FROM `{project_id}.op_tracker__src.op_tracker_api_operation` o
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_protocol` p
+        FROM `{project_id}.bios__src.operation` o
+        JOIN `{project_id}.bios__src.protocol` p
             ON o.protocol_id = p.id
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_parameter` op_param
+        JOIN `{project_id}.bios__src.parameter` op_param
             ON o.id = op_param.operation_id
-        JOIN `{project_id}.op_tracker__src.op_tracker_api_parametertype` pt
+        JOIN `{project_id}.bios__src.parametertype` pt
             ON op_param.parameter_type_id = pt.id
         WHERE o.state IN ('SC', 'FA', 'RD', 'RU', 'CA')
           AND p.name IN ('{proto.REARRAY}', '{proto.DNA_QUANT}', '{proto.NGS}')
@@ -1331,7 +1331,7 @@ def resolve_downstream_plates(
     agg['date_ready']   = agg['date_ready'].map(_normalize_dt_list)
 
     # ── STEP 6b: Enrich ops — plate from job (dw/qw → LIMS plate) and
-    #             job from plate (null job_id → plan → op_tracker_api_job) ──────
+    #             job from plate (null job_id → plan → bios job) ──────────────
 
     # Collect all well IDs we need plate lookups for
     _well_ids_needed: set = set()
@@ -1377,7 +1377,7 @@ def resolve_downstream_plates(
 
     ops_df['_plate_id'] = ops_df.apply(_get_op_plate, axis=1)
 
-    # Recover null job_ids via plan_id → op_tracker_api_job
+    # Recover null job_ids via plan_id → bios job
     def _is_null(v):
         try:
             return not pd.notna(v)
@@ -1395,11 +1395,11 @@ def resolve_downstream_plates(
     _plan_to_job: dict = {}
     if _null_plan_ids:
         _plan_ids_str = ','.join(str(int(p)) for p in _null_plan_ids)
-        # op_tracker_api_job has no plan_id column — recover via other ops
+        # the bios job table has no plan_id column — recover via other ops
         # in the same plan that DO have a job_id set.
         _plan_job_df = client.query(f"""
             SELECT plan_id, job_id
-            FROM `{project_id}.op_tracker__src.op_tracker_api_operation`
+            FROM `{project_id}.bios__src.operation`
             WHERE plan_id IN ({_plan_ids_str})
               AND job_id IS NOT NULL
             ORDER BY job_id DESC
