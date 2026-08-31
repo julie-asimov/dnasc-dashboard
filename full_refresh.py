@@ -90,7 +90,7 @@ def main():
 
     # 3. Fetch due dates from Google Sheet (or CSV fallback)
     print("\n📅 Fetching experiment due dates...")
-    fetch_due_dates()
+    due_dates = fetch_due_dates()
 
     # 3b. Refresh the Parts tab data — MUST run before the render, since the render
     #     reads parts_result.pkl. Non-fatal by design: gen_parts_pkl writes atomically,
@@ -133,7 +133,14 @@ def main():
     try:
         import json
         names = json.loads(MISSING_DUE_FILE.read_text()) if MISSING_DUE_FILE.exists() else []
-        if names:
+        if not due_dates:
+            # When the due-date source fails, EVERY partner experiment reads as
+            # missing, so this list is an artifact of the failure rather than real
+            # gaps. Writing it is what filled the sheet with 1363 junk rows.
+            # Never sync off a read we know did not work.
+            print(f"   ⏭️  Skipped — no due dates loaded this run, so all {len(names)} "
+                  "experiment(s) look 'missing'. Writing that list would corrupt the sheet.")
+        elif names:
             res = append_experiment_names(names)
             if res["ok"] and res["appended"]:
                 print(f"   ✅ Added {len(res['appended'])} new name(s): {', '.join(res['appended'])}")

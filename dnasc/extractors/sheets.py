@@ -118,13 +118,20 @@ def append_experiment_names(names: list[str]) -> dict:
         if quota_proj:
             headers["x-goog-user-project"] = quota_proj
 
-        # Existing names (column A, skip header) so we never duplicate a row.
-        r = requests.get(f"{base}/values/Sheet1!A2:A", headers=headers, timeout=20)
+        # Existing names, scanned across EVERY column — not just A.
+        # Appends have landed shifted right in practice: 1363 of 1412 rows in the
+        # live sheet have a blank column A with the experiment name sitting a
+        # couple of columns over. A column-A-only read cannot see those, so it
+        # judged every name new and re-appended the same 20 on every single run.
+        # Scanning all cells makes dedup immune to which column a row landed in.
+        r = requests.get(f"{base}/values/Sheet1", headers=headers, timeout=20)
         existing = set()
         if r.status_code == 200:
-            for row in r.json().get("values", []):
-                if row and str(row[0]).strip():
-                    existing.add(str(row[0]).strip())
+            for row in r.json().get("values", [])[1:]:
+                for cell in row:
+                    value = str(cell).strip()
+                    if value:
+                        existing.add(value)
         else:
             # A failed dedup read must abort the append, never fall through.
             # Leaving `existing` empty makes to_add the whole input list, so every
@@ -191,12 +198,36 @@ def _try_google_sheets() -> pd.DataFrame | None:
             log.warning("Sheet has no data rows")
             return None
 
-        df = pd.DataFrame(values[1:], columns=values[0])
+        # Rows are ragged in practice. Sheets omits trailing empty cells, and
+        # stray content — a pasted link, a note, a row appended into the wrong
+        # column — makes a row WIDER than the header. Handing that straight to
+        # pd.DataFrame raises "3 columns passed, passed data had 4 columns",
+        # which the except below reported as "Sheets unavailable", so a single
+        # stray cell silently dropped every due date on the dashboard. Pad short
+        # rows and widen the header instead: extra cells ride along harmlessly
+        # and rows with a blank experiment_name are skipped by the caller.
+        header = [str(h).strip() for h in values[0]]
+        widest = max([len(header)] + [len(row) for row in values[1:]])
+        if widest > len(header):
+            log.warning(
+                "Due-date sheet has %d row(s) wider than its %d-column header "
+                "(widest %d) — extra cells ignored, check for stray pasted content",
+                sum(1 for row in values[1:] if len(row) > len(header)),
+                len(header), widest,
+            )
+            header += [f"_extra_{i}" for i in range(len(header), widest)]
+        rows = [list(row) + [""] * (widest - len(row)) for row in values[1:]]
+
+        df = pd.DataFrame(rows, columns=header)
         log.info("Due dates loaded from Google Sheet: %d rows", len(df))
         return df
 
     except Exception as e:
-        log.info("Google Sheets unavailable (%s) — trying CSV fallback", e)
+        # Warning, and name the exception: an auth failure and a parse bug used
+        # to produce the identical "unavailable" line, which sent us hunting
+        # credentials for something that was really a ragged row.
+        log.warning("Could not read the due-date sheet (%s: %s) — trying CSV fallback",
+                    type(e).__name__, e)
         return None
 
 

@@ -208,6 +208,7 @@ def main() -> int:
         print(f"absent: {p}")
 
     _rule("due_dates.json (what the renderer consumed last run)")
+    dd_entries = 0
     j = Path("dashboard_state/due_dates.json")
     if j.exists():
         age = (time.time() - j.stat().st_mtime) / 86400
@@ -216,7 +217,8 @@ def main() -> int:
         except Exception as e:
             data = {}
             print(f"unreadable: {e}")
-        print(f"entries: {len(data)}   written {age:.1f} days ago")
+        dd_entries = len(data)
+        print(f"entries: {dd_entries}   written {age:.1f} days ago")
         sheet_info = readable.get(configured) or next(iter(readable.values()), None)
         if sheet_info:
             missing = {k: v for k, v in sheet_info["dated_map"].items() if k not in data}
@@ -232,8 +234,26 @@ def main() -> int:
         print(f"absent: {j}")
 
     _rule("VERDICT")
+    # Readability alone is NOT success: the read can return 200 and the parse still
+    # die on a ragged row, leaving due_dates.json empty. Reporting "getting live
+    # dates" off the HTTP status was actively misleading.
     if configured in readable:
-        print("Configured sheet IS readable here — the pipeline is getting live dates.")
+        info = readable[configured]
+        if not dd_entries:
+            print("Configured sheet reads OK, but due_dates.json is EMPTY — the read")
+            print("succeeds and something downstream drops the data. Prime suspect:")
+            print(f"rows wider than the {len(info['header'])}-column header crashing the parse.")
+        elif dd_entries < info["dated_rows"]:
+            print(f"Configured sheet reads OK, but due_dates.json has {dd_entries} of "
+                  f"{info['dated_rows']} dated rows — partial load.")
+        else:
+            print("Configured sheet IS readable and fully loaded — dates are live.")
+        if info["blank_names"]:
+            pct = 100.0 * info["blank_names"] / max(1, info["rows"])
+            print(f"\n{info['blank_names']} of {info['rows']} rows ({pct:.0f}%) have a BLANK "
+                  "column A.")
+            print("Those are appended rows that landed in the wrong column. A column-A")
+            print("dedup read cannot see them, so they get re-appended every run.")
     elif readable:
         others = ", ".join(readable)
         print(f"Configured sheet NOT readable, but these are: {others}")
