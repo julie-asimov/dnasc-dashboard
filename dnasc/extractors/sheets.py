@@ -147,14 +147,45 @@ def append_experiment_names(names: list[str]) -> dict:
             result["ok"] = True
             return result
 
-        # 3 columns: experiment_name, date_sequence_transferred (blank), due_date_in_asana (blank).
-        body = {"values": [[n, "", ""] for n in to_add]}
+        # Resolve the tab's numeric sheetId — appendCells addresses tabs by id.
+        meta = requests.get(f"{base}?fields=sheets(properties(sheetId,title))",
+                            headers=headers, timeout=20)
+        sheet_gid = None
+        if meta.status_code == 200:
+            for s in meta.json().get("sheets", []):
+                if s.get("properties", {}).get("title") == "Sheet1":
+                    sheet_gid = s["properties"].get("sheetId")
+                    break
+        if sheet_gid is None:
+            result["error"] = f"could not resolve the Sheet1 sheetId ({meta.status_code})"
+            log.warning("append aborted: %s", result["error"])
+            return result
+
+        # appendCells via batchUpdate, NOT values/...:append.
+        #
+        # The values append endpoint does not write "into A:C". It uses the range
+        # only to LOCATE A TABLE, then writes after that table's last row starting
+        # at the table's first column. On this sheet that drifted to column C:
+        # once rows existed whose only data was in C, table detection latched onto
+        # the C-anchored block, so every new row went to C with a blank column A —
+        # self-reinforcing, since each append made that block look more like the
+        # table. Rows outside column A are then invisible to the parser (blank
+        # experiment_name) and were invisible to the old column-A dedup, so the
+        # same names were re-appended on every run: 1363 junk rows.
+        #
+        # appendCells appends after the sheet's last row starting at column 0, with
+        # no table detection, so a row always lands in column A. It also grows the
+        # grid as needed, which values.update on an explicit range would not.
+        rows = [{"values": [{"userEnteredValue": {"stringValue": n}}]} for n in to_add]
         ar = requests.post(
-            f"{base}/values/Sheet1!A:C:append",
+            f"{base}:batchUpdate",
             headers=headers,
-            params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
-            json=body,
-            timeout=20,
+            json={"requests": [{"appendCells": {
+                "sheetId": sheet_gid,
+                "rows": rows,
+                "fields": "userEnteredValue",
+            }}]},
+            timeout=30,
         )
         if ar.status_code == 200:
             result["appended"] = to_add

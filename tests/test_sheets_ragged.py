@@ -107,18 +107,78 @@ class TestRaggedRows:
 
 
 class TestAppendSafety:
-    def _run_append(self, read_status, read_values, post_status=200):
+    def _run_append(self, read_status, read_values, post_status=200, gid=0):
+        """Drive append_experiment_names with canned values + tab metadata."""
         fake_creds = MagicMock()
         fake_creds.token = "tok"
+
+        def _get(url, **kwargs):
+            if "fields=sheets" in url or "properties" in url:
+                meta = MagicMock()
+                meta.status_code = 200
+                meta.json.return_value = {
+                    "sheets": [{"properties": {"sheetId": gid, "title": "Sheet1"}}]
+                }
+                return meta
+            return _mock_get(read_status, read_values)
+
         post = MagicMock()
         post.status_code = post_status
         post.text = ""
         with patch("google.auth.default", return_value=(fake_creds, "proj")), \
              patch("google.auth.transport.requests.Request"), \
-             patch("requests.get", return_value=_mock_get(read_status, read_values)), \
+             patch("requests.get", side_effect=_get), \
              patch("requests.post", return_value=post) as mock_post:
             res = sheets.append_experiment_names(["A786-wave2", "NewOne"])
         return res, mock_post
+
+    def test_writes_to_column_a_via_append_cells(self):
+        """New rows must land in column A, or the whole loop starts over.
+
+        The values `...:append` endpoint picks a write column from table
+        detection, which drifted to C and produced 1363 rows with a blank
+        column A — invisible to the parser and to dedup, hence re-appended
+        every run. appendCells always starts at column 0.
+        """
+        values = [HEADER, ["RealExperiment", "2026-01-01", "2026-02-01"]]
+        res, mock_post = self._run_append(200, values, gid=1234)
+        assert res["ok"] is True
+        assert mock_post.called
+
+        url = mock_post.call_args[0][0]
+        assert url.endswith(":batchUpdate"), f"must not use values append: {url}"
+
+        req = mock_post.call_args[1]["json"]["requests"][0]["appendCells"]
+        assert req["sheetId"] == 1234
+        # Exactly one cell per row => the name occupies column A and nothing else.
+        for row in req["rows"]:
+            assert len(row["values"]) == 1, "a name must occupy column A alone"
+        written = [r["values"][0]["userEnteredValue"]["stringValue"] for r in req["rows"]]
+        assert written == ["A786-wave2", "NewOne"]
+
+    def test_unresolvable_sheet_id_aborts(self):
+        """Without a sheetId we cannot target column A, so refuse to write."""
+        fake_creds = MagicMock()
+        fake_creds.token = "tok"
+
+        def _get(url, **kwargs):
+            if "fields=sheets" in url or "properties" in url:
+                meta = MagicMock()
+                meta.status_code = 200
+                meta.json.return_value = {"sheets": [
+                    {"properties": {"sheetId": 7, "title": "SomeOtherTab"}}
+                ]}
+                return meta
+            return _mock_get(200, [HEADER, ["Real", "", ""]])
+
+        with patch("google.auth.default", return_value=(fake_creds, "proj")), \
+             patch("google.auth.transport.requests.Request"), \
+             patch("requests.get", side_effect=_get), \
+             patch("requests.post") as mock_post:
+            res = sheets.append_experiment_names(["NewOne"])
+        assert res["ok"] is False
+        assert "sheetId" in (res["error"] or "")
+        assert not mock_post.called
 
     def test_failed_dedup_read_aborts_the_append(self):
         """A failed read must never be treated as 'the sheet is empty'."""
