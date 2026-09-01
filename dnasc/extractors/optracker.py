@@ -15,6 +15,7 @@ from google.cloud import bigquery
 from dnasc.config import PipelineConfig
 from dnasc.logger import get_logger
 from dnasc import protocols as proto
+from dnasc import wells
 
 log = get_logger(__name__)
 
@@ -49,6 +50,12 @@ class OpTrackerExtractor:
         proj = PipelineConfig.PROJECT_ID
         date_filter = PipelineConfig.get_date_filter()
         cutover = PipelineConfig.BIOS_CUTOVER_TS
+        # Coordinate SQL comes from dnasc/wells.py — the single definition shared
+        # with every renderer. Do not inline CHR(65 + ...) here again; that is how
+        # this file ended up row-major and wrong.
+        coord_dest = wells.sql_coord("w_dest.position", "pl_dest.well_count")
+        coord_agar = wells.sql_coord("w_agar.position", "pl_agar.well_count")
+        coord_asm  = wells.sql_coord("w.position",      "pl.well_count")
         log.info("Querying OpTracker operations (since %s)...", date_filter)
 
         # all_operations (4-table join + 25 MAX(CASE) pivots + GROUP BY) is
@@ -279,12 +286,10 @@ class OpTrackerExtractor:
             CASE
               WHEN a.destination_well_json IS NOT NULL THEN
                 CONCAT(COALESCE(pl_dest.barcode, CONCAT('Plate', CAST(pl_dest.id AS STRING))), '-',
-                  CHR(65 + MOD(w_dest.position, IF(pl_dest.well_count = 384, 16, 8))),
-                  CAST(DIV(w_dest.position, IF(pl_dest.well_count = 384, 16, 8)) + 1 AS STRING))
+                  {coord_dest})
               WHEN a.agar_well_json IS NOT NULL THEN
                 CONCAT(COALESCE(pl_agar.barcode, CONCAT('Plate', CAST(pl_agar.id AS STRING))), '-',
-                  CHR(65 + MOD(w_agar.position, IF(pl_agar.well_count = 384, 16, 8))),
-                  CAST(DIV(w_agar.position, IF(pl_agar.well_count = 384, 16, 8)) + 1 AS STRING))
+                  {coord_agar})
               WHEN mp.miniprep_location IS NOT NULL OR gp.glycerol_location IS NOT NULL THEN
                 CONCAT(
                   COALESCE(mp.miniprep_location, ''),
@@ -292,8 +297,7 @@ class OpTrackerExtractor:
                   COALESCE(gp.glycerol_location, ''))
               WHEN a.output_assembly_well_json IS NOT NULL THEN
                 CONCAT(COALESCE(pl.barcode, CONCAT('Plate', CAST(pl.id AS STRING))), '-',
-                  CHR(65 + MOD(w.position, IF(pl.well_count = 384, 16, 8))),
-                  CAST(DIV(w.position, IF(pl.well_count = 384, 16, 8)) + 1 AS STRING))
+                  {coord_asm})
               ELSE NULL
             END AS well_location
           FROM all_operations a

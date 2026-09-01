@@ -23,6 +23,8 @@ from __future__ import annotations  # 3.9 server compat (lazy annotations)
 import os
 import sys
 import html
+
+from dnasc import wells as _wells
 import pickle
 import datetime
 from zoneinfo import ZoneInfo
@@ -59,24 +61,9 @@ def render_ngs_tab() -> str:
 
 
 def _well_coord(pos, rows=8) -> str:
-    """LIMS `well.position` → plate coordinate. Column-major: position 54 on a 96-well plate is
-    G7 (row 54%8=6→'G', col 54//8+1=7).
-
-    ONE convention, no exceptions: BigQuery stores position 0-based, and everything
-    human-facing shows position+1, which is what LIMS shows. well 2202668 is raw 58
-    and LIMS displays "59 - C8" on the detail page — so call it position 59.
-
-    (An earlier version of this docstring claimed the LIMS detail page showed the raw
-    0-based number. It does not. Verified against LIMS 2026-09-01.)
-
-    This function takes the RAW 0-based value. Do not pre-increment it, and note that
-    dashboard.py's _WELL_MAP_* dicts are keyed 1-based, so callers there add the +1
-    themselves — adding it twice shifts every well one row down."""
-    try:
-        p = int(float(pos))
-    except (TypeError, ValueError):
-        return ""
-    return f"{chr(ord('A') + p % rows)}{p // rows + 1}"
+    """RAW 0-based LIMS position -> coordinate. See dnasc/wells.py for the rules;
+    do not reimplement the arithmetic here."""
+    return _wells.coord_rows(pos, rows)
 
 
 def _esc(x) -> str:

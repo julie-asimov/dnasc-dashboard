@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from dnasc.config import PipelineConfig
+from dnasc import wells as _wells
 
 _ET = ZoneInfo("America/New_York")
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -123,21 +124,39 @@ def _make_refill_status(apd, ngs_df, now):
         # it covers the legacy processes whose NGS job predates the ngsworkorder records.
         e=apd[(apd["PROCESS_ID"].astype(str)==proc) & (apd["STOCK_ID"]==str(part))
               & (apd["WELL_TYPE"]=="Stock") & _is_echo384(apd)]
-        still_sequencing = bool(ngs and not ngs["closed"])
-        if still_sequencing or (ngs is None and rank < 4 and not len(e)):
-            return {"state":"inflight","age":age,"proc":proc,"stage":stage,"rank":rank,"ngs":ngs,
-                    "sequencing":still_sequencing,"seq_ok":seq_ok,
-                    "stalled":bool(not still_sequencing and age is not None and age > _REFILL_TYPICAL_DAYS)}
-        # Finished. How much of what it left is still usable? Only ever report the CURRENT state of
-        # those wells — never why they got that way. LIMS overwrites VOLUME_UL in place, so a well
-        # that was consumed normally is indistinguishable from a prep that never worked. Either way
-        # what matters operationally is the same: nothing left → a new batch is needed.
+        # What the batch has already put into the 384 Echo source. Computed for BOTH states, not
+        # just the finished one: a batch whose NGS job is still open has usually already rearrayed
+        # (rank 5), and those wells are the whole point of the batch — saying nothing about them
+        # until the job closes reads as though the refill had produced nothing at all.
+        # Only ever report the CURRENT state of those wells — never why they got that way. LIMS
+        # overwrites VOLUME_UL in place, so a well that was consumed normally is indistinguishable
+        # from a prep that never worked. Either way what matters operationally is the same:
+        # nothing left → a new batch is needed.
         landed=None
         if len(e):      # through NGS but never rearrayed → no wells to report (0 such cases today)
             vol=pd.to_numeric(e["VOLUME_UL"],errors="coerce"); cc=pd.to_numeric(e["CONCENTRATION_NGUL"],errors="coerce")
             disc=e["PLATE_LOCATION_BOX"].fillna("").astype(str).str.upper().str.contains("DISCARD")
             landed={"wells":int(len(e)),"usable":int(((vol>25)&(cc>5)&~disc).sum()),
-                    "gone":int((disc|(vol<=0)).sum())}
+                    "gone":int((disc|(vol<=0)).sum()),
+                    # Volume is there, the prep just came off dilute. This is the common way a
+                    # sequence-confirmed refill still yields nothing, and it has to be named:
+                    # "0 still usable" sitting under "sequence confirmed", with no make-available
+                    # wells to show, otherwise reads as a bug in the flip-ON rule rather than as
+                    # the yield result it is.
+                    "dilute":int(((vol>25)&(cc<=5)&~disc).sum()),
+                    # Drawn down but not gone. Without this bucket the counts do not reconcile:
+                    # a 4-well batch could read "0 usable (2 empty or discarded)" and leave the
+                    # reader hunting for the other two.
+                    "low":int(((vol>0)&(vol<=25)&~disc).sum()),
+                    "rows":[(x["PLATE_ID"], x["WELL_NUMBER"], x["PLATE_NUMBER_OF_WELLS"], x["WELL_ID"],
+                             x["VOLUME_UL"], x["CONCENTRATION_NGUL"],
+                             ("" if pd.isna(x["PLATE_LOCATION_BOX"]) else str(x["PLATE_LOCATION_BOX"])))
+                            for _,x in e.iterrows()]}
+        still_sequencing = bool(ngs and not ngs["closed"])
+        if still_sequencing or (ngs is None and rank < 4 and not len(e)):
+            return {"state":"inflight","age":age,"proc":proc,"stage":stage,"rank":rank,"ngs":ngs,
+                    "sequencing":still_sequencing,"seq_ok":seq_ok,"landed":landed,
+                    "stalled":bool(not still_sequencing and age is not None and age > _REFILL_TYPICAL_DAYS)}
         return {"state":"done","age":age,"proc":proc,"stage":stage,"rank":rank,
                 "landed":landed,"ngs":ngs,"seq_ok":seq_ok}
 
@@ -450,11 +469,11 @@ def _render() -> str:
 
     def coord384(wn):
         if pd.isna(wn): return ""
-        wn=int(wn); return f"{chr(65+wn%16)}{wn//16+1}"
+        return _wells.coord(wn, 384)
 
     def coord96(wn):
         if pd.isna(wn): return ""
-        wn=int(wn); return f"{chr(65+wn%8)}{wn//8+1}"
+        return _wells.coord(wn, 96)
 
     def coord_wc(wn, nwells):
         # The '384 Echo Source Plate' labware is overloaded in LIMS: at least one
@@ -584,6 +603,46 @@ def _render() -> str:
 
     _fmt=lambda v: "?" if pd.isna(v) else (f"{v:g}" if isinstance(v,(int,float)) else str(v))
     ST_CHIP={"RUNNING":"#1d4ed8","WAITING":"#b45309","READY":"#15803d","BLOCKED":"#b91c1c"}
+
+    def _landed_html(ld, live):
+        """The wells this batch put into the 384 Echo source, and what state each one is in.
+
+        `live` — the batch has not finished, so these wells are what it is on track to yield
+        rather than a leftover. The table is the same either way: the operator needs the plate,
+        coord and well ID to go find them, and while a batch was in flight that was shown nowhere
+        at all, even once the rearray had happened.
+        """
+        n = ld["wells"]
+        head = (f'already in the 384 Echo source: {n} well{"s" if n!=1 else ""} · '
+                f'<b>{ld["usable"]}</b> of them usable as stock') if live else \
+               (f'put {n} well{"s" if n!=1 else ""} in the 384 Echo source · '
+                f'<b>{ld["usable"]}</b> still usable today')
+        bits = []
+        if ld.get("gone"): bits.append(f'{ld["gone"]} empty or discarded')
+        if ld.get("low"): bits.append(f'{ld["low"]} under the 25 µL floor')
+        if ld.get("dilute"):
+            # Name the concentration. Without it, "0 usable" sitting under a confirmed sequence,
+            # with no make-available wells to show, reads as the flip-ON rule dropping good wells
+            # rather than as the yield result it is.
+            bits.append(f'{ld["dilute"]} too dilute — at or under the 5 ng/µL flip-ON floor')
+        if bits: head += ' (' + ' · '.join(bits) + ')'
+        rws = ""
+        for pid, wn, nw, wid, v, cc, loc in ld.get("rows", []):
+            ok = (pd.notna(v) and v > 25 and pd.notna(cc) and cc > 5
+                  and "DISCARD" not in loc.upper())
+            cst = "" if ok else ' style="color:#be185d"'
+            rws += (f'<tr><td>plate {pid}</td><td>{coord_wc(wn, nw) or "?"}</td>'
+                    f'<td style="font-family:monospace">{wid}</td>'
+                    f'<td>{html.escape(loc) or "—"}</td><td>{_fmt(v)}µL</td>'
+                    f'<td{cst}>{_fmt(cc)} ng/µL</td>'
+                    f'<td>{"✓" if ok else "—"}</td></tr>')
+        tbl = ""
+        if rws:
+            hdr = ('<tr><td><b>Plate</b></td><td><b>Well</b></td><td><b>Well ID</b></td>'
+                   '<td><b>Location</b></td><td><b>Vol</b></td><td><b>Conc</b></td>'
+                   '<td><b>Usable</b></td></tr>')
+            tbl = f'<table class="d-tbl" style="margin-top:3px"><tbody>{hdr}{rws}</tbody></table>'
+        return f'<div style="color:#6b7280;margin-top:2px">{head}{tbl}</div>'
 
     def _block(label, body):
         # Body goes in its own scroll box: the wide nowrap .d-tbl tables are routinely wider than
@@ -778,6 +837,15 @@ def _render() -> str:
                     prog+=('<div style="color:#6b7280;margin-top:2px">no NGS job on it yet'
                            + (f' · a refill normally finishes in {_REFILL_TYPICAL_DAYS}d — chase it'
                               if rs.get("stalled") else "") + '</div>')
+                # A batch can carry sequence-confirmed wells while its NGS job is still open, and
+                # can have rearrayed into the Echo plate already. Both were invisible here, so a
+                # part whose refill had effectively landed still read as "nothing to see yet".
+                if rs.get("seq_ok"):
+                    prog+=('<div style="color:#15803d;margin-top:2px">wells from this batch already '
+                           'read <b>sequence confirmed</b> — they join the flip-ON list as soon as '
+                           'they also clear volume and concentration</div>')
+                if rs.get("landed"):
+                    prog+=_landed_html(rs["landed"], True)
             elif rs["state"]=="done":
                 ld=rs.get("landed"); ng=rs.get("ngs")
                 # It rearrayed into the Echo plate, which is the finish line — so it is over no
@@ -811,10 +879,7 @@ def _render() -> str:
                     prog=(f'<span style="color:#9ca3af">Last refill</span> — finished at '
                           f'<b>{html.escape(rs["stage"])}</b>, {rs["age"]}d ago · {html.escape(rs["proc"])}')
                 if ld:
-                    prog+=(f'<div style="color:#6b7280;margin-top:2px">put {ld["wells"]} well'
-                           f'{"s" if ld["wells"]!=1 else ""} in the 384 Echo source · '
-                           f'<b>{ld["usable"]}</b> still usable today'
-                           + (f' ({ld["gone"]} empty or discarded)' if ld["gone"] else "") + '</div>')
+                    prog+=_landed_html(ld, False)
                 else:
                     prog+=('<div style="color:#6b7280;margin-top:2px">through NGS but nothing in the '
                            '384 Echo source plate</div>')

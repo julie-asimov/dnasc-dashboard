@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 
 from dnasc.config import PipelineConfig
+from dnasc import wells as _wells
 from dnasc import protocols as proto
 from dnasc.renderer import tokens as tok
 
@@ -117,18 +118,7 @@ def _star_date(row) -> str:
 def _well_alpha(pos, count) -> str:
     """Alphanumeric well (e.g. B4) from a 0-indexed LIMS position + plate well-count.
     Column-major like the dashboard maps: 96→8 rows, 384→16 rows, agar→2 rows."""
-    try:
-        idx = int(pos)
-    except Exception:
-        return ''
-    if idx < 0:
-        return ''
-    try:
-        cnt = int(count)
-    except Exception:
-        cnt = 0
-    nrows = 16 if cnt == 384 else (8 if cnt == 96 else 2)
-    return f"{chr(ord('A') + (idx % nrows))}{idx // nrows + 1}"
+    return _wells.coord(pos, count)
 
 
 def _agar(row) -> tuple[str, str]:
