@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """
-sheets_cleanup.py — delete the junk rows from the due-dates sheet.
+sheets_cleanup.py — tidy the due-dates sheet.
 
-Targets exactly one thing: rows that have content somewhere but a BLANK column A.
-Those are the appends that landed in column C (see v1.11.82). They carry only an
-experiment name, never a date, so the parser already skips them and deleting them
-loses nothing.
+Two kinds of removable row:
 
-NEVER touches:
-  * the header row
-  * any row with something in column A (all 49 real experiments, including the
-    two that have a name but no date yet)
-  * fully empty rows (harmless, and deleting them just shrinks the grid)
+  junk   — content somewhere but a BLANK column A. Appends that landed outside
+           column A (see v1.11.82). They carry only an experiment name, never a
+           date, so the parser already skips them; deleting them loses nothing.
+           Always targeted.
 
-DRY RUN BY DEFAULT. It prints what it would delete and exits. Nothing is written
-without --apply.
+  empty  — nothing at all. NOT harmless, despite what this script said at first.
+           appendCells appends after the sheet's LAST row, so a block of trailing
+           empties pushes every newly synced name hundreds of rows below the real
+           data, where nobody scrolling the sheet will find it. Removed only with
+           --trim-empty, since deleting rows is the more invasive of the two.
 
-    python3 sheets_cleanup.py            # show me what you'd delete
-    python3 sheets_cleanup.py --apply    # actually delete
+NEVER touches the header, or any row with something in column A (every real
+experiment, including ones with a name but no date yet).
+
+DRY RUN BY DEFAULT. It prints what it would delete, and the row numbers your real
+rows occupy, then exits. Nothing is written without --apply.
+
+    python3 sheets_cleanup.py                          # show me
+    python3 sheets_cleanup.py --apply                  # delete junk
+    python3 sheets_cleanup.py --apply --trim-empty     # delete junk + padding
 
 Run it where the pipeline runs — the service account there can write.
 """
@@ -76,16 +82,29 @@ def main() -> int:
         else:
             blank.append(i)
 
+    trim_empty = "--trim-empty" in sys.argv
+
     print(f"header            : row 1  {values[0]}")
     print(f"real rows (col A) : {len(keep_named)}  -> KEEP")
-    print(f"fully empty rows  : {len(blank)}  -> KEEP (harmless)")
+    if keep_named:
+        nr = _ranges(keep_named)
+        print(f"                    at rows {', '.join(f'{a}-{b}' if a != b else str(a) for a, b in nr[:6])}"
+              + (" ..." if len(nr) > 6 else ""))
     print(f"junk (blank col A): {len(junk)}  -> DELETE")
+    # Empty rows are NOT harmless. appendCells appends after the sheet's LAST
+    # row, so a block of trailing empties pushes every new name hundreds of rows
+    # below the real data, where nobody scrolling the sheet will ever see it.
+    print(f"fully empty rows  : {len(blank)}  -> "
+          + ("DELETE (--trim-empty)" if trim_empty else "KEEP  (pass --trim-empty to remove)"))
+    if blank and not trim_empty:
+        print("                    ^ these push new appends to the bottom of the sheet")
 
-    if not junk:
+    targets = sorted(junk + (blank if trim_empty else []))
+    if not targets:
         print("\nnothing to delete.")
         return 0
 
-    runs = _ranges(junk)
+    runs = _ranges(targets)
     print(f"\n{len(runs)} contiguous block(s):")
     for start, end in runs[:20]:
         n = end - start + 1
@@ -97,7 +116,7 @@ def main() -> int:
 
     if not apply:
         print(f"\nDRY RUN — nothing written. Re-run with --apply to delete "
-              f"{len(junk)} row(s).")
+              f"{len(targets)} row(s).")
         return 0
 
     # Delete bottom-up so earlier row numbers stay valid as rows disappear.
@@ -125,7 +144,7 @@ def main() -> int:
     if resp.status_code != 200:
         print(f"delete failed {resp.status_code}: {resp.text[:400]}")
         return 1
-    print(f"\ndeleted {len(junk)} row(s) in {len(runs)} block(s).")
+    print(f"\ndeleted {len(targets)} row(s) in {len(runs)} block(s).")
     print("Verify with: sheets_diagnose.py  (expect blank-name rows: 0)")
     return 0
 
