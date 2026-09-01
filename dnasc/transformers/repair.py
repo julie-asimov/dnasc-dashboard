@@ -450,6 +450,10 @@ def populate_synthetic_optracker_batch(
     lsp_ids   = [s for s in syn_ids if s.upper().startswith("LSP-")]
     uuid_ids  = [s for s in syn_ids if not s.upper().startswith("LSP-")]
     date_filter = PipelineConfig.DATE_FILTER
+    # Timeline step timestamp — see PipelineConfig.sql_step_ts / BIOS_CUTOVER_TS.
+    # Aliased back to `date_created` below so the pandas aggregation is unchanged;
+    # the WHERE clauses keep filtering raw o.date_created, which is a data window.
+    step_ts = PipelineConfig.sql_step_ts()
 
     # ── QUERY 1: plates (uuid + lsp in parallel) ──────────────────────────────
     def _fetch_uuid_plates():
@@ -545,13 +549,14 @@ def populate_synthetic_optracker_batch(
     def _fetch_ops_1a():
         df = client.query(f"""
             SELECT DISTINCT
-                o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
+                o.id AS op_id, o.job_id, o.state, {step_ts} AS date_created, o.date_ready,
                 p.name AS protocol_name,
                 SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) AS ref_id
             FROM `{project_id}.bios__src.operation` o
             JOIN `{project_id}.bios__src.protocol` p ON o.protocol_id = p.id
             JOIN `{project_id}.bios__src.parameter` op_param ON o.id = op_param.operation_id
             JOIN `{project_id}.bios__src.parametertype` pt ON op_param.parameter_type_id = pt.id
+            LEFT JOIN `{project_id}.bios__src.job` j ON j.id = o.job_id
             WHERE pt.name = 'Plate ID'
               AND o.state IN ('SC', 'FA', 'RD', 'RU')
               AND o.date_created >= '{date_filter}'
@@ -575,13 +580,14 @@ def populate_synthetic_optracker_batch(
                 WHERE w.plate_id IN ({plate_ids_array})
             )
             SELECT DISTINCT
-                o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
+                o.id AS op_id, o.job_id, o.state, {step_ts} AS date_created, o.date_ready,
                 p.name AS protocol_name,
                 ow.plate_id AS ref_id
             FROM `{project_id}.bios__src.operation` o
             JOIN `{project_id}.bios__src.protocol` p ON o.protocol_id = p.id
             JOIN `{project_id}.bios__src.parameter` op_param ON o.id = op_param.operation_id
             JOIN `{project_id}.bios__src.parametertype` pt ON op_param.parameter_type_id = pt.id
+            LEFT JOIN `{project_id}.bios__src.job` j ON j.id = o.job_id
             JOIN our_wells ow
                 ON SAFE_CAST(JSON_EXTRACT_SCALAR(op_param.value, '$.id') AS INT64) = ow.well_id
             WHERE pt.name IN ('Source Well', 'Well to Quant', 'Destination Well')
@@ -617,13 +623,14 @@ def populate_synthetic_optracker_batch(
         job_ids_str   = ",".join(str(j) for j in job_ids)
         ops_pass2     = client.query(f"""
             SELECT DISTINCT
-                o.id AS op_id, o.job_id, o.state, o.date_created, o.date_ready,
+                o.id AS op_id, o.job_id, o.state, {step_ts} AS date_created, o.date_ready,
                 p.name AS protocol_name,
                 SAFE_CAST(REPLACE(op_param.value, '"', '') AS INT64) AS ref_id
             FROM `{project_id}.bios__src.operation` o
             JOIN `{project_id}.bios__src.protocol` p ON o.protocol_id = p.id
             JOIN `{project_id}.bios__src.parameter` op_param ON o.id = op_param.operation_id
             JOIN `{project_id}.bios__src.parametertype` pt ON op_param.parameter_type_id = pt.id
+            LEFT JOIN `{project_id}.bios__src.job` j ON j.id = o.job_id
             WHERE o.job_id IN ({job_ids_str})
               AND o.state IN ('SC', 'FA', 'RD', 'RU')
               AND o.date_created >= '{date_filter}'
@@ -1242,6 +1249,10 @@ def resolve_downstream_plates(
     # ── STEP 4: Reverse-lookup OpTracker jobs touching those wells ────────────
     # Date filter avoids scanning all historical ops — only fetch from pipeline cutoff.
     date_filter = PipelineConfig.DATE_FILTER
+    # Timeline step timestamp — see PipelineConfig.sql_step_ts / BIOS_CUTOVER_TS.
+    # Aliased back to `date_created` below so the pandas aggregation is unchanged;
+    # the WHERE clauses keep filtering raw o.date_created, which is a data window.
+    step_ts = PipelineConfig.sql_step_ts()
     raw_ops = client.query(f"""
     WITH kicked_back_jobs AS (
       SELECT id AS job_id
@@ -1250,7 +1261,7 @@ def resolve_downstream_plates(
     ),
     all_ops AS (
         SELECT
-            o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready,
+            o.id, o.job_id, o.plan_id, o.state, {step_ts} AS date_created, o.date_ready,
             p.name AS protocol_name,
             MAX(CASE WHEN pt.name = 'Source Well'       THEN op_param.value END) AS sw,
             MAX(CASE WHEN pt.name = 'Well to Quant'     THEN op_param.value END) AS qw,
@@ -1264,6 +1275,7 @@ def resolve_downstream_plates(
             ON o.id = op_param.operation_id
         JOIN `{project_id}.bios__src.parametertype` pt
             ON op_param.parameter_type_id = pt.id
+        LEFT JOIN `{project_id}.bios__src.job` j ON j.id = o.job_id
         WHERE o.state IN ('SC', 'FA', 'RD', 'RU', 'CA')
           AND p.name IN ('{proto.REARRAY}', '{proto.DNA_QUANT}', '{proto.NGS}')
           AND o.date_created >= '{date_filter}'

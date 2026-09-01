@@ -49,7 +49,7 @@ class OpTrackerExtractor:
         t0 = time.time()
         proj = PipelineConfig.PROJECT_ID
         date_filter = PipelineConfig.get_date_filter()
-        cutover = PipelineConfig.BIOS_CUTOVER_TS
+        step_ts = PipelineConfig.sql_step_ts()
         # Coordinate SQL comes from dnasc/wells.py — the single definition shared
         # with every renderer. Do not inline CHR(65 + ...) here again; that is how
         # this file ended up row-major and wrong.
@@ -134,9 +134,7 @@ class OpTrackerExtractor:
             -- identical; any job created after it reports when the job ran.
             -- 0.35% of ops have no job at all (synthetic/manual) — the IS NULL
             -- test leaves those on o.date_created.
-            IF(j.date_created IS NOT NULL AND j.date_created >= TIMESTAMP '{cutover}',
-               j.date_created,
-               o.date_created) AS step_ts,
+            {step_ts} AS step_ts,
             p.name AS protocol_name,
             MAX(CASE WHEN pt.name = 'Product'     THEN op_param.value END) AS product,
             MAX(CASE WHEN pt.name = 'Process'     THEN REPLACE(op_param.value, '"', '') END) AS process_id,

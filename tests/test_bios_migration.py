@@ -313,6 +313,62 @@ def test_bios_schema_contract(bq, table):
 
 # ── 4. the pipeline no longer reads the frozen dataset ───────────────────────
 
+def test_step_ts_has_one_definition():
+    """Every timeline query must call PipelineConfig.sql_step_ts(), not inline the
+    cutover comparison.
+
+    The op-vs-job split is subtle enough that I got it wrong on the first attempt —
+    keying off o.date_created instead of j.date_created did nothing for the very
+    rows it was meant to fix. Six hand-written copies of the well-coordinate
+    formula is how optracker.py stayed row-major and wrong for months, so this one
+    gets a single definition and a test.
+    """
+    pkg = Path(__file__).resolve().parents[1] / "dnasc"
+    config = (pkg / "config.py").resolve()
+
+    inline = re.compile(r"date_created\s*>=\s*TIMESTAMP")
+    offenders = []
+    for path in sorted(pkg.rglob("*.py")):
+        if path.resolve() == config:
+            continue
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith(("#", "--")):
+                continue
+            if inline.search(line):
+                offenders.append(f"  {path.relative_to(pkg.parent)}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "cutover comparison inlined instead of calling PipelineConfig.sql_step_ts():\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_every_timeline_query_uses_step_ts():
+    """The four repair.py timeline SELECTs and optracker.py must alias step_ts.
+
+    repair.py feeds operation_start for synthetic and downstream-plate rows; if one
+    of these silently reverts to o.date_created, those rows show queue time again —
+    the bug that made an NGS step run on 08-31 print 08/11.
+    """
+    pkg = Path(__file__).resolve().parents[1] / "dnasc"
+    repair = (pkg / "transformers" / "repair.py").read_text()
+    optracker = (pkg / "extractors" / "optracker.py").read_text()
+
+    assert repair.count("{step_ts} AS date_created") == 4, (
+        "expected 4 timeline SELECTs in repair.py aliasing step_ts, found "
+        f"{repair.count('{step_ts} AS date_created')}"
+    )
+    assert repair.count("PipelineConfig.sql_step_ts()") == 2, \
+        "both repair.py functions must define step_ts from the shared helper"
+    assert "{step_ts} AS step_ts" in optracker and \
+           "PipelineConfig.sql_step_ts()" in optracker, \
+           "optracker.py must use the shared helper too"
+
+    # and the raw column must still gate the data window, not the step time
+    assert "o.date_created >= '{date_filter}'" in repair, \
+        "WHERE clauses should still filter raw o.date_created (data window)"
+
+
 def test_no_legacy_table_references_remain():
     """No dnasc/ query may reference the frozen legacy dataset.
 

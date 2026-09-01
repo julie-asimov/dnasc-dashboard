@@ -149,7 +149,30 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.11.88"
+    PIPELINE_VERSION: str = "1.11.89"
+
+    @classmethod
+    def sql_step_ts(cls, op: str = "o", job: str = "j") -> str:
+        """BigQuery expression for a timeline step's timestamp — THE definition.
+
+        Reads operation.date_created for anything a pre-cutover job ran, and
+        job.date_created for anything a post-cutover job ran. See BIOS_CUTOVER_TS
+        above for why, and why the split keys off the JOB rather than the op.
+
+        Every query that puts a timestamp on a timeline step must use this. It is a
+        method rather than four inline copies because six hand-written copies of the
+        well-coordinate formula is how optracker.py stayed row-major and wrong for
+        months (see dnasc/wells.py).
+
+        Callers alias it back to `date_created` so downstream pandas code is
+        unchanged, and keep filtering their WHERE on the raw o.date_created — that
+        is a data window, not a step time.
+        """
+        return (
+            f"IF({job}.date_created IS NOT NULL "
+            f"AND {job}.date_created >= TIMESTAMP '{cls.BIOS_CUTOVER_TS}', "
+            f"{job}.date_created, {op}.date_created)"
+        )
 
     @classmethod
     def get_date_filter(cls) -> str:
