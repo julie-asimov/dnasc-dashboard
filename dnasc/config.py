@@ -93,6 +93,12 @@ class PipelineConfig:
     # a full day, so the slack costs nothing.
     PARTS_MAX_AGE_MINUTES: int = 15
 
+    # Same idea for the Twist pull, but its cron fires HOURLY (the vendor API is slow and
+    # its data moves during the day — ETAs slip, carrier scans land), so a healthy cron
+    # leaves the pkl up to 60 min old at refresh start. 75 gives that the same 15-minute
+    # slack the parts window has, so the inline pull stays a no-op unless the cron failed.
+    TWIST_MAX_AGE_MINUTES: int = 75
+
     # ── Parts restock buffer ──────────────────────────────────────────────────
     # Spare stock to hold on top of the immediate need, as a fraction of that need,
     # with REFILL_BUFFER_MIN as a floor for small needs.
@@ -124,7 +130,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.11.84"
+    PIPELINE_VERSION: str = "1.11.85"
 
     @classmethod
     def get_date_filter(cls) -> str:

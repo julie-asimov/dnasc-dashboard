@@ -131,6 +131,13 @@ except (ImportError, SyntaxError):
         return "<p style='color:#6b7280;padding:1rem;'>NGS triage view not available.</p>"
 
 try:
+    from dnasc.renderer.twist import render_twist_tab
+except (ImportError, SyntaxError):
+    # Reads its own twist_result.pkl (gen_twist_pkl.py, separate cron); degrade, never crash.
+    def render_twist_tab():
+        return "<p style='color:#6b7280;padding:1rem;'>Twist order view not available.</p>"
+
+try:
     from dnasc.renderer.parts import render_parts_tab
 except (ImportError, SyntaxError):
     # Optional, separately-developed tab with its own data pull (parts_result.pkl).
@@ -1382,6 +1389,8 @@ def render_all_projects_dashboard(
     _cpick_fragment = render_colony_pick_tab()
     # NGS triage tab — reads the same parts_result.pkl (running WOs + glycerol + LSP batches)
     _ngs_fragment = render_ngs_tab()
+    # Twist tab — reads its own twist_result.pkl (vendor API pull on its own cron)
+    _twist_fragment = render_twist_tab()
 
     # Part 2: HTML with variables (f-string)
     html += f"""
@@ -1426,6 +1435,10 @@ def render_all_projects_dashboard(
                 <button class="tab-btn" data-tab="ngs" onclick="switchTab('ngs')">
                     <span style="font-size:16px;">🔬</span>
                     <span class="tab-text">NGS</span>
+                </button>
+                <button class="tab-btn" data-tab="twist" onclick="switchTab('twist')">
+                    <span style="font-size:16px;">📦</span>
+                    <span class="tab-text">Twist</span>
                 </button>
             </div>
             <script>(function(){{try{{var t=localStorage.getItem('dash_activeTab');if(t&&t!=='tracking'){{document.querySelector('[data-tab="tracking"]').classList.remove('active');var b=document.querySelector('[data-tab="'+t+'"]');if(b)b.classList.add('active');var s=document.createElement('style');s.id='_earlyhide';s.textContent='#tab-tracking{{display:none!important}}';document.head.appendChild(s);}}}}catch(e){{}}}}());</script>
@@ -4446,6 +4459,11 @@ def render_all_projects_dashboard(
                 __NGS_FRAGMENT__
             </div>
 
+            <!-- TWIST ORDERS TAB -->
+            <div id="tab-twist" class="tab-content" style="padding:0;overflow-y:auto;height:calc(100vh - 130px);">
+                __TWIST_FRAGMENT__
+            </div>
+
         </div>
     </div>
     """
@@ -4454,6 +4472,7 @@ def render_all_projects_dashboard(
     html = html.replace("__PARTS_FRAGMENT__", _parts_fragment)
     html = html.replace("__CPICK_FRAGMENT__", _cpick_fragment)
     html = html.replace("__NGS_FRAGMENT__", _ngs_fragment)
+    html = html.replace("__TWIST_FRAGMENT__", _twist_fragment)
     # Deduped plate-popover pool, emitted once after the body. Build sites emitted
     # empty <div class="plate-popover" data-pop="N">; JS fills each from PLATE_POP
     # on first hover/click. ~91% of popovers are dupes, so this replaces ~21 MB of

@@ -15,8 +15,14 @@ has run). On the server the parts cron fires 10 min before this, so it is a no-o
 locally there is no such cron, so one command covers both halves. If the cron
 failed, the pkl is yesterday's and this picks up the slack.
 
+The Twist tab works the same way (gen_twist_pkl), except its cron is HOURLY — the vendor
+API is slow (~75 s per page) and its data moves through the day. It is skipped entirely if
+the Twist API tokens are not in the environment, so a host without them still renders.
+
     --skip-parts    never touch the parts pkl
     --force-parts   pull it even if it is fresh
+    --skip-twist    never touch the twist pkl
+    --force-twist   pull it even if it is fresh
 
 Schedule: Once daily (or on deploy / version bump)
 ============================================================================
@@ -59,17 +65,26 @@ SKIP_PARTS  = "--skip-parts" in sys.argv
 FORCE_PARTS = "--force-parts" in sys.argv
 PARTS_PKL   = STATE_DIR / "parts_result.pkl"
 
+# Same split for the Twist tab: its own hourly cron, with this as the fallback.
+SKIP_TWIST  = "--skip-twist" in sys.argv
+FORCE_TWIST = "--force-twist" in sys.argv
+TWIST_PKL   = STATE_DIR / "twist_result.pkl"
 
-def _parts_age_minutes(ref_ts):
-    """Age of parts_result.pkl in minutes AS OF ref_ts, or None if it does not exist.
+
+def _pkl_age_minutes(path, ref_ts):
+    """Age of a cache pkl in minutes AS OF ref_ts, or None if it does not exist.
 
     ref_ts is the refresh start, not now: the pipeline runs first, so measuring at the parts
     step would add ~11 minutes to every reading and make a just-run cron look stale.
     """
     try:
-        return (ref_ts - PARTS_PKL.stat().st_mtime) / 60.0
+        return (ref_ts - path.stat().st_mtime) / 60.0
     except FileNotFoundError:
         return None
+
+
+def _parts_age_minutes(ref_ts):
+    return _pkl_age_minutes(PARTS_PKL, ref_ts)
 
 def main():
     start = time.time()
@@ -115,6 +130,34 @@ def main():
             print(f"   ✅ Parts data refreshed in {time.time() - _pt:.1f}s")
         except Exception as e:
             print(f"   ⚠️  Parts pull failed ({e}) — keeping the previous parts_result.pkl")
+
+    # 3c. Refresh the Twist tab data — same deal as parts: its own (hourly) cron, refreshed
+    #     here only if that cron did not just run. Also non-fatal and atomic, so a failure —
+    #     most likely an expired API token — leaves the previous pkl and the tab shows its
+    #     own staleness. Skipped outright when the API tokens are not in the environment.
+    _tage = _pkl_age_minutes(TWIST_PKL, start)
+    _tlimit = PipelineConfig.TWIST_MAX_AGE_MINUTES
+    if SKIP_TWIST:
+        print("\n📦 Twist data: skipped (--skip-twist)")
+    elif not FORCE_TWIST and _tage is not None and _tage <= _tlimit:
+        print(f"\n📦 Twist data: twist cron ran {_tage:.1f} min before this refresh "
+              f"(limit {_tlimit}) — skipping the pull")
+    else:
+        try:
+            import gen_twist_pkl
+            if not gen_twist_pkl.have_tokens():
+                print("\n📦 Twist data: AUTHORIZATION_JWT / X_END_USER_TOKEN not set — "
+                      "skipping the pull, tab will show its last cached state")
+            else:
+                why = ("missing" if _tage is None else
+                       "forced" if FORCE_TWIST else
+                       f"{_tage:.1f} min old at refresh start (limit {_tlimit})")
+                print(f"\n📦 Refreshing Twist tab data — {why}...")
+                _tt = time.time()
+                gen_twist_pkl.refresh()
+                print(f"   ✅ Twist data refreshed in {time.time() - _tt:.1f}s")
+        except Exception as e:
+            print(f"   ⚠️  Twist pull failed ({e}) — keeping the previous twist_result.pkl")
 
     # 4. Render HTML
     print("\n🎨 Rendering dashboard...")
