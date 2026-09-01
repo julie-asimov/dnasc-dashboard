@@ -264,15 +264,27 @@ class OpTrackerExtractor:
         ),
         well_info AS (
           SELECT a.operation_id, a.protocol_name,
+            -- well.position is 0-based and COLUMN-major: it fills down a column
+            -- first, so A1=0, B1=1, ... H1=7, A2=8, ... H12=95 on a 96-well
+            -- plate. Row = position MOD rows, column = position DIV rows + 1,
+            -- where rows comes from the plate's well_count, not its labware
+            -- name: a "384 Echo Source Plate" can be physically 96-well. The
+            -- LIMS UI labels the same well position+1, e.g. BQ 25 -> "26 - B4".
+            --
+            -- This was row-major (/24 and /12) until 2026-09-01, so every
+            -- coordinate the Tracking tab printed was misplaced — confirmed
+            -- against LIMS on well 1455307 / Plate10991, which is B4 (position
+            -- 25) where row-major said C2. dnasc/renderer/parts.py already had
+            -- the correct form; this now matches it.
             CASE
               WHEN a.destination_well_json IS NOT NULL THEN
                 CONCAT(COALESCE(pl_dest.barcode, CONCAT('Plate', CAST(pl_dest.id AS STRING))), '-',
-                  CHR(65 + CAST(FLOOR(w_dest.position / 24) AS INT64)),
-                  CAST(MOD(w_dest.position, 24) + 1 AS STRING))
+                  CHR(65 + MOD(w_dest.position, IF(pl_dest.well_count = 384, 16, 8))),
+                  CAST(DIV(w_dest.position, IF(pl_dest.well_count = 384, 16, 8)) + 1 AS STRING))
               WHEN a.agar_well_json IS NOT NULL THEN
                 CONCAT(COALESCE(pl_agar.barcode, CONCAT('Plate', CAST(pl_agar.id AS STRING))), '-',
-                  CHR(65 + CAST(FLOOR(w_agar.position / 12) AS INT64)),
-                  CAST(MOD(w_agar.position, 12) + 1 AS STRING))
+                  CHR(65 + MOD(w_agar.position, IF(pl_agar.well_count = 384, 16, 8))),
+                  CAST(DIV(w_agar.position, IF(pl_agar.well_count = 384, 16, 8)) + 1 AS STRING))
               WHEN mp.miniprep_location IS NOT NULL OR gp.glycerol_location IS NOT NULL THEN
                 CONCAT(
                   COALESCE(mp.miniprep_location, ''),
@@ -280,8 +292,8 @@ class OpTrackerExtractor:
                   COALESCE(gp.glycerol_location, ''))
               WHEN a.output_assembly_well_json IS NOT NULL THEN
                 CONCAT(COALESCE(pl.barcode, CONCAT('Plate', CAST(pl.id AS STRING))), '-',
-                  CHR(65 + CAST(FLOOR(w.position / 12) AS INT64)),
-                  CAST(MOD(w.position, 12) + 1 AS STRING))
+                  CHR(65 + MOD(w.position, IF(pl.well_count = 384, 16, 8))),
+                  CAST(DIV(w.position, IF(pl.well_count = 384, 16, 8)) + 1 AS STRING))
               ELSE NULL
             END AS well_location
           FROM all_operations a
