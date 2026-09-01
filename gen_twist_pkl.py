@@ -15,7 +15,10 @@ renderer always sees either the previous good pkl or the complete new one.
 The order list is paged newest-first and STOPS EARLY: it pages only until every Q-number
 the pipeline is still waiting on has been seen AND the window reaches back `--days`
 (default 45). The full history is 300 orders — paging all of it would take ~20 minutes
-for data nobody looks at.
+for data nobody looks at. A typical run is ~3 min (2 pages + plate maps); `--max-pages`
+bounds it at ~6, and `--deadline` is a wall-clock stop on top of that, so an hourly cron
+can never still be running when the next one fires. Anything skipped for either reason is
+recorded in `notes` and shown on the tab — a short pull must not read as "nothing new".
 
 Env:
     AUTHORIZATION_JWT, X_END_USER_TOKEN   (required)
@@ -35,6 +38,7 @@ import os
 import pickle
 import sys
 import tempfile
+import time
 import traceback
 
 import pandas as pd
@@ -61,6 +65,15 @@ _SYNTH_TYPES = ["syn_part_synthesis_workorder", "plasmid_synthesis_workorder"]
 # One page costs ~75 s no matter its size, so take big pages and few of them.
 _PAGE_SIZE = 25
 _TIMEOUT = 300
+
+# Hard wall-clock budget for the whole pull. The vendor API is the slow part and its latency
+# is not ours to control, so the job stops fetching rather than running long — a cron firing
+# hourly must never still be running when the next one starts, and it must be finished well
+# before the dashboard refresh it feeds. Whatever was collected still gets cached, with a note
+# on the tab saying what was skipped; a silent short pull would read as "nothing new".
+_DEADLINE_SECONDS = 600
+# A page costs ~75 s; without this much left, starting one just burns the remaining budget.
+_PAGE_COST = 90
 
 
 # ── pipeline side ─────────────────────────────────────────────────────────────
@@ -96,11 +109,12 @@ def _pipeline_parts(parquet: str) -> tuple[dict, set]:
 
 
 # ── Twist side ────────────────────────────────────────────────────────────────
-def _fetch_orders_window(email, jwt, eut, want: set, days: int, max_pages: int):
+def _fetch_orders_window(email, jwt, eut, want: set, days: int, max_pages: int, left):
     """Page orders newest-first, stopping as soon as the window covers what we need.
 
-    Returns (orders, notes). `notes` records anything we deliberately did not fetch, so
-    the tab can say so instead of silently looking complete.
+    `left()` returns the seconds remaining in the pull's budget. Returns (orders, notes);
+    `notes` records anything we deliberately did not fetch — page cap or deadline — so the
+    tab can say so instead of silently looking complete.
     """
     url = f"{BASE_URL}/v1/users/{email}/orders/"
     cutoff = dt.date.today() - dt.timedelta(days=days)
@@ -108,7 +122,13 @@ def _fetch_orders_window(email, jwt, eut, want: set, days: int, max_pages: int):
     total = None
 
     for page in range(1, max_pages + 1):
-        resp = requests.get(url, headers=_headers(jwt, eut), timeout=_TIMEOUT, params={
+        if left() < _PAGE_COST:
+            missing = sorted(want - seen)
+            notes.append(f"out of time after {len(orders)} orders"
+                         + (f"; not fetched: {', '.join(missing)}" if missing else ""))
+            break
+        resp = requests.get(url, headers=_headers(jwt, eut),
+                            timeout=min(_TIMEOUT, max(30, int(left()))), params={
             "page_size": _PAGE_SIZE, "sort_by": "received_date",
             "reverse": "true", "page": page,
         })
@@ -137,7 +157,8 @@ def _fetch_orders_window(email, jwt, eut, want: set, days: int, max_pages: int):
     return orders, notes
 
 
-def _platemap_csv(email, jwt, eut, order_sfdc: str, shipment_id: str, order_name: str):
+def _platemap_csv(email, jwt, eut, order_sfdc: str, shipment_id: str, order_name: str,
+                  left=None):
     """Fetch a shipment's plate map. Despite the endpoint's name it serves a plain CSV
     (verified against twist_platemaps/*.zip — every saved file is CSV text, not a ZIP).
 
@@ -146,14 +167,17 @@ def _platemap_csv(email, jwt, eut, order_sfdc: str, shipment_id: str, order_name
     """
     api = (f"{BASE_URL}/v1/users/{email}/orders/{order_sfdc}"
            f"/shipments/{shipment_id}/plate-maps/")
+    # Cap each request by what is left of the pull's budget, so one slow map cannot
+    # overrun the deadline on its own.
+    tmo = 120 if left is None else max(5, min(120, int(left())))
     try:
-        r = requests.get(api, headers=_headers(jwt, eut), timeout=120)
+        r = requests.get(api, headers=_headers(jwt, eut), timeout=tmo)
         if r.status_code != 200:
             return None, None
         file_url = r.json().get("platemaps_file_url", "")
         if not file_url:
             return None, None
-        f = requests.get(file_url, timeout=120)
+        f = requests.get(file_url, timeout=tmo)
         if f.status_code != 200:
             return None, None
         text = f.content.decode("utf-8", "replace")
@@ -237,7 +261,7 @@ def have_tokens() -> bool:
     return bool(os.environ.get("AUTHORIZATION_JWT") and os.environ.get("X_END_USER_TOKEN"))
 
 
-def build(days: int, max_pages: int) -> dict:
+def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
     email = os.environ.get("TWIST_EMAIL", "dna@asimov.io")
     jwt = os.environ.get("AUTHORIZATION_JWT", "")
     eut = os.environ.get("X_END_USER_TOKEN", "")
@@ -246,13 +270,26 @@ def build(days: int, max_pages: int) -> dict:
     if not jwt or not eut:
         raise RuntimeError("AUTHORIZATION_JWT and X_END_USER_TOKEN must be set.")
 
+    t0 = time.time()
+
+    def left():
+        return deadline - (time.time() - t0)
+
+    def el():
+        return f"{time.time() - t0:.0f}s"
+
     by_order, waiting = _pipeline_parts(PARQUET)
     print(f"pipeline: {len(by_order)} orders seen, {len(waiting)} still awaiting delivery"
-          f" ({', '.join(sorted(waiting)) or 'none'})", flush=True)
+          f" ({', '.join(sorted(waiting)) or 'none'}) [{el()}]", flush=True)
 
-    print("fetching orders (~75 s per page) ...", flush=True)
-    orders, notes = _fetch_orders_window(email, jwt, eut, waiting, days, max_pages)
-    print(f"  {len(orders)} orders in window", flush=True)
+    print(f"fetching orders (~75 s per page, {deadline}s budget) ...", flush=True)
+    orders, notes = _fetch_orders_window(email, jwt, eut, waiting, days, max_pages, left)
+    print(f"  {len(orders)} orders in window [{el()}]", flush=True)
+    # Never cache an empty pull over a good one: with no orders the tab would go blank and
+    # read as "nothing on order" rather than "the pull did not finish".
+    if not orders:
+        raise RuntimeError(f"no orders fetched in {el()} — keeping the previous cache"
+                           + (f" ({'; '.join(notes)})" if notes else ""))
 
     cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
     keep = []
@@ -262,21 +299,29 @@ def build(days: int, max_pages: int) -> dict:
             continue  # a Twist order with no pipeline part is not ours to track
         if q in waiting or str(o.get("received_date") or "")[:10] >= cutoff:
             keep.append(o)
-    print(f"  {len(keep)} tracked (pipeline parts + within {days}d)", flush=True)
+    print(f"  {len(keep)} tracked (pipeline parts + within {days}d) [{el()}]", flush=True)
 
     platemaps, wells = {}, {}
+    skipped = 0
     for o in keep:
         q, sfdc = o.get("order_name"), o.get("sfdc_id")
         for s in (o.get("shipments") or []):
             if s.get("status") not in ("shipped", "received") or not (sfdc and s.get("id")):
                 continue
+            if left() <= 0:
+                skipped += 1
+                continue
             key = f"{q}|{s['id']}"
             print(f"    plate map {q} {s['id'][:8]} ...", flush=True)
-            fname, text = _platemap_csv(email, jwt, eut, sfdc, s["id"], q)
+            fname, text = _platemap_csv(email, jwt, eut, sfdc, s["id"], q, left)
             if not text:
                 continue
             platemaps[key] = {"filename": fname, "csv": text}
             wells.setdefault(q, {}).update(_parse_platemap(text))
+    if skipped:
+        # Say it out loud: a missing download button must not look like "Twist sent no map".
+        notes.append(f"out of time — {skipped} plate map(s) not fetched this run")
+    print(f"  {len(platemaps)} plate maps [{el()}]", flush=True)
 
     return {
         "generated_at": dt.datetime.now(tz=dt.timezone.utc),
@@ -292,10 +337,12 @@ def build(days: int, max_pages: int) -> dict:
     }
 
 
-def refresh(days: int = 45, max_pages: int = 4) -> dict:
+def refresh(days: int = 45, max_pages: int = 4,
+            deadline: int = _DEADLINE_SECONDS) -> dict:
     """Pull and cache. Called directly by full_refresh.py — keep it argv-free, since
     argparse there would choke on the refresh's own flags."""
-    result = build(days, max_pages)
+    t0 = time.time()
+    result = build(days, max_pages, deadline)
 
     d = os.path.dirname(OUT)
     os.makedirs(d, exist_ok=True)
@@ -309,7 +356,10 @@ def refresh(days: int = 45, max_pages: int = 4) -> dict:
             os.remove(tmp)
     print(f"cached fresh twist_result.pkl @ "
           f"{result['generated_at']:%Y-%m-%d %H:%M} UTC "
-          f"({len(result['orders'])} orders, {len(result['platemaps'])} plate maps)")
+          f"({len(result['orders'])} orders, {len(result['platemaps'])} plate maps) "
+          f"in {time.time() - t0:.0f}s")
+    for n in result.get("notes") or []:
+        print(f"  note: {n}")
     return result
 
 
@@ -319,8 +369,10 @@ def main():
                     help="how far back delivered orders stay on the tab (default 45)")
     ap.add_argument("--max-pages", type=int, default=4,
                     help="hard cap on order pages fetched (default 4 = 100 orders)")
+    ap.add_argument("--deadline", type=int, default=_DEADLINE_SECONDS,
+                    help=f"wall-clock budget in seconds (default {_DEADLINE_SECONDS})")
     args = ap.parse_args()
-    refresh(args.days, args.max_pages)
+    refresh(args.days, args.max_pages, args.deadline)
 
 
 if __name__ == "__main__":
