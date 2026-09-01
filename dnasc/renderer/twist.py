@@ -192,7 +192,15 @@ def _progress_cell(r: dict) -> str:
     return f'<div class="dim">{" · ".join(bits) or "—"}</div>{bar}'
 
 
-def _ship_cell(r: dict, want: tuple) -> str:
+def _ship_cell(r: dict, want: tuple, maps: dict) -> str:
+    """One block per shipment — carrier, tracking, last scan, and that shipment's plate map.
+
+    The button lives INSIDE the block on purpose. It used to sit in its own column, which
+    meant two independent stacks: on an order with two shipments the taller carrier blocks
+    and the shorter button blocks drifted apart, so the second button lined up with the
+    first shipment. Rendering the button as part of the shipment it belongs to makes that
+    class of bug impossible.
+    """
     out = []
     for s in r["ships"]:
         if s.get("status") not in want:
@@ -206,11 +214,25 @@ def _ship_cell(r: dict, want: tuple) -> str:
         prov = det.get("provider_detail") or det.get("provider_status") or ""
         loc = s.get("last_location") or ""
         scan = _d(s.get("last_updated_at"))
+
+        # Plate barcode and its download sit on one line, so the barcode reads as the
+        # button's label rather than a caption floating underneath it. The barcode still
+        # shows when no map is cached — knowing the plate is useful even without the CSV.
+        key = f'{r["q"]}|{s.get("id")}'
+        m = maps.get(key)
+        plate = next((c.get("barcode") for c in (s.get("containers") or []) if c.get("barcode")), "")
+        pm = ""
+        if m or plate:
+            btn = (f'<button class="dl" onclick="twistCSV(\'{_esc(key)}\',event)">'
+                   f'&#8595; Plate map</button>' if m else "")
+            lbl = f'<span class="mono dim">{_esc(plate)}</span>' if plate else ""
+            pm = f'<div class="pm">{btn}{lbl}</div>'
+
         out.append(
             f'<div class="ship"><span class="carrier">{_esc(carrier)}</span> {link}'
             + (f'<div class="dim">{_esc(str(prov).replace("_", " "))}</div>' if prov else "")
             + (f'<div class="dim">last scan {_esc(loc)}{" · " + scan if scan else ""}</div>' if loc else "")
-            + '</div>')
+            + pm + '</div>')
     return "".join(out) or '<span class="no">—</span>'
 
 
@@ -252,21 +274,6 @@ def _lims_cell(r: dict) -> str:
     return '<span class="no">—</span>'
 
 
-def _platemap_cell(r: dict, maps: dict) -> str:
-    out = []
-    for s in r["ships"]:
-        key = f'{r["q"]}|{s.get("id")}'
-        m = maps.get(key)
-        if not m:
-            continue
-        cont = s.get("containers") or []
-        plate = next((c.get("barcode") for c in cont if c.get("barcode")), "")
-        out.append(
-            f'<button class="dl" onclick="twistCSV(\'{_esc(key)}\',event)">&#8595; Plate map</button>'
-            + (f'<div class="dim mono">{_esc(plate)}</div>' if plate else ""))
-    return "".join(out) or '<span class="no">—</span>'
-
-
 def _detail_row(r: dict, rid: str, ncols: int) -> str:
     """Hidden per-part row: stock id, attempt, LIMS status, and — once a plate map exists —
     the physical well, QC and yield straight from Twist's CSV."""
@@ -301,9 +308,11 @@ def _detail_row(r: dict, rid: str, ncols: int) -> str:
 
 # ── tables ────────────────────────────────────────────────────────────────────
 def _table(rows: list, cols: list, cells, empty: str, maps: dict, tag: str) -> str:
+    """`cols` is [(label, width), …]. Widths are explicit because without them the browser
+    hands all the slack to the last column, leaving a wide half-empty band on the right."""
     if not rows:
         return f'<div class="empty">{_esc(empty)}</div>'
-    head = "".join(f"<th>{_esc(c)}</th>" for c in cols)
+    head = "".join(f'<th style="width:{w}">{_esc(c)}</th>' for c, w in cols)
     body = []
     for i, r in enumerate(rows):
         rid = f"tw-{tag}-{i}"
@@ -337,21 +346,24 @@ def _render() -> str:
                    key=lambda r: (r["delivered"] or dt.date.min), reverse=True)
 
     t_prog = _table(
-        prog, ["Order", "Parts waiting", "Twist progress", "ETA", "Status"],
+        prog, [("Order", "24%"), ("Parts waiting", "14%"), ("Twist progress", "22%"),
+               ("ETA", "26%"), ("Status", "14%")],
         lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid), _progress_cell(r),
                            _eta_cell(r), _badge(r["status"] or "—", "blue")],
         "Nothing in synthesis right now.", maps, "p")
 
     t_trans = _table(
-        trans, ["Order", "Parts waiting", "Carrier", "Arriving", "Plate map"],
-        lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid), _ship_cell(r, ("shipped",)),
-                           _transit_when(r), _platemap_cell(r, m)],
+        trans, [("Order", "24%"), ("Parts waiting", "14%"), ("Shipment", "40%"),
+                ("Arriving", "22%")],
+        lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid),
+                           _ship_cell(r, ("shipped",), m), _transit_when(r)],
         "Nothing in transit.", maps, "t")
 
     t_deliv = _table(
-        deliv, ["Order", "Parts", "Delivered", "Received into LIMS", "Carrier", "Plate map"],
+        deliv, [("Order", "20%"), ("Parts", "12%"), ("Delivered", "18%"),
+                ("Received into LIMS", "20%"), ("Shipment & plate map", "30%")],
         lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid), _delivered_when(r),
-                           _lims_cell(r), _ship_cell(r, ("received",)), _platemap_cell(r, m)],
+                           _lims_cell(r), _ship_cell(r, ("received",), m)],
         "No deliveries in the window.", maps, "d")
 
     n_wait_parts = sum(r["n_waiting"] for r in rows)
@@ -471,7 +483,9 @@ _CSS = """
 #tab-twist .carrier { font-size:10px; font-weight:700; color:#475569; text-transform:uppercase; margin-right:5px; }
 #tab-twist .trk { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; color:#1d4ed8;
                   font-weight:600; text-decoration:none; }
-#tab-twist .ship + .ship { margin-top:6px; padding-top:6px; border-top:1px solid #f3f4f6; }
+#tab-twist .ship + .ship { margin-top:8px; padding-top:8px; border-top:1px solid #f3f4f6; }
+#tab-twist .pm { display:flex; align-items:center; gap:7px; margin-top:5px; flex-wrap:wrap; }
+#tab-twist .pm .mono { font-size:11px; }
 #tab-twist .dl { font-size:11px; font-weight:600; color:#1d4ed8; background:#eff6ff; border:1px solid #bfdbfe;
                  border-radius:5px; padding:3px 9px; cursor:pointer; white-space:nowrap; }
 #tab-twist .dl:hover { background:#dbeafe; }
