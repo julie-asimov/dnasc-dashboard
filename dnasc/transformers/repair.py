@@ -898,6 +898,57 @@ def resolve_optracker_streakouts(
 # Module-level function (called from pipeline.py as Step 9c)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# What kind of manual operation a LIMS process_id describes, in priority order —
+# an id can contain several of these words, and the first match wins.
+#
+# Ordered from most specific intent to least: REFILL_INNOC_* is a refill, not a
+# streak, even though a streak may follow; SUB-NEBstable_* is a subculture, not
+# just "a NEB thing". Derived from the actual shapes in LIMS, measured 2026-09-01.
+_MANUAL_KIND_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    ("REFILL",         re.compile(r"REFILL", re.I)),
+    ("INNOC",          re.compile(r"INNOC", re.I)),
+    ("GLYCEROL_CHECK", re.compile(r"GLYCEROL[_-]?CHECK", re.I)),
+    ("PICK",           re.compile(r"(^|[_-])PICK", re.I)),
+    ("STREAK",         re.compile(r"STREAK", re.I)),
+    ("TFX",            re.compile(r"TF[XM]", re.I)),
+    ("SUBCULTURE",     re.compile(r"(^|[_-])SUB[_-]", re.I)),
+    ("STRAIN",         re.compile(r"^(NEB|EPI400|STBL3)", re.I)),
+    ("EXT",            re.compile(r"^EXT[_-]", re.I)),
+]
+
+# Map each kind onto a type the renderer ALREADY handles. Introducing a new type
+# value would silently drop these rows from the hardcoded type lists in
+# pipeline.py (556/698/986), dashboard.py:3000 and inflight.py's _L3_TYPES, so
+# the real operation kind rides along in `manual_op_kind` instead.
+_MANUAL_KIND_TO_TYPE: dict[str, str] = {
+    "STREAK":         "streakout_operation",
+    "TFX":            "transformation_offline_operation",
+    "SUBCULTURE":     "transformation_offline_operation",
+    "STRAIN":         "transformation_offline_operation",
+    # Not transformations. optracker_operation is what manual repicks
+    # (PICK_25Aug26_well2176911) already use — see pipeline.py:558.
+    "REFILL":         "optracker_operation",
+    "INNOC":          "optracker_operation",
+    "GLYCEROL_CHECK": "optracker_operation",
+    "PICK":           "optracker_operation",
+    "EXT":            "optracker_operation",
+    "OTHER":          "optracker_operation",
+}
+
+
+def _manual_op_kind(process_id: str) -> str:
+    """Classify a LIMS manual process_id. Returns a key of _MANUAL_KIND_TO_TYPE.
+
+    'OTHER' covers the bare `well12345` ids — 489 distinct, the single largest
+    shape — which say only "someone did something to this well".
+    """
+    pid = str(process_id or "")
+    for kind, pattern in _MANUAL_KIND_PATTERNS:
+        if pattern.search(pid):
+            return kind
+    return "OTHER"
+
+
 def resolve_lims_streakouts(
     final_df: pd.DataFrame,
     project_id: str = PipelineConfig.PROJECT_ID,
@@ -918,8 +969,22 @@ def resolve_lims_streakouts(
     Complements resolve_optracker_streakouts (which requires OpTracker ops)
     and create_synthetic_streakouts (which requires df source-column references).
     """
-    # Match STREAK anywhere in the ID (catches PARTNER_STREAK, etc.)
-    STREAK_RE = re.compile(r"STREAK.*well\d+|^(STBL3|EPI400|TFM).*well\d+", re.I)
+    # STRUCTURAL match, not a keyword allowlist. Any LIMS process_id containing
+    # well<id> IS a manual operation on that well — that is true whatever the
+    # operator typed in front of it.
+    #
+    # The old filter was `STREAK.*well\d+|^(STBL3|EPI400|TFM).*well\d+`, which
+    # missed two thirds of them: 1016 of 1575 well-referencing process_ids, 31101
+    # wells. It missed NEB_well2202668 (56 wells over 5 plates, Bank Overnights ->
+    # Miniprep -> Rearray -> Quant -> NGS) purely because the operator wrote NEB
+    # rather than STREAK or TFM. Bare `well12345`, `refill_well#`,
+    # `REFILL_INNOC_*`, `SUB-NEBstable_well#` and `PICK_*` were all invisible for
+    # the same reason. A keyword list over free text a human types will keep
+    # failing that way, so the keyword is gone.
+    #
+    # The source-workorder requirement below is what keeps this honest: of the
+    # 1453 that trace to a source, only 75 are new AND have a source already in
+    # the frame, 73 of them newly reachable. It is a wider net, not a flood.
     existing_ids = set(final_df["workorder_id"].astype(str))
     client = bigquery.Client(project=project_id)
 
@@ -941,7 +1006,7 @@ def resolve_lims_streakouts(
                 ON ps.id = wc.plasmid_stock_id
             LEFT JOIN `{project_id}.lims__src.strain` s
                 ON s.id = wc.strain_id
-            WHERE REGEXP_CONTAINS(w.process_id, r'(?i)(STREAK.*well\\d+|^(STBL3|EPI400|TFM).*well\\d+)')
+            WHERE REGEXP_CONTAINS(w.process_id, r'(?i)well[0-9]+')
               AND COALESCE(ps.process_id, s.process_id, src_well.process_id) IS NOT NULL
         """).to_dataframe()
     except Exception as exc:
@@ -974,11 +1039,8 @@ def resolve_lims_streakouts(
             continue
         src = source_rows.iloc[0]
 
-        proc_type = (
-            "streakout_operation"
-            if "STREAK" in pid.upper()
-            else "transformation_offline_operation"
-        )
+        kind      = _manual_op_kind(pid)
+        proc_type = _MANUAL_KIND_TO_TYPE[kind]
         synthetic_rows.append({
             "workorder_id":          pid,
             "type":                  proc_type,
@@ -1006,8 +1068,9 @@ def resolve_lims_streakouts(
             "deleted_at":            None,
             "is_fulfillment":        False,
             "cloning_strain":        src.get("cloning_strain"),
+            "manual_op_kind":        kind,
         })
-        log.debug("resolve_lims_streakouts: %s → %s", pid, source_wo)
+        log.debug("resolve_lims_streakouts: %s [%s] → %s", pid, kind, source_wo)
 
     if synthetic_rows:
         log.info("resolve_lims_streakouts: created %d synthetic rows", len(synthetic_rows))

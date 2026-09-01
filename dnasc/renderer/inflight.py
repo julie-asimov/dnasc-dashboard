@@ -33,6 +33,9 @@ _DTYPE_LABEL = {
     'transformation_offline_operation': 'Transformation',
     'lsp_workorder':                    'LSP',
     'streakout_operation':              'Streakout',
+    # Manual ops with no OpTracker job of their own — repicks, refills,
+    # innoculations, glycerol checks. Had no label at all before v1.11.88.
+    'optracker_operation':              'Manual Op',
     'pcr_workorder':                    'PCR',
     'oligo_synthesis_workorder':        'Oligo',
     'syn_part_synthesis_workorder':     'Syn Part',
