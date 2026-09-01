@@ -107,6 +107,15 @@ def _analyze(values: list[list[str]]) -> dict:
     nonblank = [n for n in names if n]
     dated = [r for r in rows if cell(r, due_i)]
 
+    # Blank column A is NOT one thing. A row with content elsewhere is a
+    # misplaced append; a row with nothing at all is just grid padding and
+    # matters to nobody. Reporting them as a single number and calling them all
+    # "appended rows in the wrong column" is how this script raised a false
+    # alarm after a successful cleanup.
+    misplaced = sum(1 for r in rows
+                    if not (r and str(r[0]).strip()) and any(str(c).strip() for c in r))
+    empty = (len(names) - len(nonblank)) - misplaced
+
     counts: dict[str, int] = {}
     for n in nonblank:
         counts[n] = counts.get(n, 0) + 1
@@ -119,6 +128,8 @@ def _analyze(values: list[list[str]]) -> dict:
         "header": header,
         "rows": len(rows),
         "blank_names": len(names) - len(nonblank),
+        "misplaced": misplaced,
+        "empty": empty,
         "unique_names": len(counts),
         "dated_rows": len(dated),
         "dup_names": len(dups),
@@ -248,12 +259,16 @@ def main() -> int:
                   f"{info['dated_rows']} dated rows — partial load.")
         else:
             print("Configured sheet IS readable and fully loaded — dates are live.")
-        if info["blank_names"]:
-            pct = 100.0 * info["blank_names"] / max(1, info["rows"])
-            print(f"\n{info['blank_names']} of {info['rows']} rows ({pct:.0f}%) have a BLANK "
-                  "column A.")
-            print("Those are appended rows that landed in the wrong column. A column-A")
-            print("dedup read cannot see them, so they get re-appended every run.")
+        named = info["rows"] - info["blank_names"]
+        print(f"\nrows with a name in column A : {named}   <- the real content")
+        print(f"misplaced (content, no col A): {info['misplaced']}")
+        print(f"empty rows (nothing at all)  : {info['empty']}   <- harmless padding")
+        if info["misplaced"]:
+            print("\nThe misplaced rows are appends that landed outside column A. The parser")
+            print("skips them (blank experiment_name). Clear them with sheets_cleanup.py.")
+        else:
+            print("\nNo misplaced rows. Empty rows are grid padding and affect nothing —")
+            print("they are NOT failed appends.")
     elif readable:
         others = ", ".join(readable)
         print(f"Configured sheet NOT readable, but these are: {others}")
