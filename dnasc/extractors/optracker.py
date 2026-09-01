@@ -48,6 +48,7 @@ class OpTrackerExtractor:
         t0 = time.time()
         proj = PipelineConfig.PROJECT_ID
         date_filter = PipelineConfig.get_date_filter()
+        cutover = PipelineConfig.BIOS_CUTOVER_TS
         log.info("Querying OpTracker operations (since %s)...", date_filter)
 
         # all_operations (4-table join + 25 MAX(CASE) pivots + GROUP BY) is
@@ -107,6 +108,28 @@ class OpTrackerExtractor:
           SELECT
             o.id AS operation_id, o.job_id, o.plan_id, o.state,
             o.date_created, o.date_ready,
+            -- Timeline step timestamp. Before the bios cutover, Django's
+            -- auto_now made operation.date_created a last-modified stamp, so it
+            -- read as "when this step ran". bios sets it insert-only, so after
+            -- the cutover it means "when this step was QUEUED" — job 9604 was
+            -- queued 08-11 and executed 08-31, and the timeline printed 08/11.
+            -- job.date_created is insert-only too and marks when the operator
+            -- created the job that ran the step, which is what a step wants.
+            --
+            -- The split is on the JOB's creation, not the op's. An op queued
+            -- BEFORE the cutover but executed AFTER it (job 9604: queued 08-11,
+            -- job created 08-31) has a date_created frozen at its last
+            -- pre-cutover save, because bios never bumps it. Keying off
+            -- o.date_created puts exactly those broken rows in the "keep" branch.
+            --
+            -- Keying off j.date_created instead: any job created before the
+            -- cutover keeps o.date_created untouched, so history is byte-
+            -- identical; any job created after it reports when the job ran.
+            -- 0.35% of ops have no job at all (synthetic/manual) — the IS NULL
+            -- test leaves those on o.date_created.
+            IF(j.date_created IS NOT NULL AND j.date_created >= TIMESTAMP '{cutover}',
+               j.date_created,
+               o.date_created) AS step_ts,
             p.name AS protocol_name,
             MAX(CASE WHEN pt.name = 'Product'     THEN op_param.value END) AS product,
             MAX(CASE WHEN pt.name = 'Process'     THEN REPLACE(op_param.value, '"', '') END) AS process_id,
@@ -134,9 +157,12 @@ class OpTrackerExtractor:
           JOIN `{proj}.bios__src.protocol` p ON o.protocol_id = p.id
           JOIN `{proj}.bios__src.parameter` op_param ON o.id = op_param.operation_id
           JOIN `{proj}.bios__src.parametertype` pt ON op_param.parameter_type_id = pt.id
+          -- job.id is the PK, so this cannot fan out the row count.
+          LEFT JOIN `{proj}.bios__src.job` j ON j.id = o.job_id
           WHERE o.date_created >= '{date_filter}'
             AND (o.job_id IS NULL OR o.job_id NOT IN (SELECT job_id FROM kicked_back_jobs))
-          GROUP BY o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready, p.name
+          GROUP BY o.id, o.job_id, o.plan_id, o.state, o.date_created, o.date_ready,
+                   j.date_created, p.name
         );
 
         WITH
@@ -280,9 +306,11 @@ class OpTrackerExtractor:
           SELECT a.*, wi.well_location,
             COALESCE(ci.confirmed_input_ids, pci.confirmed_input_ids) AS confirmed_input_ids,
             sp.process_id IS NOT NULL AS protocol_has_success,
-            LAG(a.date_created) OVER (PARTITION BY a.process_id ORDER BY a.date_created) AS prev_operation_end,
+            LAG(a.step_ts) OVER (PARTITION BY a.process_id ORDER BY a.step_ts) AS prev_operation_end,
+            -- Deliberately still date_created: this is "how long the op waited
+            -- from creation to ready", a genuine queue measure, not a step time.
             TIMESTAMP_DIFF(a.date_ready, a.date_created, HOUR) AS ready_wait_hours,
-            ROW_NUMBER() OVER (PARTITION BY a.process_id, a.protocol_name ORDER BY a.date_created DESC) AS operation_rank
+            ROW_NUMBER() OVER (PARTITION BY a.process_id, a.protocol_name ORDER BY a.step_ts DESC) AS operation_rank
           FROM all_operations a
           LEFT JOIN successful_protocols sp
             ON a.process_id = sp.process_id AND a.protocol_name = sp.protocol_name
@@ -293,12 +321,12 @@ class OpTrackerExtractor:
         SELECT
           process_id, plan_id AS op_batch_id, operation_id, job_id,
           protocol_name, state AS operation_state,
-          date_created AS operation_start, date_ready AS operation_ready,
+          step_ts AS operation_start, date_ready AS operation_ready,
           ready_wait_hours,
-          LAG(date_created) OVER (PARTITION BY process_id ORDER BY date_ready) AS prev_operation_completed,
+          LAG(step_ts) OVER (PARTITION BY process_id ORDER BY date_ready) AS prev_operation_completed,
           TIMESTAMP_DIFF(
             date_ready,
-            LAG(date_created) OVER (PARTITION BY process_id ORDER BY date_ready),
+            LAG(step_ts) OVER (PARTITION BY process_id ORDER BY date_ready),
             HOUR
           ) AS tat_from_prev_hours,
           product, input_dna_plasmids, input_stock_wells,
@@ -311,7 +339,7 @@ class OpTrackerExtractor:
         WHERE state = 'SC'
            OR (state = 'FA' AND protocol_has_success = FALSE)
            OR state IN ('RD', 'RU')
-        ORDER BY process_id, date_created
+        ORDER BY process_id, step_ts
         """
 
         client = bigquery.Client(project=proj)

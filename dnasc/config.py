@@ -54,6 +54,25 @@ class PipelineConfig:
     DUE_DATES_QUOTA_PROJECT: str = ""
     DUE_DATES_CSV_FALLBACK: str = "due_dates/due_dates_override.csv"   # local Sheets fallback
 
+    # ── Op Tracker → bios cutover ─────────────────────────────────────────────
+    # The instant the legacy op_tracker Postgres stopped taking writes and bios
+    # became the live source (last legacy operation.date_created).
+    #
+    # This is load-bearing, not trivia. Legacy Django set auto_now=True on
+    # operation.date_created, so it was a LAST-MODIFIED stamp and read as "when
+    # this step ran". The bios models set it insert-only, so after this instant it
+    # means "when this step was QUEUED" — often weeks earlier than the job that
+    # executed it (job 9604: queued 08-11, job created 08-31, timeline printed
+    # 08/11). job.date_created is insert-only too and marks when the operator
+    # created the job, which is what a timeline step wants.
+    #
+    # Swapping wholesale is not safe: measured over 146k pre-cutover ops,
+    # job.date_created never equals operation.date_created exactly, and while the
+    # median gap is 0.0 min and 88.6-100% fall within 60s, the tail reaches 20
+    # days. So the timeline reads operation.date_created before this instant and
+    # job.date_created after it — history unchanged, new data correct.
+    BIOS_CUTOVER_TS: str = "2026-08-28 21:27:24"
+
     # ── LSP ───────────────────────────────────────────────────────────────────
     LSP_BLACKLIST: list[str] = ["LSP-7602"]
     LSP_CUTOFF_DATE: str = "2025-11-01"      # Secondary-pass identity recovery cutoff
