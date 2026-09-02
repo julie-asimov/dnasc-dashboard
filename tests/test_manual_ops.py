@@ -215,3 +215,67 @@ class TestSourceWellLinking:
         for t in ("streakout_operation", "transformation_offline_operation",
                   "optracker_operation"):
             assert t in block, f"the display block does not cover {t}"
+
+
+# ── strain read from the operation, not inherited (v1.11.93) ─────────────────
+class TestStrainInference:
+    """Julie: "this is weird how is this epi? i thought we were putting it in neb"
+    then "if the parent work order is epi and the glycerol says neb you know it's a
+    transformation ... so it's not unknown but a transformation workorder."
+
+    NEB_well2172126 displayed Strain: EPI400 because synthetic rows inherited
+    `src.get("cloning_strain")` from the parent workorder. Its own NGS results and
+    lims__src.strain.cell_strain both say NEBstable (8 wells each, for all three of
+    NEB_well2172126 / 2202611 / 2202668).
+    """
+
+    def test_strain_variants_are_the_same_cells(self):
+        """LIMS spells these several ways. Comparing raw would read as a strain
+        change and mislabel an ordinary streakout a transformation."""
+        from dnasc.transformers.repair import _norm_strain as n
+        for a, b in [("NEBstable", "NEB_STABLE"), ("NEBStable", "NEBSTBL"),
+                     ("NEB_10B", "NEB10beta"), ("EPI400", "EPI400")]:
+            assert n(a) == n(b), f"{a} vs {b}"
+
+    def test_a_real_strain_change_is_detected(self):
+        from dnasc.transformers.repair import _norm_strain as n
+        assert n("EPI400") != n("NEBstable")
+        assert n("STBL3") != n("EPI400")
+
+    def test_query_reads_cell_strain_per_process_not_per_well(self):
+        """Joining well_content directly gave 1.93 rows per process_id, and since the
+        caller keeps the first row a NULL-strain row could win and fall back to the
+        parent — the bug itself. The aggregate keeps it at 1.00."""
+        from pathlib import Path
+        import dnasc.transformers.repair as r
+        src = Path(r.__file__).read_text()
+        fn = src[src.index("def resolve_lims_streakouts"):]
+        fn = fn[:fn.index("\ndef ", 1)]
+        assert "own_cell_strain" in fn, "the query must return the operation's own strain"
+        assert "cell_strain" in fn
+        assert "ORDER BY n DESC, cell_strain" in fn, \
+            "the pick must be deterministic — 8 process_ids have wells that disagree"
+
+    def test_strain_change_forces_the_transformation_type(self):
+        from pathlib import Path
+        import dnasc.transformers.repair as r
+        src = Path(r.__file__).read_text()
+        fn = src[src.index("def resolve_lims_streakouts"):]
+        fn = fn[:fn.index("\ndef ", 1)]
+        assert "strain_changed" in fn
+        i = fn.index("if strain_changed:")
+        assert '"transformation_offline_operation"' in fn[i:i + 220], \
+            "a strain change must type the row as a transformation"
+
+    def test_the_row_reports_its_own_strain(self):
+        """cloning_strain must be what the material IS in, with the parent kept
+        separately rather than overwriting it."""
+        from pathlib import Path
+        import dnasc.transformers.repair as r
+        src = Path(r.__file__).read_text()
+        fn = src[src.index("def resolve_lims_streakouts"):]
+        fn = fn[:fn.index("\ndef ", 1)]
+        assert '"cloning_strain":        row_strain' in fn
+        assert '"parent_cloning_strain": parent_strain' in fn
+        assert "row_strain = own_strain or parent_strain" in fn, \
+            "fall back to the parent only when LIMS has no strain of its own"

@@ -943,6 +943,16 @@ _MANUAL_KIND_TO_TYPE: dict[str, str] = {
 }
 
 
+def _norm_strain(name: str) -> str:
+    """Compare strain names ignoring the spelling variants LIMS carries.
+
+    NEBstable / NEBStable / NEB_STABLE / NEB_STBL are the same cells; comparing them
+    raw would read as a strain change and mislabel a plain streakout a transformation.
+    """
+    n = "".join(ch for ch in str(name).upper() if ch.isalnum())
+    return {"NEBSTBL": "NEBSTABLE", "NEB10B": "NEB10BETA"}.get(n, n)
+
+
 def _manual_op_kind(process_id: str) -> str:
     """Classify a LIMS manual process_id. Returns a key of _MANUAL_KIND_TO_TYPE.
 
@@ -1002,8 +1012,35 @@ def resolve_lims_streakouts(
             SELECT DISTINCT
                 w.process_id AS streak_process_id,
                 COALESCE(ps.process_id, s.process_id, src_well.process_id)
-                    AS source_workorder_id
+                    AS source_workorder_id,
+                own_strain.cell_strain AS own_cell_strain
             FROM `{project_id}.lims__src.well` w
+            -- The strain of the material THIS operation produced, from its own
+            -- wells. Julie's rule: parent EPI400 + this operation's glycerol
+            -- NEBstable means a transformation happened. Reading the parent's
+            -- cloning_strain instead showed NEB_well2172126 as EPI400 while its own
+            -- NGS results said NEBstable.
+            --
+            -- Aggregated per process_id, NOT joined per well. Joining well_content
+            -- directly nearly doubled the rows (1.93 per process_id), and since the
+            -- caller keeps the first row per process_id a NULL-strain row could win
+            -- and silently fall back to the parent — the exact bug being fixed. 8
+            -- process_ids have wells that disagree on strain, so the pick is
+            -- deterministic: most common first, then alphabetical.
+            LEFT JOIN (
+                SELECT pid, ARRAY_AGG(cell_strain ORDER BY n DESC, cell_strain
+                                      LIMIT 1)[OFFSET(0)] AS cell_strain
+                FROM (
+                    SELECT w2.process_id AS pid, s2.cell_strain, COUNT(*) AS n
+                    FROM `{project_id}.lims__src.well` w2
+                    JOIN `{project_id}.lims__src.well_content` wc2 ON wc2.well_id = w2.id
+                    JOIN `{project_id}.lims__src.strain` s2 ON s2.id = wc2.strain_id
+                    WHERE REGEXP_CONTAINS(w2.process_id, r'(?i)well[0-9]+')
+                      AND s2.cell_strain IS NOT NULL
+                    GROUP BY 1, 2
+                )
+                GROUP BY pid
+            ) own_strain ON own_strain.pid = w.process_id
             JOIN `{project_id}.lims__src.well` src_well
                 ON src_well.id =
                    SAFE_CAST(REGEXP_EXTRACT(w.process_id, r'well(\\d+)') AS INT64)
@@ -1048,6 +1085,25 @@ def resolve_lims_streakouts(
 
         kind      = _manual_op_kind(pid)
         proc_type = _MANUAL_KIND_TO_TYPE[kind]
+
+        # A strain CHANGE is positive evidence of a transformation, and it beats
+        # guessing from the id text. Julie: "if the parent work order is epi and the
+        # glycerol says neb you know it's a transformation ... so it's not unknown
+        # but a transformation workorder."
+        own_strain = row.get("own_cell_strain")
+        own_strain = None if own_strain is None or str(own_strain).strip() in ("", "nan", "None") \
+                     else str(own_strain).strip()
+        parent_strain = src.get("cloning_strain")
+        parent_strain = None if parent_strain is None or str(parent_strain).strip() in ("", "nan", "None") \
+                        else str(parent_strain).strip()
+        strain_changed = bool(own_strain and parent_strain and
+                              _norm_strain(own_strain) != _norm_strain(parent_strain))
+        if strain_changed:
+            proc_type = "transformation_offline_operation"
+            kind = "TFX"
+
+        # Report the strain the material IS in, not the one it came from.
+        row_strain = own_strain or parent_strain
         synthetic_rows.append({
             "workorder_id":          pid,
             "type":                  proc_type,
@@ -1074,8 +1130,10 @@ def resolve_lims_streakouts(
             "fulfills_request":      False,
             "deleted_at":            None,
             "is_fulfillment":        False,
-            "cloning_strain":        src.get("cloning_strain"),
+            "cloning_strain":        row_strain,
             "manual_op_kind":        kind,
+            "parent_cloning_strain": parent_strain,
+            "strain_changed":        strain_changed,
         })
         log.debug("resolve_lims_streakouts: %s [%s] → %s", pid, kind, source_wo)
 
