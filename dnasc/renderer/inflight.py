@@ -33,8 +33,10 @@ _DTYPE_LABEL = {
     'transformation_offline_operation': 'Transformation',
     'lsp_workorder':                    'LSP',
     'streakout_operation':              'Streakout',
-    # Manual ops with no OpTracker job of their own — repicks, refills,
-    # innoculations, glycerol checks. Had no label at all before v1.11.88.
+    # Found only in LIMS, no job of its own — so by definition not in OpTracker,
+    # i.e. done by hand, not software aided. Picks, refills, innoculations,
+    # glycerol checks. Short form of dashboard.py's "Manual Operation"; keep the
+    # two in step (they said "Optracker Operation" and "Manual Op" for a while).
     'optracker_operation':              'Manual Op',
     'pcr_workorder':                    'PCR',
     'oligo_synthesis_workorder':        'Oligo',

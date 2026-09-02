@@ -424,8 +424,24 @@ def render_all_projects_dashboard(
             if op['state'] == 'Running': return f"{op['queue']}: Running"
         return None
 
+    # Types whose generic title-cased form misnames the thing.
+    #
+    # `optracker_operation` is the catch-all for an operation found only in LIMS (a
+    # `well<id>` in the process_id, no job of its own). "Optracker Operation" was
+    # backwards: these are precisely the ones NOT in OpTracker. Julie's rule — if
+    # it is not in OpTracker then it is manual, i.e. not software aided — so the
+    # label states that, and NOT "unknown": every kind that lands here is
+    # identified (PICK / REFILL / INNOC / GLYCEROL_CHECK / EXT, see repair.py
+    # _MANUAL_KIND_TO_TYPE). The ones that are transformations or streakouts are
+    # typed as those instead and never reach this label.
+    _TYPE_LABEL_OVERRIDES = {
+        'optracker_operation': 'Manual Operation',
+    }
+
     def format_type_label(type_str):
         """Format workorder type with proper capitalization"""
+        if type_str in _TYPE_LABEL_OVERRIDES:
+            return _TYPE_LABEL_OVERRIDES[type_str]
         label = type_str.replace('_workorder', '').replace('_', ' ').title()
         # Fix specific capitalizations
         label = label.replace('Lsp', 'LSP').replace('Pcr', 'PCR').replace('Ngs', 'NGS')
@@ -2345,7 +2361,20 @@ def render_all_projects_dashboard(
                 extra_tag = ""
                 if row['type'] == 'streakout_operation': extra_tag = '<span class="source-badge">Offline Streakout</span>'
                 elif row['type'] == 'transformation_offline_operation':
-                    if 'STBL3' in suffix: extra_tag = '<span class="source-badge">STBL3 Offline</span>'
+                    # Prefer the strain LIMS records for this operation's own
+                    # material. `suffix` is derived by string-matching 'stbl3' /
+                    # 'epi400' in the PARENT's id text, so a row whose parent is a
+                    # plain UUID never matched and fell through to the generic
+                    # badge — NEB_well2172126 read "Offline Trans" while its
+                    # glycerol was NEBstable. cloning_strain now carries the real
+                    # strain (v1.11.93), so read it and keep the text-matching only
+                    # as a fallback for rows LIMS has no strain for.
+                    _ostrain = row.get('cloning_strain')
+                    _ostrain = '' if _ostrain is None or (isinstance(_ostrain, float) and pd.isna(_ostrain)) \
+                               else str(_ostrain).strip()
+                    if _ostrain and _ostrain.lower() not in ('nan', 'none'):
+                        extra_tag = f'<span class="source-badge">{_ostrain} Offline</span>'
+                    elif 'STBL3' in suffix: extra_tag = '<span class="source-badge">STBL3 Offline</span>'
                     elif 'EPI400' in suffix: extra_tag = '<span class="source-badge">EPI400 Offline</span>'
                     else: extra_tag = '<span class="source-badge">Offline Trans</span>'
                 elif row['type'] in ['lsp_workorder', 'transformation_workorder']:

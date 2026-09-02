@@ -279,3 +279,119 @@ class TestStrainInference:
         assert '"parent_cloning_strain": parent_strain' in fn
         assert "row_strain = own_strain or parent_strain" in fn, \
             "fall back to the parent only when LIMS has no strain of its own"
+
+
+class TestDisplayLabels:
+    """v1.11.94 — what these rows are CALLED.
+
+    Julie, on a manual op reading "Optracker Operation": if it is not in OpTracker
+    then it is manual — not software aided. Backwards AND overclaiming: these are
+    exactly the ops NOT in OpTracker. Not "unknown" either — every kind landing in
+    the catch-all is identified (PICK/REFILL/INNOC/GLYCEROL_CHECK/EXT); the ones
+    that are transformations or streakouts are typed as those. And on the
+    offline-transformation badge: keep the
+    transformation_offline_operation type (it already exists with its own
+    badges) rather than promoting these rows to transformation_workorder,
+    which would make a bench op with no workorder behind it indistinguishable
+    from the ~2,700 real ones.
+
+    So: a strain change -> transformation_offline_operation, badged with the real
+    strain; everything else manual -> "Manual Operation".
+    """
+
+    @staticmethod
+    def _src(mod):
+        from pathlib import Path
+        return Path(mod.__file__).read_text()
+
+    def test_dashboard_labels_it_manual_not_optracker(self):
+        """Not in OpTracker => manual. The label must not name the plumbing, and
+        must not claim we do not know what happened."""
+        from dnasc.renderer import dashboard as d
+        src = self._src(d)
+        assert "'optracker_operation': 'Manual Operation'" in src
+        assert "_TYPE_LABEL_OVERRIDES" in src
+        assert "Unknown Operation" not in src, \
+            "these ops are identified by kind, not unknown"
+
+    def test_the_override_is_consulted_before_the_generic_titlecase(self):
+        """An override map that format_type_label never reads is decoration."""
+        from dnasc.renderer import dashboard as d
+        src = self._src(d)
+        i = src.index("def format_type_label(")
+        body = src[i:src.index("\n    #", i + 1)]
+        assert "_TYPE_LABEL_OVERRIDES" in body, \
+            "format_type_label must consult the override map"
+        assert body.index("_TYPE_LABEL_OVERRIDES") < body.index(".title()"), \
+            "the override must win over the generic title-casing"
+
+    def test_inflight_agrees_with_the_dashboard(self):
+        """Two tabs labelling the same type two different things is how 'Manual Op'
+        and 'Optracker Operation' coexisted. Short form, same word."""
+        from dnasc.renderer import inflight as f
+        assert f._DTYPE_LABEL['optracker_operation'] == 'Manual Op'
+        assert 'Unknown' not in self._src(f)
+
+    def test_offline_transformation_keeps_its_own_type(self):
+        """Julie's decision: do NOT retype these as transformation_workorder."""
+        from dnasc.renderer import inflight as f
+        from dnasc.transformers import repair as r
+        assert 'transformation_offline_operation' in f._DTYPE_LABEL
+        assert set(r._MANUAL_KIND_TO_TYPE.values()) <= {
+            'streakout_operation', 'transformation_offline_operation',
+            'optracker_operation',
+        }, "a manual op must never be typed as a real BIOS workorder"
+        assert 'transformation_workorder' not in set(r._MANUAL_KIND_TO_TYPE.values())
+
+    def test_the_badge_reads_the_strain_not_the_parent_id_text(self):
+        """The badge string-matched 'epi400'/'stbl3' in the PARENT's id, so a row
+        whose parent is a UUID fell through to a generic badge — NEB_well2172126
+        showed "Offline Trans" while its glycerol was NEBstable. cloning_strain now
+        carries the real strain, so read it."""
+        from dnasc.renderer import dashboard as d
+        src = self._src(d)
+        i = src.index("elif row['type'] == 'transformation_offline_operation':")
+        block = src[i:i + 1400]
+        assert "row.get('cloning_strain')" in block, \
+            "the badge must read the strain, not infer it from the parent's id text"
+        assert block.index("cloning_strain") < block.index("'STBL3' in suffix"), \
+            "the strain must be preferred over the id-text fallback"
+        assert "Offline</span>" in block
+
+    def test_the_badge_never_prints_a_missing_strain(self):
+        """cloning_strain is NaN/None for rows LIMS has no strain for; those must
+        fall back, not render "nan Offline"."""
+        from dnasc.renderer import dashboard as d
+        src = self._src(d)
+        i = src.index("elif row['type'] == 'transformation_offline_operation':")
+        block = src[i:i + 1400]
+        assert "pd.isna" in block
+        assert "'nan'" in block and "'none'" in block, \
+            "guard the string forms too — astype(str) on a NaN gives 'nan'"
+
+
+    def test_the_catch_all_holds_no_transformation_or_streakout_kind(self):
+        """What "Manual Operation" is allowed to cover. A kind that IS a
+        transformation or a streakout must be typed as one, or the manual label
+        starts absorbing things we can name — which is what sent 11 PARTNER_TFX
+        and 1 SUB_NEBStable row to the catch-all before v1.11.88."""
+        from dnasc.transformers import repair as r
+        catch_all = {k for k, v in r._MANUAL_KIND_TO_TYPE.items()
+                     if v == 'optracker_operation'}
+        assert catch_all == {'PICK', 'REFILL', 'INNOC', 'GLYCEROL_CHECK',
+                             'EXT', 'OTHER'}, catch_all
+        for kind in ('TFX', 'SUBCULTURE', 'STRAIN'):
+            assert r._MANUAL_KIND_TO_TYPE[kind] == 'transformation_offline_operation'
+        assert r._MANUAL_KIND_TO_TYPE['STREAK'] == 'streakout_operation'
+
+    def test_the_real_prefixes_seen_in_the_data_all_resolve(self):
+        """The three prefixes actually present, measured 2026-09-02. None is
+        unknown; only the pick belongs in the manual catch-all."""
+        from dnasc.transformers import repair as r
+        for pid, kind, typ in [
+            ('PARTNER_TFX_2026Aug31_well2202668', 'TFX', 'transformation_offline_operation'),
+            ('SUB_NEBStable_11May2026_well1745459', 'SUBCULTURE', 'transformation_offline_operation'),
+            ('PICK_25Aug26_well2156655', 'PICK', 'optracker_operation'),
+        ]:
+            assert r._manual_op_kind(pid) == kind, pid
+            assert r._MANUAL_KIND_TO_TYPE[r._manual_op_kind(pid)] == typ, pid
