@@ -3000,6 +3000,27 @@ def render_all_projects_dashboard(
                 elif row['type'] in ['golden_gate_workorder', 'gibson_workorder', 'transformation_workorder', 'transformation_offline_operation', 'streakout_operation', 'optracker_operation']:
                     strain = row.get('cloning_strain')
                     if pd.notna(strain): details_info.append(f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>Strain: {strain}</div>")
+                    # Manual operations name their well in their own id
+                    # (PARTNER_STREAK_26AUG26_well2170110). 228 such rows showed no
+                    # location at all while ordinary rows showed theirs; the well was
+                    # always resolvable in LIMS, nothing read it. Position is LIMS
+                    # numbering (position+1) so it matches what LIMS displays.
+                    _swl = row.get('source_well_location')
+                    if _swl is not None and not (isinstance(_swl, float) and pd.isna(_swl)) \
+                       and str(_swl).strip() not in ('', 'nan', 'None'):
+                        _swid = row.get('source_well_id')
+                        _swpos = row.get('source_well_position')
+                        _sw_txt = str(_swl)
+                        if _swid is not None and not (isinstance(_swid, float) and pd.isna(_swid)):
+                            _sw_txt = (f'<a href="https://bios.asimov.io/inventory/wells/{int(_swid)}"'
+                                       f' target="_blank" style="color:#64748b;text-decoration:underline;">'
+                                       f'{_swl}</a>')
+                        _pos_txt = ''
+                        if _swpos is not None and not (isinstance(_swpos, float) and pd.isna(_swpos)):
+                            _pos_txt = f' &middot; pos {int(_swpos)}'
+                        details_info.append(
+                            f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>"
+                            f"From: {_sw_txt}{_pos_txt}</div>")
                     _ab = row.get('antibiotic')
                     _ab_str = str(_ab).strip() if (_ab is not None and not (isinstance(_ab, float) and pd.isna(_ab)) and str(_ab).strip() not in ('', 'nan', 'None')) else ''
                     if _ab_str:

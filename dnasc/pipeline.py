@@ -17,6 +17,7 @@ from google.cloud import bigquery
 from dnasc.config import PipelineConfig
 from dnasc.logger import get_logger
 from dnasc import protocols as proto
+from dnasc import wells
 from dnasc.extractors import (
     BIOSExtractor,
     LSPExtractor,
@@ -358,6 +359,7 @@ def run_pipeline() -> pd.DataFrame:
             )
 
     final_df = _attach_lsp_order_index(final_df, lsp_idx_df)
+    final_df = _attach_source_well_location(final_df)
     _step_times["9-merges"] = time.time() - t
     log.info("Final merges complete in %.2fs", _step_times["9-merges"])
 
@@ -796,6 +798,67 @@ def _detect_colony_repicks(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[mask, "visual_status"]      = "RUNNING"
 
     return df
+
+
+def _attach_source_well_location(final_df: pd.DataFrame) -> pd.DataFrame:
+    """Fill in the physical well a manual operation was performed on.
+
+    228 rows carry the well in their own id — PARTNER_STREAK_26AUG26_well2170110,
+    PARTNER_TFX_2026Aug31_well2202668, refill_well2098847 — yet showed no location at
+    all, while ordinary rows show theirs (AgarPlate 16732 - A4). All 222 distinct
+    wells resolve in LIMS, so the information was there the whole time; nothing read
+    it.
+
+    Deliberately a SCALAR column, not `well_location`. That one is a list running
+    parallel to the ops list (one entry per operation), and a streakout's source well
+    is a property of the ROW, not of any single step — writing a bare string into it
+    would misalign parse_pipeline_operations. Coordinates come from dnasc/wells.py;
+    `source_well_position` is LIMS numbering (position+1), never the raw 0-based value.
+    """
+    for _col in ("source_well_id", "source_well_location", "source_well_position"):
+        if _col not in final_df.columns:
+            final_df[_col] = None
+
+    wid = final_df["workorder_id"].astype(str)
+    well_ids = wid.str.extract(r"well(\d+)", flags=re.I, expand=False)
+    have = well_ids.notna()
+    if not have.any():
+        log.info("No workorder ids carry a well reference — nothing to link")
+        return final_df
+
+    ids = sorted({int(x) for x in well_ids[have]})
+    coord = wells.sql_coord("w.position", "pl.well_count")
+    try:
+        client = bigquery.Client(project=PipelineConfig.PROJECT_ID)
+        loc_df = client.query(f"""
+            SELECT w.id AS _swid,
+                   CONCAT(COALESCE(pl.barcode, CONCAT('Plate', CAST(pl.id AS STRING))),
+                          '-', {coord}) AS _loc,
+                   w.position + 1 AS _pos
+            FROM `{PipelineConfig.PROJECT_ID}.lims__src.well` w
+            JOIN `{PipelineConfig.PROJECT_ID}.lims__src.plate` pl ON pl.id = w.plate_id
+            WHERE w.id IN ({",".join(str(i) for i in ids)})
+        """).to_dataframe()
+    except Exception as exc:
+        log.warning("Source-well lookup failed (%s) — rows keep a blank location", exc)
+        return final_df
+
+    if loc_df.empty:
+        log.info("Source-well lookup returned nothing for %d well id(s)", len(ids))
+        return final_df
+
+    by_id = loc_df.set_index("_swid")
+    swid = pd.to_numeric(well_ids, errors="coerce")
+    final_df.loc[have, "source_well_id"] = swid[have].astype("Int64")
+    final_df.loc[have, "source_well_location"] = swid[have].map(by_id["_loc"])
+    final_df.loc[have, "source_well_position"] = swid[have].map(by_id["_pos"])
+
+    filled = final_df["source_well_location"].notna().sum()
+    log.info(
+        "Source well linked for %d of %d row(s) carrying a well reference (%d wells)",
+        filled, int(have.sum()), len(loc_df),
+    )
+    return final_df
 
 
 def _attach_lsp_order_index(

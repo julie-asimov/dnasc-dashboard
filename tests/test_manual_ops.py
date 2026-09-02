@@ -154,3 +154,64 @@ def test_discovery_is_structural_not_a_keyword_list():
         assert re.search(r"well\[0-9\]\+|well\\\\?d\+", pred), (
             f"discovery predicate no longer matches well<id>: {pred!r}"
         )
+
+
+# ── source well linking (v1.11.92) ───────────────────────────────────────────
+class TestSourceWellLinking:
+    """228 rows name their well in their own id yet showed no location, while
+    ordinary rows showed theirs. All 222 distinct wells resolve in LIMS — the
+    information was always there, nothing read it.
+
+    Confirmed against LIMS: well 2202668 is plate17051, "59 - C8".
+    """
+
+    def test_extracts_the_well_id_from_every_real_shape(self):
+        import re
+        shapes = {
+            "PARTNER_STREAK_26AUG26_well2170110": "2170110",
+            "PARTNER_TFX_2026Aug31_well2202668":  "2202668",
+            "REFILL_STREAK_07Jan2026_well1583422": "1583422",
+            "refill_well2098847":                 "2098847",
+            "STREAK_well1689712":                 "1689712",
+            "well17882":                          "17882",
+            "SUB_10beta_29Aug26_well123_Soyagar": "123",
+        }
+        for pid, expected in shapes.items():
+            m = re.search(r"well(\d+)", pid, flags=re.I)
+            assert m and m.group(1) == expected, pid
+
+    def test_ignores_ids_with_no_well_reference(self):
+        import re
+        for pid in ("c0d78d82-2e08-404c-841c-128db81a17d4", "LSP-11810", "NEBstable_abc"):
+            assert re.search(r"well(\d+)", pid, flags=re.I) is None, pid
+
+    def test_position_shown_is_lims_numbering(self):
+        """Julie: "I do not want to see position 58 -> C8, the position is 59."
+        The column carries position+1, and the coordinate comes from wells.py."""
+        from dnasc import wells
+        assert wells.coord(58, 96) == "C8"
+        assert wells.lims_number(58) == 59
+
+    def test_is_a_scalar_column_not_the_ops_list(self):
+        """`well_location` is a LIST parallel to the ops list. A source well is a
+        property of the ROW, so writing a bare string into well_location would
+        misalign parse_pipeline_operations."""
+        from pathlib import Path
+        import dnasc.pipeline as pl
+        src = Path(pl.__file__).read_text()
+        fn = src[src.index("def _attach_source_well_location"):]
+        fn = fn[:fn.index("\ndef ", 1)]
+        assert "source_well_location" in fn
+        assert '"well_location"' not in fn and "'well_location'" not in fn, \
+            "must not write into the parallel ops list"
+
+    def test_renderer_displays_it_for_the_manual_types(self):
+        from pathlib import Path
+        from dnasc.renderer import dashboard as d
+        src = Path(d.__file__).read_text()
+        assert "source_well_location" in src, "renderer never reads the column"
+        i = src.index("source_well_location")
+        block = src[max(0, i - 2500):i]
+        for t in ("streakout_operation", "transformation_offline_operation",
+                  "optracker_operation"):
+            assert t in block, f"the display block does not cover {t}"
