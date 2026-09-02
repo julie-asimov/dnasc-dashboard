@@ -1094,6 +1094,45 @@ def resolve_lims_streakouts(
 # Module-level function (called from pipeline.py after populate_synthetic_optracker_batch)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _narrow_to_own_well(cand: pd.DataFrame) -> pd.DataFrame:
+    """Collapse a plate-level (well, workorder) cross product to well-level truth.
+
+    A plate carries material from many workorders, so merging every well on a plate
+    against every workorder on that plate is a cross product: 96 wells x 11
+    workorders. One downstream op then resolves to all 11, and each row shows all of
+    everyone's operations. Measured 2026-09-01: 52 queued `Rearray 96 to 384` ops
+    existed in total, yet the dashboard carried 624 (row, op) pairs for them —
+    12x inflation, all of it on 11 PARTNER_TFX_2026Aug31_* rows showing 52 ops each
+    where 4 were theirs. Plate 17345 holds 13 distinct process_ids at exactly 4
+    wells each.
+
+    Three cases, and the distinction between the last two is the point:
+
+      own_wid names one of the plate's workorders -> keep ONLY that pairing
+      own_wid names something else                -> keep NOTHING; the well
+                                                     demonstrably belongs elsewhere
+      own_wid is NULL                             -> keep every plate-level pairing;
+                                                     LIMS does not know, so fall back
+
+    A well attributed to another owner is positive evidence of non-membership. NULL is
+    merely absence of evidence. Treating them alike left 8 spurious ops per row: plate
+    17345 carries 13 process_ids at 4 wells each, and the 2 that are not among the 11
+    rows fell through the fallback onto all of them. Measured on the 52 queued
+    Rearray ops: 52 ops per row -> 12 when both cases fell back, -> 4 once separated.
+
+    Strictly a narrowing either way: it can drop a pair, never invent one. The 52
+    ngs_workorder rows that already resolved to exactly one op each are untouched,
+    which is the check that this matches the paths that were already right.
+    """
+    if cand.empty or 'own_wid' not in cand.columns:
+        return cand[['well_id', 'workorder_id']].drop_duplicates() if not cand.empty else cand
+    own = cand['own_wid'].astype(str)
+    known = cand['own_wid'].notna() & ~own.isin(['', 'nan', 'None'])
+    exact = known & (own == cand['workorder_id'].astype(str))
+    kept = cand[exact | ~known]
+    return kept[['well_id', 'workorder_id']].drop_duplicates()
+
+
 def resolve_downstream_plates(
     final_df: pd.DataFrame,
     project_id: str = PipelineConfig.PROJECT_ID,
@@ -1216,10 +1255,18 @@ def resolve_downstream_plates(
     # Single LIMS query for all plates (miniprep + downstream)
     all_plate_ids = list(set(plate_ids) | set(downstream_plate_wid_df['plate_id_str'].tolist()))
     all_plate_ids_str = ','.join(all_plate_ids)
+    # own_wid = the workorder this individual well actually belongs to, from LIMS.
+    # Needed because a plate can carry material from many workorders, and mapping
+    # by plate alone cannot tell them apart. Same COALESCE resolve_lims_streakouts
+    # uses. NULL for wells LIMS does not attribute.
     all_wells_df = client.query(f"""
-        SELECT id AS well_id, plate_id
-        FROM `{project_id}.lims__src.well`
-        WHERE plate_id IN ({all_plate_ids_str})
+        SELECT w.id AS well_id, w.plate_id,
+               COALESCE(ps.process_id, s.process_id, w.process_id) AS own_wid
+        FROM `{project_id}.lims__src.well` w
+        LEFT JOIN `{project_id}.lims__src.well_content` wc ON wc.well_id = w.id
+        LEFT JOIN `{project_id}.lims__src.plasmid_stock` ps ON ps.id = wc.plasmid_stock_id
+        LEFT JOIN `{project_id}.lims__src.strain` s ON s.id = wc.strain_id
+        WHERE w.plate_id IN ({all_plate_ids_str})
     """).to_dataframe()
 
     if all_wells_df.empty:
@@ -1233,18 +1280,18 @@ def resolve_downstream_plates(
     downstream_plate_set = set(downstream_plate_wid_df['plate_id_str'].tolist())
 
     well_to_plate = all_wells_df[all_wells_df['plate_id_str'].isin(miniprep_plate_set)]
-    well_wid_df = well_to_plate.merge(
+    well_wid_df = _narrow_to_own_well(well_to_plate.merge(
         plate_wid_df.rename(columns={'_miniprep_plate_id': 'plate_id_str'}),
         on='plate_id_str', how='inner'
-    )[['well_id', 'workorder_id']].drop_duplicates()
+    ))
 
     downstream_well_wid_df = pd.DataFrame(columns=['well_id', 'workorder_id'])
     if not downstream_plate_wid_df.empty:
         ds_wells = all_wells_df[all_wells_df['plate_id_str'].isin(downstream_plate_set)]
         if not ds_wells.empty:
-            downstream_well_wid_df = ds_wells.merge(
+            downstream_well_wid_df = _narrow_to_own_well(ds_wells.merge(
                 downstream_plate_wid_df, on='plate_id_str', how='inner'
-            )[['well_id', 'workorder_id']].drop_duplicates()
+            ))
 
     # ── STEP 4: Reverse-lookup OpTracker jobs touching those wells ────────────
     # Date filter avoids scanning all historical ops — only fetch from pipeline cutoff.

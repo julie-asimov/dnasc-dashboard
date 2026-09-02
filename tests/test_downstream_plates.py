@@ -202,3 +202,93 @@ class TestEndToEnd:
             result = resolve_downstream_plates(df, project_id='test-proj')
         pnames_gg2 = result[result['workorder_id'] == 'gg-002'].iloc[0]['protocol_name']
         assert proto.NGS not in (pnames_gg2 if isinstance(pnames_gg2, list) else [])
+
+
+# ── well-level attribution (v1.11.91) ────────────────────────────────────────
+class TestNarrowToOwnWell:
+    """A plate carries material from many workorders, so merging every well on a
+    plate against every workorder on that plate is a cross product. One downstream
+    op then resolves to all of them and each row shows everyone's operations.
+
+    Measured 2026-09-01: 52 queued `Rearray 96 to 384` ops existed in total, yet the
+    dashboard carried 624 (row, op) pairs — 12x inflation, all of it on 11
+    PARTNER_TFX_2026Aug31_* rows showing 52 ops each. Plate 17345 holds 13 distinct
+    process_ids at exactly 4 wells each. After narrowing: 572 -> 44 pairs, 4 ops per
+    row, and 44 + 8 (the 2 process_ids not among those rows) = 52 — every op
+    attributed exactly once.
+    """
+
+    @staticmethod
+    def _cand(rows):
+        import pandas as pd
+        return pd.DataFrame(rows)
+
+    def test_own_well_wins(self):
+        from dnasc.transformers.repair import _narrow_to_own_well
+        out = _narrow_to_own_well(self._cand([
+            {"well_id": 1, "workorder_id": "WO-A", "own_wid": "WO-A"},
+            {"well_id": 1, "workorder_id": "WO-B", "own_wid": "WO-A"},
+        ]))
+        assert set(map(tuple, out.values)) == {(1, "WO-A")}
+
+    def test_unknown_owner_falls_back_to_plate_level(self):
+        """own_wid NULL is absence of evidence — keep the old behaviour."""
+        from dnasc.transformers.repair import _narrow_to_own_well
+        out = _narrow_to_own_well(self._cand([
+            {"well_id": 2, "workorder_id": "WO-A", "own_wid": None},
+            {"well_id": 2, "workorder_id": "WO-B", "own_wid": None},
+        ]))
+        assert set(map(tuple, out.values)) == {(2, "WO-A"), (2, "WO-B")}
+
+    def test_another_owner_drops_the_well_entirely(self):
+        """This is the distinction that took 52 -> 12 down to 52 -> 4. A well
+        attributed to someone NOT on this plate map is positive evidence of
+        non-membership, unlike NULL."""
+        from dnasc.transformers.repair import _narrow_to_own_well
+        out = _narrow_to_own_well(self._cand([
+            {"well_id": 3, "workorder_id": "WO-A", "own_wid": "WO-ELSEWHERE"},
+            {"well_id": 3, "workorder_id": "WO-B", "own_wid": "WO-ELSEWHERE"},
+        ]))
+        assert len(out) == 0
+
+    def test_junk_owner_strings_count_as_unknown(self):
+        from dnasc.transformers.repair import _narrow_to_own_well
+        for junk in ("nan", "None", ""):
+            out = _narrow_to_own_well(self._cand([
+                {"well_id": 4, "workorder_id": "WO-A", "own_wid": junk},
+                {"well_id": 4, "workorder_id": "WO-B", "own_wid": junk},
+            ]))
+            assert len(out) == 2, f"{junk!r} should be treated as unknown"
+
+    def test_never_invents_a_pair(self):
+        """Strictly a narrowing — the output must be a subset of the input."""
+        from dnasc.transformers.repair import _narrow_to_own_well
+        cand = self._cand([
+            {"well_id": i, "workorder_id": w, "own_wid": o}
+            for i, o in [(1, "WO-A"), (2, None), (3, "WO-X")]
+            for w in ("WO-A", "WO-B", "WO-C")
+        ])
+        before = set(map(tuple, cand[["well_id", "workorder_id"]].values))
+        after = set(map(tuple, _narrow_to_own_well(cand).values))
+        assert after <= before
+
+    def test_empty_and_missing_column_are_safe(self):
+        import pandas as pd
+        from dnasc.transformers.repair import _narrow_to_own_well
+        assert _narrow_to_own_well(pd.DataFrame(
+            columns=["well_id", "workorder_id", "own_wid"])).empty
+        # no own_wid column at all -> unchanged plate-level behaviour
+        out = _narrow_to_own_well(pd.DataFrame(
+            [{"well_id": 1, "workorder_id": "WO-A"}]))
+        assert len(out) == 1
+
+    def test_both_maps_use_the_helper(self):
+        """well_wid_df and downstream_well_wid_df must both be narrowed, and the
+        LIMS query must select own_wid or the helper silently no-ops."""
+        from pathlib import Path
+        import dnasc.transformers.repair as r
+        src = Path(r.__file__).read_text()
+        assert src.count("_narrow_to_own_well(") >= 3, \
+            "expected the helper defined once and applied to both well maps"
+        assert "AS own_wid" in src, \
+            "the LIMS well query must select own_wid, else narrowing no-ops"
