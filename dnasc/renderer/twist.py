@@ -28,6 +28,7 @@ import html
 import json
 import os
 import pickle
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
@@ -72,6 +73,26 @@ def _d(s) -> str:
 
 def _badge(text, tone="grey") -> str:
     return f'<span class="bdg {tone}">{_esc(text)}</span>'
+
+
+# Twist hands back an EasyPost tracking link, which is their relabelled view of the carrier's
+# data — a scan or two behind, and with none of the delivery controls. Send the tracking number
+# to the carrier's own page instead, and keep EasyPost only as the fallback for a carrier we
+# have not mapped (better a working link than none).
+_CARRIER_TRACK = {
+    "ups": "https://www.ups.com/track?loc=en_US&tracknum={}",
+    "fedex": "https://www.fedex.com/fedextrack/?trknbr={}",
+    "usps": "https://tools.usps.com/go/TrackConfirmAction?tLabels={}",
+    "dhl": "https://www.dhl.com/en/express/tracking.html?AWB={}",
+    "dhl_express": "https://www.dhl.com/en/express/tracking.html?AWB={}",
+}
+
+
+def _track_url(carrier: str, tracking: str, fallback: str) -> str:
+    tpl = _CARRIER_TRACK.get(str(carrier or "").strip().lower())
+    if tpl and tracking:
+        return tpl.format(quote(str(tracking).strip(), safe=""))
+    return fallback or ""
 
 
 # ── row model ─────────────────────────────────────────────────────────────────
@@ -207,7 +228,7 @@ def _ship_cell(r: dict, want: tuple, maps: dict) -> str:
             continue
         carrier = (s.get("carrier") or "").upper()
         trk = s.get("tracking_number") or ""
-        url = s.get("tracking_url") or ""
+        url = _track_url(s.get("carrier"), trk, s.get("tracking_url") or "")
         link = (f'<a href="{_esc(url)}" target="_blank" rel="noopener" class="trk">{_esc(trk)}</a>'
                 if url and trk else _esc(trk))
         det = (s.get("status_detail") or {})
