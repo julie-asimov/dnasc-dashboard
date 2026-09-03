@@ -132,6 +132,49 @@ def _pipeline_parts(parquet: str) -> tuple[dict, set]:
 
 
 # ── Twist side ────────────────────────────────────────────────────────────────
+# The orders endpoint 500s occasionally. It used to raise straight out of the pull, so one
+# transient blip on page 1 discarded the whole run — observed 2026-09-03 on a forced refresh,
+# where the identical request succeeded on the retry from another host moments later. At ~75 s
+# a page, a run is far too expensive to throw away over a vendor hiccup.
+_RETRIES = 3
+_RETRY_WAIT = 20        # seconds; the API is slow enough that a tight retry helps nobody
+_RETRY_ON = (500, 502, 503, 504)
+
+
+def _get_page_with_retry(url, jwt, eut, page, left):
+    """One page of the orders list, retried on 5xx and transport errors.
+
+    Returns the response, or None if every attempt failed (or the budget ran out mid-way).
+    Auth failures are NOT retried — a stale token will not fix itself, and burning the budget
+    on three identical 401s only delays the real message.
+    """
+    for attempt in range(1, _RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=_headers(jwt, eut),
+                                timeout=min(_TIMEOUT, max(30, int(left()))), params={
+                "page_size": _PAGE_SIZE, "sort_by": "received_date",
+                "reverse": "true", "page": page,
+            })
+            if resp.status_code == 200:
+                return resp
+            if resp.status_code not in _RETRY_ON:
+                resp.raise_for_status()
+                return resp
+            why = f"HTTP {resp.status_code}"
+        except requests.RequestException as e:
+            if getattr(getattr(e, "response", None), "status_code", None) not in (None,) + _RETRY_ON:
+                raise
+            why = f"{type(e).__name__}"
+
+        if attempt == _RETRIES or left() < _PAGE_COST + _RETRY_WAIT:
+            print(f"    page {page}: {why} — giving up after {attempt} attempt(s)", flush=True)
+            return None
+        print(f"    page {page}: {why} — retrying in {_RETRY_WAIT}s "
+              f"({attempt}/{_RETRIES})", flush=True)
+        time.sleep(_RETRY_WAIT)
+    return None
+
+
 def _fetch_orders_window(email, jwt, eut, want: set, days: int, max_pages: int, left):
     """Page orders newest-first, stopping as soon as the window covers what we need.
 
@@ -150,12 +193,14 @@ def _fetch_orders_window(email, jwt, eut, want: set, days: int, max_pages: int, 
             notes.append(f"out of time after {len(orders)} orders"
                          + (f"; not fetched: {', '.join(missing)}" if missing else ""))
             break
-        resp = requests.get(url, headers=_headers(jwt, eut),
-                            timeout=min(_TIMEOUT, max(30, int(left()))), params={
-            "page_size": _PAGE_SIZE, "sort_by": "received_date",
-            "reverse": "true", "page": page,
-        })
-        resp.raise_for_status()
+        resp = _get_page_with_retry(url, jwt, eut, page, left)
+        if resp is None:
+            # Every attempt failed. Keep whatever pages we already have rather than
+            # aborting the pull — the caller caches a short window with a note, which is
+            # far better than throwing away a run that cost minutes of vendor latency.
+            notes.append(f"vendor error on page {page} after {_RETRIES} attempts"
+                         f" — kept {len(orders)} orders")
+            break
         data = resp.json()
         if isinstance(data, list):
             batch, has_next = data, False
@@ -305,6 +350,10 @@ def _parse_platemap(text: str) -> dict:
                 "asm_qc": _col(row, "Assembly QC", "NGS QC"),
                 "yield_qc": _col(row, "Yield QC", "Target Yield QC"),
                 "yield": _col(row, "Yield (ng)", "Actual Yield (ng)"),
+                # Which kind of material this row is. Twist ships glycerol stocks as their
+                # OWN shipment with its own plate map naming the same parts as the DNA map,
+                # so without this the two are indistinguishable once merged per order.
+                "product": _col(row, "Product Type"),
             }
     except Exception:
         pass
@@ -474,7 +523,13 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
         print(f"  recovered by part name (blank vendor_order_id): "
               f"{', '.join(recovered)} [{el()}]", flush=True)
 
-    platemaps, wells = {}, {}
+    # `wells` holds the DNA, `glyc` the glycerol stocks — kept apart on purpose. Twist sends
+    # glycerol as a SEPARATE shipment whose plate map names the very same parts as the DNA
+    # map (Q-698807: 77 DNA rows on pSHPs0828B417001IQ, 77 glycerol rows on pSHPs0829B005801HX).
+    # Merged into one dict per order they collide name-for-name and one map silently
+    # overwrote the other, so an order's glycerol locations vanished depending purely on
+    # which shipment happened to be fetched last.
+    platemaps, wells, glyc = {}, {}, {}
     skipped = 0
     for o in ordered:
         q, sfdc = o.get("order_name"), o.get("sfdc_id")
@@ -489,8 +544,15 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
             fname, text = _platemap_csv(email, jwt, eut, sfdc, s["id"], q, left)
             if not text:
                 continue
-            platemaps[key] = {"filename": fname, "csv": text}
-            wells.setdefault(q, {}).update(_parse_platemap(text))
+            parsed = _parse_platemap(text)
+            # A glycerol shipment's map is glycerol end to end (Q-698807: 77/77 rows), so the
+            # whole shipment can be labelled as such and its download button say what it is.
+            is_glyc = bool(parsed) and all(
+                "glycerol" in (i.get("product") or "").lower() for i in parsed.values())
+            platemaps[key] = {"filename": fname, "csv": text, "glycerol": is_glyc}
+            for nm, info in parsed.items():
+                tgt = glyc if "glycerol" in (info.get("product") or "").lower() else wells
+                tgt.setdefault(q, {})[nm] = info
     if skipped:
         # Say it out loud: a missing download button must not look like "Twist sent no map".
         notes.append(f"out of time — {skipped} plate map(s) not fetched this run")
@@ -504,6 +566,7 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
         "waiting_orders": sorted(waiting),
         "platemaps": platemaps,
         "wells_by_order": wells,
+        "glycerol_by_order": glyc,
         "eta_changes": _eta_changes(orders, by_order, waiting),
         "window_days": days,
         "notes": notes,

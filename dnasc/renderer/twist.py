@@ -96,18 +96,26 @@ def _track_url(carrier: str, tracking: str, fallback: str) -> str:
 
 
 # ── row model ─────────────────────────────────────────────────────────────────
-def _classify(order: dict) -> str:
-    """in_progress | in_transit | delivered.
+def _classify(order: dict, items: list = ()) -> str:
+    """in_progress | in_transit | delivered — the LEAST-ADVANCED open work wins.
 
-    Bucketed on SHIPMENTS, not on order status: `status` is 'past'/'open' bookkeeping that
-    does not track the box. An order with several shipments lands in the bucket of its
-    least-advanced open one, so a partial shipment stays visible as in-transit work.
+    Bucketed on physical state, not on `order.status`, which is 'past'/'open' bookkeeping
+    that does not track the box.
+
+    Unmade items count as open work, which shipments alone cannot tell you. Q-698815 has two
+    delivered boxes and 176 of its 320 parts still in production, and reading shipments only
+    it headlined the Delivered table — an order with weeks of synthesis left presented as
+    finished. An order is only `delivered` once nothing is still being made.
+
+    A partial order is therefore filed under its outstanding work, and `_parts_cell` badges it
+    `partial` with the split so the boxes that already landed are not hidden.
     """
     ships = order.get("shipments") or []
-    if not ships:
-        return "in_progress"
+    still_making = any(str(i.get("status")) == "in_production" for i in (items or ()))
     if any(s.get("status") == "shipped" for s in ships):
-        return "in_transit"
+        return "in_transit"          # a box in flight outranks unmade parts: it needs receiving
+    if still_making:
+        return "in_progress"
     if any(s.get("status") == "received" for s in ships):
         return "delivered"
     return "in_progress"
@@ -116,7 +124,8 @@ def _classify(order: dict) -> str:
 _BAD_ITEM = ("failed", "cancelled")
 
 
-def _row(order: dict, parts: list, wells: dict, changes: dict, items: list) -> dict:
+def _row(order: dict, parts: list, wells: dict, changes: dict, items: list,
+         glyc: dict) -> dict:
     q = order.get("order_name", "")
     ships = order.get("shipments") or []
     waiting = [p for p in parts if p["vis_status"] == "READY"]
@@ -127,7 +136,14 @@ def _row(order: dict, parts: list, wells: dict, changes: dict, items: list) -> d
                                    if s.get("status") == "received") if d)
     return {
         "q": q,
-        "bucket": _classify(order),
+        "bucket": _classify(order, items),
+        # Partial = some material has physically arrived while other parts are still being
+        # made. The bucket alone cannot say that, so the row badges it and shows the split.
+        "n_in_prod": sum(1 for i in items if str(i.get("status")) == "in_production"),
+        "n_done": sum(1 for i in items
+                      if str(i.get("status")) in ("closed", "completed")),
+        "partial": bool(any(str(i.get("status")) == "in_production" for i in items)
+                        and any(s.get("status") in ("shipped", "received") for s in ships)),
         # synpart | other. An order earns `synpart` only when a syn-part workorder in the
         # pipeline points at it. Everything else reads as `other`: orders with no pipeline
         # part at all, and plasmid-synthesis orders (which are pipeline work, but not
@@ -152,6 +168,9 @@ def _row(order: dict, parts: list, wells: dict, changes: dict, items: list) -> d
         "n_received": len(received),
         "ships": ships,
         "wells": wells,
+        # Glycerol stocks, kept out of `wells` at pull time because Twist ships them as their
+        # own shipment naming the same parts — merged, they overwrote the DNA locations.
+        "glyc": glyc,
         # Twist's own per-item view, from …/orders/<sfdc>/items/. Sorted so failures and
         # cancellations come first — the whole point of naming items is to see those.
         "items_list": sorted(items, key=lambda i: (str(i.get("status")) not in _BAD_ITEM,
@@ -160,6 +179,12 @@ def _row(order: dict, parts: list, wells: dict, changes: dict, items: list) -> d
         "n_failed": sum(1 for i in items if str(i.get("status")) == "failed"),
         "n_cancelled": sum(1 for i in items if str(i.get("status")) == "cancelled"),
         "n_delayed": sum(1 for i in items if i.get("delayed_status") == "DELAYED"),
+        # Twist's delayed flag means "missed its promised date" and it STAYS SET after the
+        # part ships, so a flat count conflates two very different situations: Q-698815 has
+        # 176 of its 190 delayed parts still in production, while Q-698807 has 70 of its 102
+        # already delivered, merely late. Only the still-open ones are actionable.
+        "n_delayed_open": sum(1 for i in items if i.get("delayed_status") == "DELAYED"
+                              and str(i.get("status")) == "in_production"),
         "max_redo": max((int(i.get("redo_count") or 0) for i in items), default=0),
         "redo_by_name": {str(i.get("name")): int(i.get("redo_count") or 0)
                          for i in items if (i.get("redo_count") or 0) > 0},
@@ -172,6 +197,8 @@ def _row(order: dict, parts: list, wells: dict, changes: dict, items: list) -> d
 def _order_cell(r: dict) -> str:
     bits = [f'<span class="q">{_esc(r["q"])}</span>',
             _badge("synpart", "blue") if r["kind"] == "synpart" else _badge("other")]
+    if r["partial"]:
+        bits.append(_badge("partial", "amber"))
     if r["high_priority"]:
         bits.append(_badge("rush", "amber"))
     proj = f'<div class="dim">{_esc(r["project"])}</div>' if r["project"] else ""
@@ -203,12 +230,21 @@ def _parts_cell(r: dict, rid: str) -> str:
     # Name the two states separately. "1 failed / cancelled" on an order with one failure and
     # no cancellations read as two problems, and there was no way to tell which it was.
     flags = ""
+    # On a partial order the split IS the story: how much is here versus still being made.
+    if r["partial"]:
+        flags += (f'<div class="dim">{r["n_done"]} arrived · '
+                  f'<b>{r["n_in_prod"]}</b> still in production</div>')
     if r["n_failed"] or r["n_cancelled"]:
         parts_ = ([f'{r["n_failed"]} failed'] if r["n_failed"] else []) + \
                  ([f'{r["n_cancelled"]} cancelled'] if r["n_cancelled"] else [])
         flags += f'<div class="bad">{" · ".join(parts_)}</div>'
-    if r["n_delayed"]:
-        flags += f'<div class="amberv">{r["n_delayed"]} delayed at Twist</div>'
+    if r["n_delayed_open"]:
+        late_done = r["n_delayed"] - r["n_delayed_open"]
+        flags += (f'<div class="amberv">{r["n_delayed_open"]} delayed, still in production'
+                  + (f' <span class="dim">(+{late_done} arrived late)</span>'
+                     if late_done > 0 else "") + '</div>')
+    elif r["n_delayed"]:
+        flags += f'<div class="dim">{r["n_delayed"]} arrived late</div>'
 
     if not n:
         # No pipeline workorder points here, but Twist still names every part on the order
@@ -306,7 +342,10 @@ def _ship_cell(r: dict, want: tuple, maps: dict) -> str:
             btn = (f'<button class="dl" onclick="twistCSV(\'{_esc(key)}\',event)">'
                    f'&#8595; Plate map</button>' if m else "")
             lbl = f'<span class="mono dim">{_esc(plate)}</span>' if plate else ""
-            pm = f'<div class="pm">{btn}{lbl}</div>'
+            # Glycerol ships as its own shipment. Saying so on the block is the difference
+            # between "why are there two plate maps" and "one is the DNA, one is the stab".
+            tag = _badge("glycerol", "amber") if (m or {}).get("glycerol") else ""
+            pm = f'<div class="pm">{btn}{lbl}{tag}</div>'
 
         # Each box's own delivery date lives in its own block, for the same reason the plate
         # map button does: on a multi-shipment order the Delivered column and this column are
@@ -495,9 +534,13 @@ def _detail_row(r: dict, rid: str, ncols: int) -> str:
     if not rows:
         return ""
 
+    # The Glycerol column only appears when the order actually has glycerol stocks — most
+    # orders are DNA only, and an always-empty column just adds noise to read past.
+    has_glyc = bool(r["glyc"])
     head = ('<tr><th>Part</th><th>LIMS</th><th>Twist status</th><th>Progress</th>'
-            '<th>Retries</th><th>Plate / tube · well</th><th>QC</th>'
-            '<th>Yield (ng)</th><th>Length</th></tr>')
+            '<th>Retries</th><th>Plate / tube · well</th>'
+            + ('<th>Glycerol</th>' if has_glyc else "")
+            + '<th>QC</th><th>Yield (ng)</th><th>Length</th></tr>')
     body = []
     for nm, p, it in rows:
         w = r["wells"].get(nm) or {}
@@ -535,6 +578,8 @@ def _detail_row(r: dict, rid: str, ncols: int) -> str:
             + '</td>'
             + f'<td>{_retries_cell(p, it)}</td>'
             + f'<td class="mono">{_loc_cell(w)}</td>'
+            + (f'<td class="mono">{_loc_cell(r["glyc"].get(nm) or {})}</td>'
+               if has_glyc else "")
             + f'<td class="{qc_tone}">{_esc(qc) or "—"}</td>'
             + f'<td>{_esc(w.get("yield") or "—")}</td>'
             + f'<td class="dim">{_esc(w.get("bp") or (it or {}).get("size") or "—")}</td></tr>')
@@ -567,6 +612,12 @@ def _table(rows: list, cols: list, cells, empty: str, maps: dict, tag: str) -> s
 
 _PROG_COLS = [("Order", "24%"), ("Parts waiting", "14%"), ("Twist progress", "22%"),
               ("ETA", "26%"), ("Status", "14%")]
+# In progress, when a PARTIAL order is present. Filing partials under their outstanding work
+# is right, but this table had no shipment column at all — so Q-698815's two delivered boxes,
+# their tracking numbers and its glycerol plate map disappeared from the tab completely. The
+# extra column is added only when some row actually has material already in hand.
+_PROG_COLS_PARTIAL = [("Order", "20%"), ("Parts waiting", "13%"), ("Twist progress", "17%"),
+                      ("ETA", "21%"), ("Status", "9%"), ("Already arrived", "20%")]
 _TRANS_COLS = [("Order", "24%"), ("Parts waiting", "14%"), ("Shipment", "40%"),
                ("Arriving", "22%")]
 _DELIV_COLS = [("Order", "20%"), ("Parts", "12%"), ("Delivered", "18%"),
@@ -587,10 +638,12 @@ def _state_tables(rows: list, maps: dict, tag: str, empties: tuple) -> tuple:
     deliv = sorted([r for r in rows if r["bucket"] == "delivered"],
                    key=lambda r: (r["delivered"] or dt.date.min), reverse=True)
 
+    any_partial = any(r["partial"] for r in prog)
     t_prog = _table(
-        prog, _PROG_COLS,
+        prog, _PROG_COLS_PARTIAL if any_partial else _PROG_COLS,
         lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid), _progress_cell(r),
-                           _eta_cell(r), _badge(r["status"] or "—", "blue")],
+                           _eta_cell(r), _badge(r["status"] or "—", "blue")]
+        + ([_ship_cell(r, ("shipped", "received"), m)] if any_partial else []),
         empties[0], maps, f"{tag}p")
     t_trans = _table(
         trans, _TRANS_COLS,
@@ -617,10 +670,12 @@ def _render() -> str:
     notes = data.get("notes") or []
 
     items_all = data.get("items_by_order") or {}
+    glyc_all = data.get("glycerol_by_order") or {}
 
     rows = [_row(o, by_order.get(o.get("order_name"), []),
                  wells_all.get(o.get("order_name"), {}), changes,
-                 items_all.get(o.get("order_name"), []))
+                 items_all.get(o.get("order_name"), []),
+                 glyc_all.get(o.get("order_name"), {}))
             for o in orders]
 
     syn = [r for r in rows if r["kind"] == "synpart"]
