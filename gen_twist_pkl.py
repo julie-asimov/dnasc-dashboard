@@ -40,6 +40,7 @@ import sys
 import tempfile
 import time
 import traceback
+import zipfile
 
 import pandas as pd
 import requests
@@ -71,7 +72,10 @@ _TIMEOUT = 300
 # hourly must never still be running when the next one starts, and it must be finished well
 # before the dashboard refresh it feeds. Whatever was collected still gets cached, with a note
 # on the tab saying what was skipped; a silent short pull would read as "nothing new".
-_DEADLINE_SECONDS = 600
+# Raised 600→900 when the per-order items fetch was added (~150 s for 31 orders on top of
+# ~190 s of order pages and ~100 s of plate maps). The cron leaves ~20 min before the parts
+# pull at :50, so 15 min still lands with room to spare.
+_DEADLINE_SECONDS = 900
 # A page costs ~75 s; without this much left, starting one just burns the remaining budget.
 _PAGE_COST = 90
 
@@ -86,26 +90,45 @@ def _pipeline_parts(parquet: str) -> tuple[dict, set]:
     """
     df = pd.read_parquet(parquet, columns=[
         "STOCK_ID", "type", "vendor_order_id", "visual_status", "wo_status",
-        "resubmit_count", "construct_name",
+        "resubmit_count", "construct_name", "wo_updated_at",
     ])
     df["vendor_order_id"] = df["vendor_order_id"].astype(str).str.strip()
-    synth = df[df["type"].isin(_SYNTH_TYPES) &
-               df["vendor_order_id"].str.startswith("Q-", na=False)]
-    synth = synth.drop_duplicates("STOCK_ID")
+    synth = df[df["type"].isin(_SYNTH_TYPES)].copy()
 
-    by_order: dict[str, list[dict]] = {}
-    for r in synth.itertuples(index=False):
-        by_order.setdefault(r.vendor_order_id, []).append({
+    # Deterministic dedupe. 1222 of 2084 synthesis STOCK_IDs have more than one baseline row,
+    # and on 72 of them a CANCELED attempt coexists with a SUCCEEDED one — so the old
+    # drop_duplicates(keep=first) picked by row order and reported CANCELED for parts that
+    # had in fact succeeded (syn1683, syn1684, pAI-21454, pAI-21720 all read CANCELED).
+    # Rank by how far the workorder actually got, then by recency.
+    synth["_rank"] = synth["visual_status"].map(
+        {"SUCCEEDED": 0, "RUNNING": 1, "READY": 2, "CANCELED": 3}).fillna(4)
+    synth = (synth.sort_values(["_rank", "wo_updated_at"], ascending=[True, False])
+                  .drop_duplicates("STOCK_ID"))
+
+    def _part(r) -> dict:
+        return {
             "stock_id": str(r.STOCK_ID),
             "kind": "synpart" if "syn_part" in str(r.type) else "plasmid",
             "attempt": int(r.resubmit_count or 0) + 1,
             "vis_status": str(r.visual_status or ""),
             "wo_status": str(r.wo_status or ""),
             "construct": str(r.construct_name or ""),
-        })
+        }
+
+    # Keyed by STOCK_ID over EVERY synthesis workorder, not just the ones carrying a
+    # Q-number. 731 of 8044 syn-part workorders have a blank vendor_order_id, so an order
+    # whose parts have not been stamped yet is invisible to the by_order map — Q-715384's 77
+    # parts all exist in the pipeline but none of them names its order. Twist's item list
+    # names them, so this map lets the order be recovered by part name instead.
+    by_stock = {str(r.STOCK_ID): _part(r) for r in synth.itertuples(index=False)}
+
+    by_order: dict[str, list[dict]] = {}
+    for r in synth[synth["vendor_order_id"].str.startswith("Q-", na=False)].itertuples(index=False):
+        by_order.setdefault(r.vendor_order_id, []).append(_part(r))
+
     waiting = {q for q, parts in by_order.items()
                if any(p["vis_status"] == "READY" for p in parts)}
-    return by_order, waiting
+    return by_order, waiting, by_stock
 
 
 # ── Twist side ────────────────────────────────────────────────────────────────
@@ -180,23 +203,80 @@ def _platemap_csv(email, jwt, eut, order_sfdc: str, shipment_id: str, order_name
         f = requests.get(file_url, timeout=tmo)
         if f.status_code != 200:
             return None, None
-        text = f.content.decode("utf-8", "replace")
+        raw = f.content
     except Exception:
         return None, None
+
+    # MOST orders serve a plain CSV — but some genuinely serve a ZIP with the CSV inside
+    # (2026-09-03: 4 of 26 maps began with the PK magic bytes). Decoding those as text gave
+    # mojibake, so the parse found no parts AND the download button handed the browser a
+    # corrupt file. Sniff the magic bytes rather than trusting the endpoint's content type.
+    if raw[:2] == b"PK":
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                inner = next((n for n in z.namelist() if n.lower().endswith(".csv")), None)
+                if not inner:
+                    return None, None
+                text = z.read(inner).decode("utf-8", "replace")
+        except Exception:
+            return None, None
+    else:
+        text = raw.decode("utf-8", "replace")
 
     plate = ""
     try:
         rows = list(csv.DictReader(io.StringIO(text)))
-        plate = str(rows[0].get("Plate ID", "") or "") if rows else ""
+        plate = _col(rows[0], "Plate ID", "Tube ID") if rows else ""
     except Exception:
         pass
     name = f"platemap_{plate or order_name}.csv"
+
+    # The COMPLETE file goes to disk — disk is cheap and the full artifact stays available.
     try:
         PLATEMAP_DIR.mkdir(exist_ok=True)
         (PLATEMAP_DIR / f"{order_name}_{name}").write_text(text)
     except Exception:
         pass
-    return name, text
+    # Only the slim version is cached, because the pkl's copy is embedded verbatim in the
+    # dashboard HTML for the ↓ Plate map button.
+    return name, _slim_csv(text)
+
+
+# Sequence columns, dropped from the CACHED copy of a plate map (the full file still goes to
+# twist_platemaps/ on disk). On a clonal-gene map these are ~95% of the bytes — 4.4 MB of
+# Q-698807's 4.6 MB — the tab renders none of them, and the pkl's copy is embedded verbatim in
+# the dashboard HTML, so every viewer downloads them on every page load.
+_DROP_COLS = ("Insert Sequence", "Construct Sequence", "Vector Sequence",
+              "Construct Sequence (Insert + Adapters)")
+
+
+def _slim_csv(text: str) -> str:
+    """Same CSV without the sequence columns. Returns the input unchanged if it has none,
+    or if anything about the parse looks off — a plate map is better whole than mangled."""
+    try:
+        rd = csv.DictReader(io.StringIO(text))
+        orig = list(rd.fieldnames or [])
+        cols = [c for c in orig if c not in _DROP_COLS]
+        if not cols or cols == orig:
+            return text
+        buf = io.StringIO()
+        wr = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+        wr.writeheader()
+        for row in rd:
+            wr.writerow({c: row.get(c) or "" for c in cols})
+        return buf.getvalue()
+    except Exception:
+        return text
+
+
+def _col(row: dict, *names: str) -> str:
+    """First non-empty value among `names`. Twist serves at least SIX different plate-map
+    layouts depending on product type, so a single column name is not enough."""
+    for n in names:
+        v = (row.get(n) or "").strip()
+        if v:
+            return v
+    return ""
 
 
 def _parse_platemap(text: str) -> dict:
@@ -205,6 +285,12 @@ def _parse_platemap(text: str) -> dict:
     `Name` is the LIMS STOCK_ID (syn4714, …), which is what makes this worth parsing:
     it gives the physical well for every part the moment a shipment lands. The bulky
     Insert Sequence column is dropped — it is ~90% of the file and the tab never shows it.
+
+    Column names vary by product line, so each field reads every alias we have actually
+    seen. Plate products carry `Plate ID` + `Well Location`; tube products (clonal genes)
+    carry `Tube ID` and no well at all; and QC/yield are renamed again per product
+    (`NGS QC`, `Actual Yield (ng)`). Reading one layout meant clonal-gene orders parsed
+    with a blank location and no yield, which rendered as "—" as if Twist had sent nothing.
     """
     out = {}
     try:
@@ -213,15 +299,59 @@ def _parse_platemap(text: str) -> dict:
             if not nm:
                 continue
             out[nm] = {
-                "plate": (row.get("Plate ID") or "").strip(),
-                "well": (row.get("Well Location") or "").strip(),
-                "bp": (row.get("Insert Length") or "").strip(),
-                "asm_qc": (row.get("Assembly QC") or "").strip(),
-                "yield_qc": (row.get("Yield QC") or "").strip(),
-                "yield": (row.get("Yield (ng)") or "").strip(),
+                "plate": _col(row, "Plate ID", "Tube ID"),
+                "well": _col(row, "Well Location"),
+                "bp": _col(row, "Insert Length", "Construct Length"),
+                "asm_qc": _col(row, "Assembly QC", "NGS QC"),
+                "yield_qc": _col(row, "Yield QC", "Target Yield QC"),
+                "yield": _col(row, "Yield (ng)", "Actual Yield (ng)"),
             }
     except Exception:
         pass
+    return out
+
+
+# Fields kept from an order item. The full payload repeats the order's shipping address and
+# carries construct sequences we never render; keeping it whole would bloat the pkl for nothing.
+_ITEM_FIELDS = ("name", "status", "last_event", "redo_count", "delayed_status",
+                "estimated_shipping_date", "size", "type", "vector_name")
+# An items call measured 1.8–3.0 s; without this much budget left, don't start one.
+_ITEM_COST = 10
+
+
+def _fetch_order_items(email, jwt, eut, sfdc: str, left=None) -> list[dict]:
+    """`/orders/<sfdc>/items/` → that order's parts, trimmed to _ITEM_FIELDS.
+
+    The only endpoint that NAMES what is on an order, and the only one that works before the
+    order ships: the order list carries bare counters (`total_items`, `failed_items`) and the
+    plate map does not exist until a shipment does. It also carries two things found nowhere
+    else in this API — per-item `status`, so a failed or cancelled part can be named instead
+    of merely counted, and `delayed_status`, Twist's OWN delay flag (376 of 2970 items read
+    DELAYED on 2026-09-03, including a whole synpart order). ~2-3 s per order.
+
+    Note the URL takes the order's `sfdc_id`, not its Q-number — `…/orders/Q-715423/items/`
+    returns "Order not found." And `…/orders/<sfdc>/` with no suffix returns 403, so this
+    endpoint is also the only way to read one order's detail.
+    """
+    tmo = 60 if left is None else max(5, min(60, int(left())))
+    try:
+        r = requests.get(f"{BASE_URL}/v1/users/{email}/orders/{sfdc}/items/",
+                         headers=_headers(jwt, eut), timeout=tmo)
+        if r.status_code != 200:
+            return []
+        raw = r.json().get("order_items") or []
+    except Exception:
+        return []
+
+    out = []
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        row = {k: it.get(k) for k in _ITEM_FIELDS}
+        prog = it.get("progress") or {}
+        row["progress"] = prog.get("event_index") or ""
+        row["progress_event"] = prog.get("latest_event") or ""
+        out.append(row)
     return out
 
 
@@ -278,7 +408,7 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
     def el():
         return f"{time.time() - t0:.0f}s"
 
-    by_order, waiting = _pipeline_parts(PARQUET)
+    by_order, waiting, by_stock = _pipeline_parts(PARQUET)
     print(f"pipeline: {len(by_order)} orders seen, {len(waiting)} still awaiting delivery"
           f" ({', '.join(sorted(waiting)) or 'none'}) [{el()}]", flush=True)
 
@@ -295,15 +425,58 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
     keep = []
     for o in orders:
         q = o.get("order_name")
-        if q not in by_order:
-            continue  # a Twist order with no pipeline part is not ours to track
+        # Orders with no pipeline part are kept too. They are still real work on this Twist
+        # account — oligos, genes, another team's plasmids — and the tab shows them in their
+        # own section rather than pretending the account only holds our synthesis parts.
+        # Only the window bounds them; `waiting` can never name an order we have no parts for.
         if q in waiting or str(o.get("received_date") or "")[:10] >= cutoff:
             keep.append(o)
-    print(f"  {len(keep)} tracked (pipeline parts + within {days}d) [{el()}]", flush=True)
+    n_other = sum(1 for o in keep if o.get("order_name") not in by_order)
+    print(f"  {len(keep)} tracked within {days}d "
+          f"({len(keep) - n_other} with pipeline parts, {n_other} other) [{el()}]", flush=True)
+
+    # Pipeline orders lead in both loops below. With non-pipeline orders now in `keep`,
+    # spending the budget in list order could burn it on another team's parts and skip work
+    # for a part the pipeline is actually waiting on.
+    ordered = sorted(keep, key=lambda o: o.get("order_name") not in by_order)
+
+    # Item lists before plate maps: an items call is ~2-3 s and is the ONLY source of part
+    # names for an order that has not shipped, while a plate map is ~4 s and does not exist
+    # until a shipment does. Cheaper and more broadly useful, so it gets the budget first.
+    items_by_order, it_skipped = {}, 0
+    for o in ordered:
+        if left() < _ITEM_COST:
+            it_skipped += 1
+            continue
+        items_by_order[o.get("order_name")] = _fetch_order_items(
+            email, jwt, eut, o.get("sfdc_id"), left)
+    if it_skipped:
+        notes.append(f"out of time — item list not fetched for {it_skipped} order(s)")
+    print(f"  {sum(len(v) for v in items_by_order.values())} order items "
+          f"across {len(items_by_order)} orders [{el()}]", flush=True)
+
+    # Recover orders whose parts exist in the pipeline but whose vendor_order_id is still
+    # blank, by matching Twist's item names to known synthesis STOCK_IDs. Without this,
+    # Q-715384's 77 syn parts (all READY in the pipeline, none stamped with its Q-number)
+    # made the order look like someone else's work and it rendered in the "other" group.
+    recovered = []
+    for o in ordered:
+        q = o.get("order_name")
+        if q in by_order:
+            continue
+        matched = [by_stock[n] for n in
+                   (str(i.get("name") or "") for i in items_by_order.get(q) or [])
+                   if n in by_stock]
+        if matched:
+            by_order[q] = matched
+            recovered.append(f"{q} ({len(matched)})")
+    if recovered:
+        print(f"  recovered by part name (blank vendor_order_id): "
+              f"{', '.join(recovered)} [{el()}]", flush=True)
 
     platemaps, wells = {}, {}
     skipped = 0
-    for o in keep:
+    for o in ordered:
         q, sfdc = o.get("order_name"), o.get("sfdc_id")
         for s in (o.get("shipments") or []):
             if s.get("status") not in ("shipped", "received") or not (sfdc and s.get("id")):
@@ -327,6 +500,7 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
         "generated_at": dt.datetime.now(tz=dt.timezone.utc),
         "orders": keep,
         "parts_by_order": by_order,
+        "items_by_order": items_by_order,
         "waiting_orders": sorted(waiting),
         "platemaps": platemaps,
         "wells_by_order": wells,

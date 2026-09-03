@@ -113,7 +113,10 @@ def _classify(order: dict) -> str:
     return "in_progress"
 
 
-def _row(order: dict, parts: list, wells: dict, changes: dict) -> dict:
+_BAD_ITEM = ("failed", "cancelled")
+
+
+def _row(order: dict, parts: list, wells: dict, changes: dict, items: list) -> dict:
     q = order.get("order_name", "")
     ships = order.get("shipments") or []
     waiting = [p for p in parts if p["vis_status"] == "READY"]
@@ -125,12 +128,18 @@ def _row(order: dict, parts: list, wells: dict, changes: dict) -> dict:
     return {
         "q": q,
         "bucket": _classify(order),
+        # synpart | other. An order earns `synpart` only when a syn-part workorder in the
+        # pipeline points at it. Everything else reads as `other`: orders with no pipeline
+        # part at all, and plasmid-synthesis orders (which are pipeline work, but not
+        # synparts — their rows still show their waiting count, they just group separately).
+        "kind": "synpart" if any(p["kind"] == "synpart" for p in parts) else "other",
         "project": order.get("project_name") or "",
         "status": order.get("status") or "",
         "ordered": _date(order.get("received_date")),
         "eta": eta,
         "due": due,
         "delivered": delivered[-1] if delivered else None,
+        "deliveries": delivered,   # ascending; a multi-box order has several
         "items": order.get("total_items") or 0,
         "in_prod": order.get("in_production_items") or 0,
         "completed": order.get("completed_items") or 0,
@@ -143,6 +152,17 @@ def _row(order: dict, parts: list, wells: dict, changes: dict) -> dict:
         "n_received": len(received),
         "ships": ships,
         "wells": wells,
+        # Twist's own per-item view, from …/orders/<sfdc>/items/. Sorted so failures and
+        # cancellations come first — the whole point of naming items is to see those.
+        "items_list": sorted(items, key=lambda i: (str(i.get("status")) not in _BAD_ITEM,
+                                                   str(i.get("name") or ""))),
+        "n_bad": sum(1 for i in items if str(i.get("status")) in _BAD_ITEM),
+        "n_failed": sum(1 for i in items if str(i.get("status")) == "failed"),
+        "n_cancelled": sum(1 for i in items if str(i.get("status")) == "cancelled"),
+        "n_delayed": sum(1 for i in items if i.get("delayed_status") == "DELAYED"),
+        "max_redo": max((int(i.get("redo_count") or 0) for i in items), default=0),
+        "redo_by_name": {str(i.get("name")): int(i.get("redo_count") or 0)
+                         for i in items if (i.get("redo_count") or 0) > 0},
         "changes": {p["stock_id"]: changes[p["stock_id"]]
                     for p in parts if p["stock_id"] in changes},
     }
@@ -150,19 +170,58 @@ def _row(order: dict, parts: list, wells: dict, changes: dict) -> dict:
 
 # ── cell builders ─────────────────────────────────────────────────────────────
 def _order_cell(r: dict) -> str:
-    bits = [f'<span class="q">{_esc(r["q"])}</span>']
+    bits = [f'<span class="q">{_esc(r["q"])}</span>',
+            _badge("synpart", "blue") if r["kind"] == "synpart" else _badge("other")]
     if r["high_priority"]:
         bits.append(_badge("rush", "amber"))
     proj = f'<div class="dim">{_esc(r["project"])}</div>' if r["project"] else ""
-    ord_d = f'<div class="dim">ordered {r["ordered"]}</div>' if r["ordered"] else ""
+
+    # Turnaround once the order is in, age while it is not — the question this tab is actually
+    # asked. On a multi-box order TAT is a RANGE, not a number: Q-693738 was ordered 07-22 and
+    # delivered 07-29 and 07-31, so a bare "TAT 9d" hid the first box arriving on day 7.
+    ord_d = ""
+    if r["ordered"]:
+        ord_d = f'<div class="dim">ordered {r["ordered"]}</div>'
+        got = r["deliveries"]
+        if r["bucket"] == "delivered" and got:
+            lo = (got[0] - r["ordered"]).days
+            hi = (got[-1] - r["ordered"]).days
+            span = f"{lo}–{hi}d" if hi != lo else f"{hi}d"
+            note = (f'<span class="tatsub">{len(got)} boxes</span>' if len(got) > 1 else "")
+            ord_d += f'<div class="tat">TAT {span}{note}</div>'
+        else:
+            ord_d += (f'<div class="tat open">{(dt.date.today() - r["ordered"]).days}d'
+                      '<span class="tatsub">open</span></div>')
     return " ".join(bits) + proj + ord_d
 
 
 def _parts_cell(r: dict, rid: str) -> str:
     """Count + a toggle into the per-part detail row."""
     n = len(r["parts"])
+    # Failures and delays are named by Twist per item, so surface the counts here — on the
+    # order-level payload these were bare numbers with no way to learn WHICH part failed.
+    # Name the two states separately. "1 failed / cancelled" on an order with one failure and
+    # no cancellations read as two problems, and there was no way to tell which it was.
+    flags = ""
+    if r["n_failed"] or r["n_cancelled"]:
+        parts_ = ([f'{r["n_failed"]} failed'] if r["n_failed"] else []) + \
+                 ([f'{r["n_cancelled"]} cancelled'] if r["n_cancelled"] else [])
+        flags += f'<div class="bad">{" · ".join(parts_)}</div>'
+    if r["n_delayed"]:
+        flags += f'<div class="amberv">{r["n_delayed"]} delayed at Twist</div>'
+
     if not n:
-        return '<span class="no">no pipeline parts</span>'
+        # No pipeline workorder points here, but Twist still names every part on the order
+        # via …/items/ — which works before shipping, unlike the plate map. "no pipeline
+        # parts" read as an empty order when the order had contents worth seeing.
+        vend = r["items_list"] or [{"name": k} for k in sorted(r["wells"])]
+        if vend:
+            return (f'<span class="tog" onclick="twistToggle(\'{rid}\')">{len(vend)} parts'
+                    f' <span class="caret">▸</span></span>'
+                    f'<div class="dim">named by Twist, not in LIMS</div>{flags}')
+        return (f'<span class="dim">{r["items"]} items on order</span>{flags}' if r["items"]
+                else '<span class="no">no pipeline parts</span>')
+
     lab = f'<b>{r["n_waiting"]}</b> waiting' if r["n_waiting"] else f'{n} parts'
     sub = []
     if r["n_received"]:
@@ -171,7 +230,7 @@ def _parts_cell(r: dict, rid: str) -> str:
         sub.append(f'Twist lists {r["items"]}')
     subs = f'<div class="dim">{_esc(" · ".join(sub))}</div>' if sub else ""
     return (f'<span class="tog" onclick="twistToggle(\'{rid}\')">{lab}'
-            f' <span class="caret">▸</span></span>{subs}')
+            f' <span class="caret">▸</span></span>{subs}{flags}')
 
 
 def _eta_cell(r: dict) -> str:
@@ -249,39 +308,120 @@ def _ship_cell(r: dict, want: tuple, maps: dict) -> str:
             lbl = f'<span class="mono dim">{_esc(plate)}</span>' if plate else ""
             pm = f'<div class="pm">{btn}{lbl}</div>'
 
+        # Each box's own delivery date lives in its own block, for the same reason the plate
+        # map button does: on a multi-shipment order the Delivered column and this column are
+        # separate stacks, so a reader cannot tell which date belongs to which tracking number.
+        got = _date(s.get("received_at")) if s.get("status") == "received" else None
+
         out.append(
             f'<div class="ship"><span class="carrier">{_esc(carrier)}</span> {link}'
             + (f'<div class="dim">{_esc(str(prov).replace("_", " "))}</div>' if prov else "")
             + (f'<div class="dim">last scan {_esc(loc)}{" · " + scan if scan else ""}</div>' if loc else "")
+            + (f'<div class="dim">delivered {got}</div>' if got else "")
             + pm + '</div>')
     return "".join(out) or '<span class="no">—</span>'
 
 
+# The carrier's own words, relayed through EasyPost in status_detail. Any of these means the
+# box is not on its original plan.
+_DELAY_WORDS = ("delay", "exception", "failure", "return_to_sender", "damaged", "lost")
+
+
+def _is_delayed(s: dict) -> bool:
+    det = s.get("status_detail") or {}
+    blob = " ".join(str(x or "").lower() for x in (det.get("provider_detail"),
+                                                   det.get("provider_status"),
+                                                   s.get("carrier_detail")))
+    return any(w in blob for w in _DELAY_WORDS)
+
+
 def _transit_when(r: dict) -> str:
+    """Estimated arrival — unless the carrier says the shipment is delayed.
+
+    `estimated_delivery_date` is Twist's number and Twist never revises it, so on a delayed
+    shipment it kept rendering as fact: a box sitting in Louisville read "2026-09-02 arriving
+    today" while UPS was already reporting a delay. The carrier's scan is the only live signal
+    in this payload, so once it says delayed we lead with it and stop printing an arrival date
+    the shipment is not going to hit. Twist's date stays visible as context, marked passed —
+    the carrier does not publish a revised ETA through this API, so we do not invent one.
+    """
     for s in r["ships"]:
         if s.get("status") != "shipped":
             continue
         est = _date(s.get("estimated_delivery_date"))
         shipped = _d(s.get("shipped_date"))
+        ship_line = f'<div class="dim">shipped {shipped}</div>' if shipped else ""
+
+        if _is_delayed(s):
+            det = s.get("status_detail") or {}
+            why = str(det.get("provider_detail") or det.get("provider_status") or "delayed")
+            loc, scan = s.get("last_location") or "", _d(s.get("last_updated_at"))
+            lines = [f'<b class="bad">DELAYED</b>'
+                     f' <span class="carrier">{_esc((s.get("carrier") or "").upper())}</span>',
+                     f'<div class="amberv">{_esc(why.replace("_", " "))}</div>']
+            if loc or scan:
+                lines.append(f'<div class="dim">last scan {_esc(loc)}'
+                             f'{" · " + scan if scan else ""}</div>')
+            lines.append('<div class="dim">no revised ETA from the carrier</div>')
+            if est:
+                passed = " · passed" if est < dt.date.today() else ""
+                lines.append(f'<div class="dim">Twist ETA {est}{passed}</div>')
+            return "".join(lines) + ship_line
+
         if not est:
-            return f'<div class="dim">shipped {shipped}</div>'
+            return ship_line or '<span class="no">—</span>'
         days = (est - dt.date.today()).days
         when = "arriving today" if days == 0 else (f"in {days}d" if days > 0 else f'<span class="bad">{-days}d overdue</span>')
-        return f'<b>{est}</b> <span class="dim">{when}</span><div class="dim">shipped {shipped}</div>'
+        head = f'<b>{est}</b> <span class="dim">{when}</span>'
+
+        # Twist's ETA has arrived but the feed has not said the box is out for delivery or
+        # delivered — so "arriving today" is Twist's plan, not a carrier commitment. UPS can
+        # be flagging a delay and a new date that this payload never carries (seen on
+        # 1Z67R3110114943672: UPS said delayed, Twist still said in_transit, ETA unchanged).
+        # Say the date is unconfirmed and send the reader to the carrier rather than assert
+        # an arrival we cannot see.
+        det = s.get("status_detail") or {}
+        prov = str(det.get("provider_status") or "").lower()
+        if days <= 0 and prov not in ("out_for_delivery", "delivered", "available_for_pickup"):
+            head += ('<div class="amberv">unconfirmed — Twist has not reported it out for '
+                     'delivery; check the carrier</div>')
+        return head + ship_line
     return '<span class="no">—</span>'
 
 
 def _delivered_when(r: dict) -> str:
-    if not r["delivered"]:
+    """EVERY received shipment's own delivery date, newest first — not just the last one.
+
+    An order can arrive in several boxes on different days: Q-705566 landed in three, on
+    08-27, 09-01 and 09-02, and showing only the newest read as though the whole order
+    turned up that day while three tracking numbers sat in the next column.
+
+    Each date is scored against THAT shipment's own estimated_delivery_date, not the
+    order-level ETA. Twist never reconciles the order ETA after shipping, so scoring a
+    box that arrived exactly when its carrier said against a stale order ETA invented an
+    "early"/"late" that nobody promised.
+    """
+    got = sorted(((d, _date(s.get("estimated_delivery_date")))
+                  for s in r["ships"] if s.get("status") == "received"
+                  for d in [_date(s.get("received_at"))] if d),
+                 key=lambda t: t[0], reverse=True)
+    if not got:
         return '<span class="no">—</span>'
-    ago = (dt.date.today() - r["delivered"]).days
-    tag = ""
-    if r["eta"]:
-        d = (r["delivered"] - r["eta"]).days
-        tag = (f' <span class="bad">{d}d late</span>' if d > 0 else
-               f' <span class="good">{-d}d early</span>' if d < 0 else ' <span class="good">on time</span>')
-    return (f'<b>{r["delivered"]}</b>{tag}'
-            f'<div class="dim">{"today" if ago == 0 else f"{ago}d ago"}</div>')
+
+    lines = []
+    for d, est in got:
+        tag = ""
+        if est:
+            k = (d - est).days
+            tag = (f' <span class="bad">{k}d late</span>' if k > 0 else
+                   f' <span class="good">{-k}d early</span>' if k < 0 else
+                   ' <span class="good">on time</span>')
+        lines.append(f'<div><b>{d}</b>{tag}</div>')
+
+    # No "Nd ago" line. How long ago a box landed is not a question this tab answers — the
+    # turnaround is, and that lives in the Order column.
+    foot = f'<div class="dim">{len(got)} shipments</div>' if len(got) > 1 else ""
+    return "".join(lines) + foot
 
 
 def _lims_cell(r: dict) -> str:
@@ -295,34 +435,109 @@ def _lims_cell(r: dict) -> str:
     return '<span class="no">—</span>'
 
 
+def _loc_cell(w: dict) -> str:
+    """Where the part physically is. Plate products give plate + well; tube products (clonal
+    genes) give a tube id and no well, so printing only `well` showed "—" for a whole product
+    line that Twist had in fact located."""
+    plate, well = w.get("plate") or "", w.get("well") or ""
+    if plate and well:
+        return f'{_esc(plate)} <b>{_esc(well)}</b>'
+    if plate:
+        return _esc(plate)
+    return '<span class="no">—</span>'
+
+
+def _item_status(it: dict) -> str:
+    st = str(it.get("status") or "")
+    tone = ("bad" if st in _BAD_ITEM else
+            "good" if st in ("completed", "closed") else "dim")
+    out = f'<span class="{tone}">{_esc(st.replace("_", " ")) or "—"}</span>'
+    if it.get("delayed_status") == "DELAYED":
+        out += '<div class="amberv">delayed</div>'
+    return out
+
+
+def _retries_cell(p: dict, it: dict) -> str:
+    """Retry count. TWO counters exist and only one of them ever moves for a vendor part.
+
+    The pipeline's `resubmit_count` is 0 for all 8336 synthesis workorders in the baseline
+    (it only ever moves on golden-gate/PCR/Gibson), so the old Attempt column could print
+    nothing but "1". Twist's own `redo_count` is the counter that tracks VENDOR retries, and
+    it disagrees: Q-693738 syn4500/syn4484 are on Twist redo 3 while the pipeline says
+    attempt 1, and Q-698807 SRK-108-043 is on 37. Prefer Twist's, fall back to the pipeline's.
+    """
+    redo = int((it or {}).get("redo_count") or 0)
+    if redo:
+        return _badge(f"↻ {redo}", "amber") + '<div class="dim">Twist</div>'
+    att = int((p or {}).get("attempt") or 0)
+    if att > 1:
+        return _badge(f"↻ {att}", "amber") + '<div class="dim">pipeline</div>'
+    return '<span class="dim">0</span>'
+
+
 def _detail_row(r: dict, rid: str, ncols: int) -> str:
-    """Hidden per-part row: stock id, attempt, LIMS status, and — once a plate map exists —
-    the physical well, QC and yield straight from Twist's CSV."""
-    if not r["parts"]:
+    """Hidden per-part row — ONE table merging the pipeline's view with Twist's.
+
+    These used to be two different tables picked by whether the order had a pipeline part: a
+    pipeline one (Part / Attempt / LIMS) and a Twist one (Status / Progress / Retries). That
+    made the visible facts depend on which GROUP an order landed in — when Q-715384 was
+    correctly reclassified from `other` to `synpart`, its Twist status, its "3/5 Fragments
+    assembled" progress and its retry counts all silently disappeared. Both sources exist for
+    every order now, so every row shows both and says plainly when one side has nothing.
+    """
+    by_name = {str(i.get("name") or ""): i for i in r["items_list"]}
+    if r["parts"]:
+        rows = [(p["stock_id"], p, by_name.get(p["stock_id"]) or {}) for p in r["parts"]]
+    elif r["items_list"]:
+        rows = [(str(i.get("name") or ""), None, i) for i in r["items_list"]]
+    else:
+        rows = [(nm, None, {}) for nm in sorted(r["wells"])]
+    if not rows:
         return ""
-    head = ('<tr><th>Part</th><th>Attempt</th><th>LIMS</th>'
-            '<th>Plate · well</th><th>QC</th><th>Yield (ng)</th><th>Length</th></tr>')
+
+    head = ('<tr><th>Part</th><th>LIMS</th><th>Twist status</th><th>Progress</th>'
+            '<th>Retries</th><th>Plate / tube · well</th><th>QC</th>'
+            '<th>Yield (ng)</th><th>Length</th></tr>')
     body = []
-    for p in r["parts"]:
-        w = r["wells"].get(p["stock_id"]) or {}
-        vs = p["vis_status"]
-        st = ('<span class="bad">waiting</span>' if vs == "READY" else
-              '<span class="good">received</span>' if vs == "SUCCEEDED" else
-              f'<span class="dim">{_esc(vs or "—")}</span>')
-        att = (_badge(f'↻ {p["attempt"]}', "amber") if p["attempt"] > 1 else str(p["attempt"]))
-        chg = r["changes"].get(p["stock_id"])
+    for nm, p, it in rows:
+        w = r["wells"].get(nm) or {}
+
+        if p:
+            vs = p["vis_status"]
+            lims = ('<span class="bad">waiting</span>' if vs == "READY" else
+                    '<span class="good">received</span>' if vs == "SUCCEEDED" else
+                    f'<span class="dim">{_esc(vs or "—")}</span>')
+        else:
+            lims = '<span class="dim">not in LIMS</span>'
+
+        tw = _item_status(it) if it else '<span class="no">—</span>'
+        # Twist reports a closed item's progress as the placeholder "0/0" / "Unknown". Printing
+        # that verbatim looked like a data problem where there simply is no progress left.
+        prog = str(it.get("progress") or "") if it else ""
+        ev = (str(it.get("progress_event") or it.get("last_event") or "").replace("_", " ")
+              if it else "")
+        if prog in ("0/0", "/"):
+            prog = ""
+        if ev.strip().lower() == "unknown":
+            ev = ""
         qc = " · ".join(x for x in (w.get("asm_qc"), w.get("yield_qc")) if x)
         qc_tone = "good" if qc and "fail" not in qc.lower() else ("bad" if qc else "")
-        loc = f'{w.get("plate", "")} <b>{w.get("well", "")}</b>' if w.get("well") else '<span class="no">—</span>'
+        chg = r["changes"].get(nm)
+
         body.append(
-            f'<tr><td class="mono">{_esc(p["stock_id"])}'
-            + (f'<div class="dim">{_esc(p["construct"])}</div>' if p["construct"] else "")
+            f'<tr><td class="mono">{_esc(nm)}'
+            + (f'<div class="dim">{_esc(p["construct"])}</div>'
+               if p and p.get("construct") else "")
             + (f'<div class="amberv">{_esc(chg)}</div>' if chg else "")
-            + f'</td><td>{att}</td><td>{st}</td>'
-            f'<td class="mono">{loc}</td>'
-            f'<td class="{qc_tone}">{_esc(qc) or "—"}</td>'
-            f'<td>{_esc(w.get("yield") or "—")}</td>'
-            f'<td class="dim">{_esc(w.get("bp") or "—")}</td></tr>')
+            + f'</td><td>{lims}</td><td>{tw}</td>'
+            + f'<td>{_esc(prog) or "—"}'
+            + (f'<div class="dim">{_esc(ev)}</div>' if ev else "")
+            + '</td>'
+            + f'<td>{_retries_cell(p, it)}</td>'
+            + f'<td class="mono">{_loc_cell(w)}</td>'
+            + f'<td class="{qc_tone}">{_esc(qc) or "—"}</td>'
+            + f'<td>{_esc(w.get("yield") or "—")}</td>'
+            + f'<td class="dim">{_esc(w.get("bp") or (it or {}).get("size") or "—")}</td></tr>')
     return (f'<tr class="detrow" id="{rid}" style="display:none"><td colspan="{ncols}">'
             f'<table class="det">{head}{"".join(body)}</table></td></tr>')
 
@@ -337,11 +552,57 @@ def _table(rows: list, cols: list, cells, empty: str, maps: dict, tag: str) -> s
     body = []
     for i, r in enumerate(rows):
         rid = f"tw-{tag}-{i}"
+        det = _detail_row(r, rid, len(cols))
         tds = "".join(f"<td>{c}</td>" for c in cells(r, rid, maps))
-        body.append(f'<tr class="main" onclick="twistToggle(\'{rid}\')">{tds}</tr>')
-        body.append(_detail_row(r, rid, len(cols)))
+        # Only a row that HAS a detail row gets the handler and the pointer cursor. An order
+        # with no pipeline part and no plate map yet has nothing to expand, and a row that
+        # invites a click and then does nothing reads as a broken dropdown.
+        attrs = (f' class="main" onclick="twistToggle(\'{rid}\')"' if det else ' class="flat"')
+        body.append(f'<tr{attrs}>{tds}</tr>')
+        if det:
+            body.append(det)
     return (f'<table class="twtbl"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table>')
+
+
+_PROG_COLS = [("Order", "24%"), ("Parts waiting", "14%"), ("Twist progress", "22%"),
+              ("ETA", "26%"), ("Status", "14%")]
+_TRANS_COLS = [("Order", "24%"), ("Parts waiting", "14%"), ("Shipment", "40%"),
+               ("Arriving", "22%")]
+_DELIV_COLS = [("Order", "20%"), ("Parts", "12%"), ("Delivered", "18%"),
+               ("Received into LIMS", "20%"), ("Shipment & plate map", "30%")]
+
+
+def _state_tables(rows: list, maps: dict, tag: str, empties: tuple) -> tuple:
+    """The three state tables for one group of orders, as (row lists, table html).
+
+    Synparts and other orders render the same three tables rather than sharing one, so a
+    group can be read on its own. `tag` keeps the detail-row ids unique between the two
+    groups — colliding ids would make one group's expander open the other group's row.
+    """
+    prog = sorted([r for r in rows if r["bucket"] == "in_progress"],
+                  key=lambda r: (r["eta"] or dt.date.max, r["q"]))
+    trans = sorted([r for r in rows if r["bucket"] == "in_transit"],
+                   key=lambda r: (r["ordered"] or dt.date.min), reverse=True)
+    deliv = sorted([r for r in rows if r["bucket"] == "delivered"],
+                   key=lambda r: (r["delivered"] or dt.date.min), reverse=True)
+
+    t_prog = _table(
+        prog, _PROG_COLS,
+        lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid), _progress_cell(r),
+                           _eta_cell(r), _badge(r["status"] or "—", "blue")],
+        empties[0], maps, f"{tag}p")
+    t_trans = _table(
+        trans, _TRANS_COLS,
+        lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid),
+                           _ship_cell(r, ("shipped",), m), _transit_when(r)],
+        empties[1], maps, f"{tag}t")
+    t_deliv = _table(
+        deliv, _DELIV_COLS,
+        lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid), _delivered_when(r),
+                           _lims_cell(r), _ship_cell(r, ("received",), m)],
+        empties[2], maps, f"{tag}d")
+    return (prog, trans, deliv), (t_prog, t_trans, t_deliv)
 
 
 def _render() -> str:
@@ -355,39 +616,27 @@ def _render() -> str:
     changes = data.get("eta_changes") or {}
     notes = data.get("notes") or []
 
+    items_all = data.get("items_by_order") or {}
+
     rows = [_row(o, by_order.get(o.get("order_name"), []),
-                 wells_all.get(o.get("order_name"), {}), changes)
+                 wells_all.get(o.get("order_name"), {}), changes,
+                 items_all.get(o.get("order_name"), []))
             for o in orders]
 
-    prog = sorted([r for r in rows if r["bucket"] == "in_progress"],
-                  key=lambda r: (r["eta"] or dt.date.max, r["q"]))
-    trans = sorted([r for r in rows if r["bucket"] == "in_transit"],
-                   key=lambda r: (r["ordered"] or dt.date.min), reverse=True)
-    deliv = sorted([r for r in rows if r["bucket"] == "delivered"],
-                   key=lambda r: (r["delivered"] or dt.date.min), reverse=True)
+    syn = [r for r in rows if r["kind"] == "synpart"]
+    oth = [r for r in rows if r["kind"] != "synpart"]
 
-    t_prog = _table(
-        prog, [("Order", "24%"), ("Parts waiting", "14%"), ("Twist progress", "22%"),
-               ("ETA", "26%"), ("Status", "14%")],
-        lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid), _progress_cell(r),
-                           _eta_cell(r), _badge(r["status"] or "—", "blue")],
-        "Nothing in synthesis right now.", maps, "p")
+    (prog, trans, deliv), (t_prog, t_trans, t_deliv) = _state_tables(
+        syn, maps, "s", ("Nothing in synthesis right now.", "Nothing in transit.",
+                         "No deliveries in the window."))
+    (oprog, otrans, odeliv), (o_prog, o_trans, o_deliv) = _state_tables(
+        oth, maps, "o", ("No other orders in synthesis.", "No other orders in transit.",
+                         "No other deliveries in the window."))
 
-    t_trans = _table(
-        trans, [("Order", "24%"), ("Parts waiting", "14%"), ("Shipment", "40%"),
-                ("Arriving", "22%")],
-        lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid),
-                           _ship_cell(r, ("shipped",), m), _transit_when(r)],
-        "Nothing in transit.", maps, "t")
-
-    t_deliv = _table(
-        deliv, [("Order", "20%"), ("Parts", "12%"), ("Delivered", "18%"),
-                ("Received into LIMS", "20%"), ("Shipment & plate map", "30%")],
-        lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid), _delivered_when(r),
-                           _lims_cell(r), _ship_cell(r, ("received",), m)],
-        "No deliveries in the window.", maps, "d")
-
-    n_wait_parts = sum(r["n_waiting"] for r in rows)
+    # The overview counts the synpart group only — those are the parts the pipeline is
+    # waiting on, and that is what these tiles have always meant. Other orders get their
+    # own tile so the section is not a surprise at the bottom of the page.
+    n_wait_parts = sum(r["n_waiting"] for r in syn)
     n_unreceived = sum(r["n_waiting"] for r in deliv)
     overdue = sum(1 for r in prog if r["eta"] and r["eta"] < dt.date.today())
 
@@ -413,10 +662,13 @@ def _render() -> str:
 <div class="wrap">
   <div class="stamp">DATA PULLED {_esc(stamp)} {stale}</div>
   <h2>Twist orders — what we are waiting on</h2>
-  <p class="sub">Every Twist order with a pipeline part on it, split by where the DNA physically is.
-  ETAs come from Twist; once a shipment exists the shipment dates are authoritative, because Twist
-  never reconciles the order-level ETA after shipping. Click any row for the parts on that order —
-  after delivery each one shows its plate, well, QC and yield from Twist's own plate map.</p>
+  <p class="sub">Every Twist order on this account, split by where the DNA physically is.
+  <b>Synthesis parts</b> are the orders a pipeline syn-part workorder points at; <b>other orders</b>
+  are everything else on the account. ETAs come from Twist; once a shipment exists the shipment
+  dates are authoritative, because Twist never reconciles the order-level ETA after shipping — and
+  when the carrier reports a delay, the last scan replaces the ETA rather than sitting under a date
+  the box will not hit. Click any row for the parts on that order — after delivery each one shows
+  its plate, well, QC and yield from Twist's own plate map.</p>
   <div class="ov">
     <div class="ovc"><div class="ovn">{n_wait_parts}</div><div class="ovl">Parts awaiting delivery</div></div>
     <div class="ovc"><div class="ovn">{len(prog)}</div><div class="ovl">Orders in progress</div></div>
@@ -425,7 +677,10 @@ def _render() -> str:
       <div class="ovl">Delivered, not in LIMS</div></div>
     <div class="ovc"><div class="ovn" style="color:{'#b91c1c' if overdue else '#15803d'}">{overdue}</div>
       <div class="ovl">Orders past ETA</div></div>
+    <div class="ovc"><div class="ovn">{len(oth)}</div><div class="ovl">Other account orders</div></div>
   </div>
+
+  <h2 class="grp">Synthesis parts <span class="cnt">{len(syn)}</span></h2>
 
   <h3 class="sec">In progress <span class="cnt">{len(prog)}</span></h3>
   {t_prog}
@@ -435,6 +690,19 @@ def _render() -> str:
 
   <h3 class="sec">Delivered <span class="cnt">{len(deliv)}</span></h3>
   {t_deliv}
+
+  <h2 class="grp">Other orders on this account <span class="cnt">{len(oth)}</span></h2>
+  <p class="sub">No pipeline syn-part points at these — oligos, genes, and other teams' orders.
+  Same tracking, kept separate so the synthesis tables above stay the first thing you read.</p>
+
+  <h3 class="sec">In progress <span class="cnt">{len(oprog)}</span></h3>
+  {o_prog}
+
+  <h3 class="sec">In transit <span class="cnt">{len(otrans)}</span></h3>
+  {o_trans}
+
+  <h3 class="sec">Delivered <span class="cnt">{len(odeliv)}</span></h3>
+  {o_deliv}
 
   {note_html}
 </div>
@@ -477,6 +745,10 @@ _CSS = """
 #tab-twist .ovl { font-size:11px; color:#6b7280; margin-top:2px; }
 #tab-twist .sec { font-size:13px; font-weight:700; margin:22px 0 7px; text-transform:uppercase;
                   letter-spacing:.05em; color:#374151; }
+/* Group heading. The two groups each carry three state tables, so the group needs to outrank
+   the state headings visually or the page reads as six peer sections. */
+#tab-twist .grp { font-size:17px; font-weight:800; color:#111827; margin:34px 0 2px;
+                  padding-bottom:7px; border-bottom:2px solid #e5e7eb; }
 #tab-twist .cnt { font-size:11px; font-weight:700; color:#6b7280; background:#f3f4f6;
                   border-radius:9px; padding:1px 8px; margin-left:5px; }
 #tab-twist .twtbl { width:100%; border-collapse:collapse; background:#fff; border:1px solid #e5e7eb;
@@ -493,6 +765,13 @@ _CSS = """
 #tab-twist .bad { color:#b91c1c; font-weight:600; }
 #tab-twist .good { color:#15803d; font-weight:600; }
 #tab-twist .amberv { color:#b45309; font-size:11px; font-weight:600; }
+/* Turnaround. Deliberately the loudest thing in the Order cell — it is the number the tab
+   gets opened for, and as dim 11px text beside the order date nobody could find it. */
+#tab-twist .tat { display:inline-block; margin-top:4px; font-size:13px; font-weight:800;
+                  color:#1d4ed8; background:#eff6ff; border:1px solid #bfdbfe;
+                  border-radius:6px; padding:2px 8px; letter-spacing:.01em; }
+#tab-twist .tat.open { color:#b45309; background:#fffbeb; border-color:#fde68a; }
+#tab-twist .tatsub { font-size:10px; font-weight:600; opacity:.75; margin-left:5px; }
 #tab-twist .tog { font-weight:600; cursor:pointer; border-bottom:1px dotted #c4c4c6; }
 #tab-twist .caret { color:#9ca3af; font-size:10px; }
 #tab-twist .bdg { display:inline-block; font-size:9px; font-weight:700; padding:2px 7px; border-radius:10px;
