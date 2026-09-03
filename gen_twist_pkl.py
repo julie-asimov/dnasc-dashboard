@@ -31,9 +31,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import datetime as dt
+import hashlib
 import io
+import json
 import os
 import pickle
 import sys
@@ -478,6 +481,30 @@ def _eta_changes(orders: list[dict], by_order: dict, waiting: set) -> dict:
     return changes
 
 
+def _token_id(label: str, tok: str) -> str:
+    """Fingerprint a token for the log — length, a hash prefix, and its expiry. NEVER the
+    token itself.
+
+    Worth a line of output because of how this failed on 2026-09-03: `~/.bashrc` exported
+    stale 150-char tokens that shadowed the good 263-char ones in `~/.twist_env`, so the
+    hourly cron (which sources that file) succeeded every hour while every interactive run
+    got an instant Django 500 from Twist. Identical code, identical host, opposite results,
+    and nothing in the output said which credentials were in play. This line does.
+    """
+    out = f"{label} len={len(tok)} sha={hashlib.sha256(tok.encode()).hexdigest()[:8]}"
+    try:
+        payload = tok.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+        if exp:
+            when = dt.datetime.fromtimestamp(exp, dt.timezone.utc)
+            left = (when - dt.datetime.now(dt.timezone.utc)).days
+            out += f" exp={when:%Y-%m-%d}" + (" EXPIRED" if left < 0 else f" ({left}d)")
+    except Exception:
+        out += " exp=? (payload did not decode — token may be truncated)"
+    return out
+
+
 def have_tokens() -> bool:
     """Whether the Twist API credentials are in the environment. full_refresh checks this
     before calling in, so a server without the tokens skips cleanly instead of erroring."""
@@ -492,6 +519,8 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
     # `except Exception`, and SystemExit would sail past it and kill the refresh.
     if not jwt or not eut:
         raise RuntimeError("AUTHORIZATION_JWT and X_END_USER_TOKEN must be set.")
+
+    print(f"tokens: {_token_id('JWT', jwt)} | {_token_id('EUT', eut)}", flush=True)
 
     t0 = time.time()
 
