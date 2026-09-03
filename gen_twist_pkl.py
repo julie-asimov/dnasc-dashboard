@@ -160,7 +160,17 @@ def _get_page_with_retry(url, jwt, eut, page, left):
             if resp.status_code not in _RETRY_ON:
                 resp.raise_for_status()
                 return resp
-            why = f"HTTP {resp.status_code}"
+            # Say WHAT the vendor said. Discarding the body meant a repeating server-side
+            # 500 was indistinguishable from a token problem, a rate limit and a real
+            # outage — and the retry line was the only place we would ever see it.
+            body = " ".join((resp.text or "").split())[:200]
+            hint = ""
+            for h in ("Retry-After", "X-RateLimit-Remaining", "CF-Ray", "X-Request-Id"):
+                if h in resp.headers:
+                    hint += f" {h}={resp.headers[h]}"
+            why = f"HTTP {resp.status_code} in {resp.elapsed.total_seconds():.1f}s{hint}"
+            if body:
+                why += f" — {body!r}"
         except requests.RequestException as e:
             if getattr(getattr(e, "response", None), "status_code", None) not in (None,) + _RETRY_ON:
                 raise
@@ -259,12 +269,13 @@ def _platemap_csv(email, jwt, eut, order_sfdc: str, shipment_id: str, order_name
     if raw[:2] == b"PK":
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                inner = next((n for n in z.namelist() if n.lower().endswith(".csv")), None)
-                if not inner:
+                names = sorted(n for n in z.namelist() if n.lower().endswith(".csv"))
+                if not names:
                     return None, None
-                text = z.read(inner).decode("utf-8", "replace")
+                texts = [z.read(n).decode("utf-8", "replace") for n in names]
         except Exception:
             return None, None
+        text = _merge_csvs(texts)
     else:
         text = raw.decode("utf-8", "replace")
 
@@ -293,6 +304,39 @@ def _platemap_csv(email, jwt, eut, order_sfdc: str, shipment_id: str, order_name
 # the dashboard HTML, so every viewer downloads them on every page load.
 _DROP_COLS = ("Insert Sequence", "Construct Sequence", "Vector Sequence",
               "Construct Sequence (Insert + Adapters)")
+
+
+def _merge_csvs(texts: list) -> str:
+    """Several plate-map CSVs → one.
+
+    A shipment's ZIP holds ONE CSV PER PLATE, and reading only the first member quietly threw
+    away the rest: Q-698815's 5-plate shipment ships 43+36+25+25+32 = 161 rows and we kept 43,
+    so four plates' worth of well locations never existed as far as the tab was concerned.
+
+    Column names differ between Twist's product lines, so the merge takes the UNION of the
+    members' headers rather than assuming they line up. Any single-member or unparsable input
+    is returned untouched — a plate map is better whole than half-rewritten.
+    """
+    if len(texts) == 1:
+        return texts[0]
+    try:
+        cols, rows = [], []
+        for t in texts:
+            rd = csv.DictReader(io.StringIO(t))
+            for c in (rd.fieldnames or []):
+                if c not in cols:
+                    cols.append(c)
+            rows.extend(list(rd))
+        if not cols or not rows:
+            return texts[0]
+        buf = io.StringIO()
+        wr = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+        wr.writeheader()
+        for r in rows:
+            wr.writerow({c: (r.get(c) or "") for c in cols})
+        return buf.getvalue()
+    except Exception:
+        return texts[0]
 
 
 def _slim_csv(text: str) -> str:

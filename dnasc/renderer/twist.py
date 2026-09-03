@@ -336,12 +336,17 @@ def _ship_cell(r: dict, want: tuple, maps: dict) -> str:
         # shows when no map is cached — knowing the plate is useful even without the CSV.
         key = f'{r["q"]}|{s.get("id")}'
         m = maps.get(key)
-        plate = next((c.get("barcode") for c in (s.get("containers") or []) if c.get("barcode")), "")
+        # A shipment can carry many containers — 14 tubes on Q-702649, 5 plates on Q-698815 —
+        # and showing only the first barcode made a five-plate box read as one plate.
+        bcs = [c.get("barcode") for c in (s.get("containers") or []) if c.get("barcode")]
+        plate = bcs[0] if bcs else ""
+        more = len(bcs) - 1
         pm = ""
         if m or plate:
             btn = (f'<button class="dl" onclick="twistCSV(\'{_esc(key)}\',event)">'
                    f'&#8595; Plate map</button>' if m else "")
-            lbl = f'<span class="mono dim">{_esc(plate)}</span>' if plate else ""
+            lbl = (f'<span class="mono dim" title="{_esc(chr(10).join(bcs))}">{_esc(plate)}'
+                   + (f' <b>+{more}</b>' if more > 0 else "") + '</span>') if plate else ""
             # Glycerol ships as its own shipment. Saying so on the block is the difference
             # between "why are there two plate maps" and "one is the DNA, one is the stab".
             tag = _badge("glycerol", "amber") if (m or {}).get("glycerol") else ""
