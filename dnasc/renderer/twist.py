@@ -28,6 +28,7 @@ import html
 import json
 import os
 import pickle
+import re
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -539,6 +540,40 @@ def _detail_row(r: dict, rid: str, ncols: int) -> str:
     if not rows:
         return ""
 
+    # Grouped by where each part physically is, because a flat list does not scale: Q-698815
+    # opens 320 rows and the question being asked of it is "what is here and what is not".
+    # The shipment tag is what makes delivered separable from in-transit at PART level — the
+    # order-level bucket can only speak for the whole order.
+    def _bucket(nm, p, it):
+        st = str((it or {}).get("status") or "")
+        if st in _BAD_ITEM:
+            return 4
+        ship = (r["wells"].get(nm) or r["glyc"].get(nm) or {}).get("ship_status") or ""
+        if ship == "received":
+            return 0
+        if ship == "shipped":
+            return 1
+        if st == "in_production":
+            return 2
+        return 3
+
+    _GROUPS = ["Delivered", "In transit", "In production", "Ordered", "Failed / cancelled"]
+
+    def _plate_of(nm):
+        return ((r["wells"].get(nm) or r["glyc"].get(nm) or {}).get("plate") or "")
+
+    def _well_key(nm):
+        """Column-major within a plate — A1, B1, … H1, A2 — the order the plate map lists
+        and the order someone works a plate in. Lexical sort would put A10 before A2."""
+        w = ((r["wells"].get(nm) or r["glyc"].get(nm) or {}).get("well") or "").strip()
+        m = re.match(r"([A-Za-z]+)(\d+)$", w)
+        return (int(m.group(2)), m.group(1)) if m else (9999, w)
+
+    # The group key carries the PLATE for anything physical, so a 143-part delivery reads as
+    # five plate-sized chunks instead of one wall of rows.
+    rows = [(nm, p, it, _bucket(nm, p, it)) for nm, p, it in rows]
+    rows.sort(key=lambda t: (t[3], _plate_of(t[0]), _well_key(t[0]), t[0]))
+
     # The Glycerol column only appears when the order actually has glycerol stocks — most
     # orders are DNA only, and an always-empty column just adds noise to read past.
     has_glyc = bool(r["glyc"])
@@ -546,8 +581,22 @@ def _detail_row(r: dict, rid: str, ncols: int) -> str:
             '<th>Retries</th><th>Plate / tube · well</th>'
             + ('<th>Glycerol</th>' if has_glyc else "")
             + '<th>QC</th><th>Yield (ng)</th><th>Length</th></tr>')
-    body = []
-    for nm, p, it in rows:
+    ncols_det = 9 + (1 if has_glyc else 0)
+    body, seen_group = [], None
+    for nm, p, it, bucket in rows:
+        # One header per (state, plate). Emitted lazily as the sorted list crosses a
+        # boundary, so a group costs nothing when it is empty.
+        plate_here = _plate_of(nm) if bucket in (0, 1) else ""
+        gkey = (bucket, plate_here)
+        if gkey != seen_group:
+            seen_group = gkey
+            n_in = sum(1 for x in rows if (x[3], _plate_of(x[0]) if x[3] in (0, 1) else "") == gkey)
+            label = _GROUPS[bucket] + (f' · <span class="mono">{_esc(plate_here)}</span>'
+                                       if plate_here else "")
+            tone = ("gdone" if bucket == 0 else "gmove" if bucket == 1 else
+                    "gbad" if bucket == 4 else "gwait")
+            body.append(f'<tr class="dgrp {tone}"><td colspan="{ncols_det}">{label}'
+                        f' <span class="dcnt">{n_in}</span></td></tr>')
         w = r["wells"].get(nm) or {}
 
         if p:
@@ -625,6 +674,13 @@ _PROG_COLS_PARTIAL = [("Order", "20%"), ("Parts waiting", "13%"), ("Twist progre
                       ("ETA", "21%"), ("Status", "9%"), ("Already arrived", "20%")]
 _TRANS_COLS = [("Order", "24%"), ("Parts waiting", "14%"), ("Shipment", "40%"),
                ("Arriving", "22%")]
+# In transit, when a PARTIAL order is present — the mirror of _PROG_COLS_PARTIAL. The
+# Shipment column here renders only shipments in flight, so a partial order's already-
+# delivered boxes vanished along with their tracking numbers and plate maps. Verified by
+# simulation: an in-transit partial rendered its `partial` badge and its counts, but not one
+# line about the box that had already landed.
+_TRANS_COLS_PARTIAL = [("Order", "21%"), ("Parts waiting", "13%"), ("Shipment", "31%"),
+                       ("Arriving", "16%"), ("Already arrived", "19%")]
 _DELIV_COLS = [("Order", "20%"), ("Parts", "12%"), ("Delivered", "18%"),
                ("Received into LIMS", "20%"), ("Shipment & plate map", "30%")]
 
@@ -650,10 +706,12 @@ def _state_tables(rows: list, maps: dict, tag: str, empties: tuple) -> tuple:
                            _eta_cell(r), _badge(r["status"] or "—", "blue")]
         + ([_ship_cell(r, ("shipped", "received"), m)] if any_partial else []),
         empties[0], maps, f"{tag}p")
+    trans_partial = any(r["partial"] for r in trans)
     t_trans = _table(
-        trans, _TRANS_COLS,
+        trans, _TRANS_COLS_PARTIAL if trans_partial else _TRANS_COLS,
         lambda r, rid, m: [_order_cell(r), _parts_cell(r, rid),
-                           _ship_cell(r, ("shipped",), m), _transit_when(r)],
+                           _ship_cell(r, ("shipped",), m), _transit_when(r)]
+        + ([_ship_cell(r, ("received",), m)] if trans_partial else []),
         empties[1], maps, f"{tag}t")
     t_deliv = _table(
         deliv, _DELIV_COLS,
@@ -832,6 +890,15 @@ _CSS = """
                   border-radius:6px; padding:2px 8px; letter-spacing:.01em; }
 #tab-twist .tat.open { color:#b45309; background:#fffbeb; border-color:#fde68a; }
 #tab-twist .tatsub { font-size:10px; font-weight:600; opacity:.75; margin-left:5px; }
+/* Group headers inside the per-part dropdown: state, then plate. A 320-part order is
+   unreadable as a flat list, and the question asked of it is "what is here and what isn't". */
+#tab-twist .det tr.dgrp td { font-size:10px; font-weight:800; text-transform:uppercase;
+                             letter-spacing:.05em; padding:6px 8px; border-top:1px solid #e5e7eb; }
+#tab-twist .det tr.dgrp.gdone td { background:#f0fdf4; color:#15803d; }
+#tab-twist .det tr.dgrp.gmove td { background:#eff6ff; color:#1d4ed8; }
+#tab-twist .det tr.dgrp.gwait td { background:#f9fafb; color:#6b7280; }
+#tab-twist .det tr.dgrp.gbad  td { background:#fef2f2; color:#b91c1c; }
+#tab-twist .dcnt { font-weight:700; opacity:.7; margin-left:4px; }
 #tab-twist .tog { font-weight:600; cursor:pointer; border-bottom:1px dotted #c4c4c6; }
 #tab-twist .caret { color:#9ca3af; font-size:10px; }
 #tab-twist .bdg { display:inline-block; font-size:9px; font-weight:700; padding:2px 7px; border-radius:10px;

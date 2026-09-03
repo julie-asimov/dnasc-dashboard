@@ -624,8 +624,19 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
                 "glycerol" in (i.get("product") or "").lower() for i in parsed.values())
             platemaps[key] = {"filename": fname, "csv": text, "glycerol": is_glyc}
             for nm, info in parsed.items():
+                # Tag each row with the state of the SHIPMENT that carried it. Merged per
+                # order, the maps otherwise lose which box a part travelled in, so the tab
+                # could not tell a part that has landed from one still in the air — the
+                # order-level bucket was the finest grain available.
+                info["ship_status"] = s.get("status") or ""
+                info["ship_at"] = str(s.get("received_at") or s.get("shipped_date") or "")[:10]
                 tgt = glyc if "glycerol" in (info.get("product") or "").lower() else wells
-                tgt.setdefault(q, {})[nm] = info
+                slot = tgt.setdefault(q, {})
+                # A part can appear in two maps (a reship, or DNA then glycerol). Never let a
+                # shipped row overwrite one already recorded as received.
+                if slot.get(nm, {}).get("ship_status") == "received" != info["ship_status"]:
+                    continue
+                slot[nm] = info
     if skipped:
         # Say it out loud: a missing download button must not look like "Twist sent no map".
         notes.append(f"out of time — {skipped} plate map(s) not fetched this run")
