@@ -391,6 +391,23 @@ class EnrichmentTransformer:
             _asm_ph      = _phase_rows[_phase_rows['type'].isin(_ASM_TYPES) & _phase_rows['STOCK_ID'].astype(str).isin(_root_stocks)]
             _parts_ph    = _phase_rows[(_phase_rows['type'] != 'lsp_workorder') & ~_phase_rows['STOCK_ID'].astype(str).isin(_root_stocks)]
             _asm_progressing = _asm_ph[_asm_ph['visual_status'].isin({'RUNNING', 'READY', 'IN_PROGRESS', 'BLOCKED'})]
+            # bios `workorder.status` lags the bench: a Golden Gate workorder sits at
+            # WAITING while its OpTracker assembly operation is already RD/RU and the
+            # team is running it. WAITING is (correctly) not in _asm_progressing above,
+            # so those requests fell through to PARTS while req_operation right next to
+            # them read 'GOLDEN GATE ASSEMBLY: READY' — the two columns disagreed because
+            # one reads the workorder and the other the operation. Promote on the
+            # operation: if the assembly step itself is ready or running, we are in ASM.
+            _asm_op_active = False
+            if not _asm_ph.empty and {'protocol_name', 'operation_state'} <= set(_asm_ph.columns):
+                for _pn_cell, _st_cell in zip(_asm_ph['protocol_name'].to_numpy(),
+                                              _asm_ph['operation_state'].to_numpy()):
+                    if not isinstance(_pn_cell, (list, np.ndarray)) or not isinstance(_st_cell, (list, np.ndarray)):
+                        continue
+                    if any(str(_p) in (proto.GOLDEN_GATE, proto.GIBSON) and str(_s) in ('RD', 'RU')
+                           for _p, _s in zip(_pn_cell, _st_cell)):
+                        _asm_op_active = True
+                        break
             # A root-stock assembly that has already RUN (reached a terminal
             # SUCCEEDED/FAILED state) means the request got to ASM — even if the
             # only rows still active are dangling upstream parts. Without this,
@@ -402,10 +419,28 @@ class EnrichmentTransformer:
                 & r_df['visual_status'].isin({'SUCCEEDED', 'FAILED'})
                 & (r_df['wo_status'].astype(str) != 'CANCELED')
             ]
+            # Reaching LSP is one-way.  Once an LSP workorder has been cut for a
+            # request, the request is in LSP and stays there — a canceled LSP order
+            # (re-order pending), a SUCCEEDED one still awaiting fulfillment, and a
+            # FAILED one that then stalls all drop out of _phase_rows, and
+            # _asm_executed below would otherwise demote the label back to ASM.
+            #
+            # This used to compare creation times (`_asm_t <= _lsp_t`) so that
+            # assembly work opened *after* the last LSP counted as a genuine trip
+            # back to assembly.  That filter did not exclude FAILED assemblies, so a
+            # dead post-LSP attempt demoted the phase: 18 requests in the 2026-09-09
+            # baseline read ASM despite a SUCCEEDED LSP, and every one of them had a
+            # FAILED assembly workorder as its most recent.  Per Julie, an LSP that
+            # fails and stalls must never read ASM, so the comparison is gone: any
+            # LSP workorder means the request reached LSP.
+            _lsp_all = r_df[r_df['type'] == 'lsp_workorder']
+            _lsp_reached = not _lsp_all.empty
             if not _lsp_ph.empty:
                 req_phase[req_id] = 'LSP'
-            elif not _asm_progressing.empty:
+            elif not _asm_progressing.empty or _asm_op_active:
                 req_phase[req_id] = 'ASM'
+            elif _lsp_reached:
+                req_phase[req_id] = 'LSP'
             elif not _asm_executed.empty:
                 req_phase[req_id] = 'ASM'
             elif not _asm_ph.empty or not _parts_ph.empty:
