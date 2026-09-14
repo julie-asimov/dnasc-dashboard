@@ -265,6 +265,94 @@ ORDER BY oligo_stock.created_at DESC
 """
 
 
+def _query_ngs_queue() -> str:
+    """
+    The NGS QUEUE: every open ngs_workorder — what is actually waiting on a sequencing run.
+    An NGS run fits 384 samples, so this is the list that has to be triaged when it overflows.
+
+    The ngsworkorder row itself is nearly empty for these: plasmid_stock_id / dpart_stock_id /
+    syn_part_stock_id are all NULL on the RearrayQuantLsp samples that make up the queue, and
+    `workorder.request_id` is NULL on every one of them. The sample's identity only resolves by
+    walking its WELL: well → well_content → plasmid_stock → plasmid_id, which also yields the
+    colony number (the queue is colony 1/2/3 of each pick).
+    """
+    return """
+SELECT
+  wo.id                                   AS WID,
+  wo.status                               AS STATUS,
+  wo.created_at                           AS CREATED,
+  nwo.sample_type                         AS SAMPLE_TYPE,
+  nwo.well_id                             AS WELL_ID,
+  COALESCE(CONCAT('pAI-', ps.plasmid_id),
+           CONCAT('pAI-', wc.plasmid_id)) AS PART,
+  ps.colony_number                        AS COLONY,
+  w.plate_id                              AS PLATE_ID,
+  w.position                              AS POSITION,
+  pl.location                             AS BOX,
+  pl.protocol                             AS PROTOCOL
+FROM bios__src.workorder wo
+JOIN bios__src.ngsworkorder nwo ON nwo.id = wo.id
+LEFT JOIN lims__src.well          w   ON w.id  = nwo.well_id
+LEFT JOIN lims__src.plate         pl  ON pl.id = w.plate_id
+LEFT JOIN lims__src.well_content  wc  ON wc.well_id = w.id
+LEFT JOIN lims__src.plasmid_stock ps  ON ps.id = wc.plasmid_stock_id
+WHERE wo.type = 'ngs_workorder' AND wo.deleted_at IS NULL
+  AND wo.status IN ('RUNNING','READY','WAITING','BLOCKED')
+"""
+
+
+def _query_active_lsp_workorders() -> str:
+    """
+    LSP workorders currently in flight, with the plasmid they prep and the request they belong to.
+
+    This is the "is a prep already running for this?" side of the NGS triage rule. It has to key
+    on the PLASMID: the NGS workorders in the queue carry no request_id at all, so plasmid name is
+    the only link between a queued sample and a running prep. The LSP row's own request_id is
+    carried through for display, so the request is still visible even though it is not the join.
+    """
+    return """
+SELECT
+  wo.id                                  AS WID,
+  wo.status                              AS STATUS,
+  wo.created_at                          AS CREATED,
+  wo.request_id                          AS REQUEST_ID,
+  JSON_VALUE(lw.plasmid, '$.name')       AS PART,
+  JSON_VALUE(lw.lsp_batch_key, '$.id')   AS BATCH_ID,
+  lw.vendor                              AS VENDOR,
+  lw.vendor_order_id                     AS VENDOR_ORDER_ID
+FROM bios__src.workorder wo
+JOIN bios__src.lspworkorder lw ON lw.id = wo.id
+WHERE wo.type = 'lsp_workorder' AND wo.deleted_at IS NULL
+  AND wo.status IN ('RUNNING','READY','WAITING','BLOCKED')
+"""
+
+
+def _query_lsp_batches() -> str:
+    """
+    Every LSP batch, keyed by the plasmid it preps. `lsp_batch.plasmid_id` links straight to
+    the plasmid — no lineage walk needed — and the batch carries its OWN sequencing verdict
+    (`ngs_status`) plus `qc_status`, which is what makes "we already sequenced this one" answerable.
+
+    Used by the NGS tab: a plasmid with a passed LSP batch has already been proven, so a running
+    workorder for it does not need to spend one of the 384 slots in an NGS run.
+    """
+    return """
+SELECT
+  CONCAT('pAI-', lb.plasmid_id) AS PART,
+  lb.id                         AS BATCH_ID,
+  lb.ngs_status                 AS NGS_STATUS,
+  lb.qc_status                  AS QC_STATUS,
+  lb.yield_status               AS YIELD_STATUS,
+  lb.available                  AS AVAILABLE,
+  lb.lot                        AS LOT,
+  lb.vendor                     AS VENDOR,
+  lb.prep_method                AS PREP_METHOD,
+  lb.created_at                 AS CREATED_AT
+FROM lims__src.lsp_batch lb
+WHERE lb.plasmid_id IS NOT NULL
+"""
+
+
 def _query_lsp_echo_plates() -> str:
     """
     384 Echo Source plates linked to an LSP workorder — either a rearray from the LSP
@@ -875,6 +963,12 @@ def classify_actions(
                 (pd.to_numeric(all_plate_data["CONCENTRATION_NGUL"], errors="coerce") > 5) &
                 (pd.to_numeric(all_plate_data["VOLUME_UL"], errors="coerce") > 30) &   # >30 µL — exclude near-empty wells
                 (all_plate_data["SEQ_CONFIRMED"] == "True") &
+                # A DISCARDED plate is physically gone — its wells can read full and seq-confirmed
+                # and still be unusable, so they must never be suggested for flipping ON. Without
+                # this, pAI-21781 said "Mark available" on 3 wells (41.4 µL, seq-confirmed) sitting
+                # on discarded plate 15742, while its own detail panel — which does gate on
+                # location — correctly said "needs batch" and listed nothing.
+                _location_live(all_plate_data) &
                 freshness_mask
             ].copy()
             wells_confirmed = wells_confirmed.sort_values(
@@ -906,7 +1000,8 @@ def classify_actions(
                     (all_plate_data["AVAILABLE"] != "True") &
                     (pd.to_numeric(all_plate_data["CONCENTRATION_NGUL"], errors="coerce") > 5) &
                     (pd.to_numeric(all_plate_data["VOLUME_UL"], errors="coerce") > 30) &   # >30 µL
-                    (all_plate_data["SEQ_CONFIRMED"] == "True")
+                    (all_plate_data["SEQ_CONFIRMED"] == "True") &
+                    _location_live(all_plate_data)   # discarded plate = gone, never offer its wells
                 ]
             else:
                 all_conf = pd.DataFrame()
@@ -1842,6 +1937,19 @@ def run_parts_inventory() -> dict:
     print(f"  {len(lsp_plates)} LSP-linked 384 Echo plates")
     _lap("query LSP Echo plates")
 
+    print("Loading LSP batches (plasmid → sequencing verdict) ...")
+    lsp_batches = client.query(_query_lsp_batches()).to_dataframe()
+    print(f"  {len(lsp_batches)} LSP batches over {lsp_batches['PART'].nunique() if len(lsp_batches) else 0} plasmids")
+    _lap("query LSP batches")
+
+    print("Loading the NGS queue + in-flight LSP preps ...")
+    ngs_queue = client.query(_query_ngs_queue()).to_dataframe()
+    lsp_active = client.query(_query_active_lsp_workorders()).to_dataframe()
+    print(f"  {len(ngs_queue)} samples queued for sequencing "
+          f"({ngs_queue['PART'].nunique() if len(ngs_queue) else 0} plasmids) · "
+          f"{len(lsp_active)} LSP preps in flight")
+    _lap("query NGS queue + active LSP")
+
     # Partner close-out is PAUSED (not rendered — SHOW_CLOSEOUT=False in the tab), yet this query
     # was ~50% of the whole pull (~4 min). Skip it while paused; flip PULL_PARTNER_CLOSEOUT=True
     # to re-enable when the feature resumes.
@@ -1867,6 +1975,9 @@ def run_parts_inventory() -> dict:
         "all_plate_data": all_plate_data,
         "dpart_data": dpart_data,
         "lsp_plates": lsp_plates,
+        "lsp_batches": lsp_batches,
+        "ngs_queue": ngs_queue,
+        "lsp_active": lsp_active,
         "partner_closeout": partner_closeout,
         "wod_df": _tab["wod"],
         "blk_df": _tab["blk"],
