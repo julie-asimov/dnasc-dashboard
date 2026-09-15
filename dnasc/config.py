@@ -7,6 +7,7 @@ All tuneable constants live here — nothing else imports os/datetime for config
 
 from __future__ import annotations
 import os
+import sys
 from datetime import datetime, timedelta
 import pytz
 
@@ -19,6 +20,22 @@ class PipelineConfig:
 
     # ── BigQuery ──────────────────────────────────────────────────────────────
     PROJECT_ID: str = "data-platform-core-prd"
+
+    # ── Work-in-progress tabs ─────────────────────────────────────────────────
+    # Tabs listed here render on a local box but are withheld from the dashboard
+    # the cron publishes to script-server. The NGS tab is in this state: the
+    # triage data it shows is not yet correct, so it must not reach the team.
+    # Host rule: the publishing cron runs on Linux, day-to-day work is on macOS.
+    # Force either way with DNASC_LOCAL_TABS=1 (show) / =0 (hide).
+    LOCAL_ONLY_TABS: frozenset = frozenset({"ngs"})
+
+    @staticmethod
+    def show_local_only_tabs() -> bool:
+        """True when WIP tabs should render (local box, or explicit override)."""
+        override = os.environ.get("DNASC_LOCAL_TABS")
+        if override is not None:
+            return override.strip().lower() not in {"", "0", "false", "no", "off"}
+        return sys.platform == "darwin"
 
     # ── Data filtering ────────────────────────────────────────────────────────
     # Tracking history window — a ROLLING window ending today, so the refresh stops
@@ -149,7 +166,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.11.105"
+    PIPELINE_VERSION: str = "1.11.106"
 
     @classmethod
     def sql_step_ts(cls, op: str = "o", job: str = "j") -> str:

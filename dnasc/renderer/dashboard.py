@@ -1344,8 +1344,21 @@ def render_all_projects_dashboard(
     _parts_fragment = render_parts_tab()
     # Colony picking tab — no data of its own; scores counts pasted in the browser
     _cpick_fragment = render_colony_pick_tab()
-    # NGS triage tab — reads the same parts_result.pkl (running WOs + glycerol + LSP batches)
-    _ngs_fragment = render_ngs_tab()
+    # NGS triage tab — reads the same parts_result.pkl (running WOs + glycerol + LSP batches).
+    # WIP: withheld from the published dashboard (see PipelineConfig.LOCAL_ONLY_TABS).
+    _show_ngs = "ngs" not in PipelineConfig.LOCAL_ONLY_TABS or PipelineConfig.show_local_only_tabs()
+    _ngs_fragment = render_ngs_tab() if _show_ngs else ""
+    _ngs_tab_btn = (
+        '                <button class="tab-btn" data-tab="ngs" onclick="switchTab(\'ngs\')">\n'
+        '                    <span style="font-size:16px;">\U0001f52c</span>\n'
+        '                    <span class="tab-text">NGS</span>\n'
+        '                </button>'
+    ) if _show_ngs else ""
+    _ngs_tab_div = (
+        '            <div id="tab-ngs" class="tab-content" '
+        'style="padding:0;overflow-y:auto;height:calc(100vh - 130px);">\n'
+        + _ngs_fragment + '\n            </div>'
+    ) if _show_ngs else ""
     # Twist tab — reads its own twist_result.pkl (vendor API pull on its own cron)
     _twist_fragment = render_twist_tab()
 
@@ -1389,16 +1402,13 @@ def render_all_projects_dashboard(
                     <span style="font-size:16px;">🧫</span>
                     <span class="tab-text">Colony Picking</span>
                 </button>
-                <button class="tab-btn" data-tab="ngs" onclick="switchTab('ngs')">
-                    <span style="font-size:16px;">🔬</span>
-                    <span class="tab-text">NGS</span>
-                </button>
+{_ngs_tab_btn}
                 <button class="tab-btn" data-tab="twist" onclick="switchTab('twist')">
                     <span style="font-size:16px;">📦</span>
                     <span class="tab-text">Twist</span>
                 </button>
             </div>
-            <script>(function(){{try{{var t=localStorage.getItem('dash_activeTab');if(t&&t!=='tracking'){{document.querySelector('[data-tab="tracking"]').classList.remove('active');var b=document.querySelector('[data-tab="'+t+'"]');if(b)b.classList.add('active');var s=document.createElement('style');s.id='_earlyhide';s.textContent='#tab-tracking{{display:none!important}}';document.head.appendChild(s);}}}}catch(e){{}}}}());</script>
+            <script>(function(){{try{{var t=localStorage.getItem('dash_activeTab');if(!t||t==='tracking')return;var b=document.querySelector('[data-tab="'+t+'"]');if(!b)return;document.querySelector('[data-tab="tracking"]').classList.remove('active');b.classList.add('active');var s=document.createElement('style');s.id='_earlyhide';s.textContent='#tab-tracking{{display:none!important}}';document.head.appendChild(s);}}catch(e){{}}}}());</script>
             <!-- TRACKING TAB -->
             <div id="tab-tracking" class="tab-content active">
                 <div class="controls-container">
@@ -4446,9 +4456,7 @@ def render_all_projects_dashboard(
                 __CPICK_FRAGMENT__
             </div>
 
-            <div id="tab-ngs" class="tab-content" style="padding:0;overflow-y:auto;height:calc(100vh - 130px);">
-                __NGS_FRAGMENT__
-            </div>
+__NGS_TAB__
 
             <!-- TWIST ORDERS TAB -->
             <div id="tab-twist" class="tab-content" style="padding:0;overflow-y:auto;height:calc(100vh - 130px);">
@@ -4462,7 +4470,7 @@ def render_all_projects_dashboard(
     html = html.replace("__INFLIGHT_FRAGMENT__", _inflight_fragment)
     html = html.replace("__PARTS_FRAGMENT__", _parts_fragment)
     html = html.replace("__CPICK_FRAGMENT__", _cpick_fragment)
-    html = html.replace("__NGS_FRAGMENT__", _ngs_fragment)
+    html = html.replace("__NGS_TAB__", _ngs_tab_div)
     html = html.replace("__TWIST_FRAGMENT__", _twist_fragment)
     # Deduped plate-popover pool, emitted once after the body. Build sites emitted
     # empty <div class="plate-popover" data-pop="N">; JS fills each from PLATE_POP
