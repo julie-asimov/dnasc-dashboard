@@ -769,8 +769,9 @@ def _render() -> str:
         age_h, stamp = 0.0, str(gen)
     stale = (f'<span class="stale">stale — {int(age_h)}h old</span>' if age_h > _STALE_HOURS else "")
     note_html = ("".join(f'<div class="note">{_esc(n)}</div>' for n in notes)
-                 + (f'<div class="note">Delivered orders drop off after '
-                    f'{data.get("window_days", 45)} days.</div>'))
+                 + (f'<div class="note">Delivered orders drop off '
+                    f'{data.get("window_days", 45)} days after they land. Open orders stay '
+                    f'until they close, however long that takes.</div>'))
 
     csv_map = {k: v.get("csv", "") for k, v in maps.items()}
     name_map = {k: v.get("filename", "platemap.csv") for k, v in maps.items()}

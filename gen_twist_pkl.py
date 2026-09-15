@@ -12,13 +12,24 @@ NEVER calls the Twist API. Two reasons that matters:
 Writes dashboard_state/twist_result.pkl ATOMICALLY (temp file + os.replace) so the
 renderer always sees either the previous good pkl or the complete new one.
 
-The order list is paged newest-first and STOPS EARLY: it pages only until every Q-number
-the pipeline is still waiting on has been seen AND the window reaches back `--days`
-(default 45). The full history is 300 orders — paging all of it would take ~20 minutes
-for data nobody looks at. A typical run is ~3 min (2 pages + plate maps); `--max-pages`
-bounds it at ~6, and `--deadline` is a wall-clock stop on top of that, so an hourly cron
-can never still be running when the next one fires. Anything skipped for either reason is
-recorded in `notes` and shown on the tab — a short pull must not read as "nothing new".
+`--days` (default 45) bounds DELIVERED orders only, and it is measured from the DELIVERY
+date — the latest shipment's `received_at`, else `shipped_date` — not from when the order
+was placed. An order placed 60 days ago that landed last week is recent news; keying the
+window off `received_date` dropped it for being "old" while its DNA was still on the bench.
+
+OPEN orders are never aged out. They are the ones worth looking at, and the longer one has
+been open the more that is true, so `_open_days` is stamped on each for the tab to flag.
+Note this only governs what is KEPT: paging still stops at `--days`, so an open order older
+than that is found only because the pipeline still lists it in `waiting`. Raise `--days` to
+reach further back.
+
+The order list is paged newest-first and STOPS EARLY: only until every Q-number the
+pipeline is still waiting on has been seen AND the window reaches back `--days`. The full
+history is 300 orders — paging all of it would take ~20 minutes for data nobody looks at.
+A typical run is ~3 min (2 pages + plate maps); `--max-pages` bounds it at ~6, and
+`--deadline` is a wall-clock stop on top of that, so an hourly cron can never still be
+running when the next one fires. Anything skipped for either reason is recorded in `notes`
+and shown on the tab — a short pull must not read as "nothing new".
 
 Env:
     AUTHORIZATION_JWT, X_END_USER_TOKEN   (required)
@@ -186,6 +197,33 @@ def _get_page_with_retry(url, jwt, eut, page, left):
               f"({attempt}/{_RETRIES})", flush=True)
         time.sleep(_RETRY_WAIT)
     return None
+
+
+def _delivered_on(order: dict) -> str:
+    """ISO date the order actually LANDED, or "" if nothing has arrived yet.
+
+    `received_at` is when the box was logged as received and is the honest answer;
+    `shipped_date` is the fallback for a shipment still in transit. Same precedence the
+    plate-map loop already uses for `ship_at`, so the two never disagree.
+
+    An order can ship in pieces (Q-705566 has three shipments). The LATEST one is what
+    matters for a drop-off window — the order is not finished with us until the last box
+    is in, so keying off the first would retire it while parts were still arriving.
+    """
+    dates = [str(s.get("received_at") or s.get("shipped_date") or "")[:10]
+             for s in (order.get("shipments") or [])
+             if s.get("status") in ("shipped", "received")]
+    return max((d for d in dates if d), default="")
+
+
+def _is_open(order: dict) -> bool:
+    """Twist's own verdict: status is 'open' until the order is done, then 'past'.
+
+    Deliberately not derived from item counts — a partially shipped order (Q-698807: two
+    shipments, still open) is exactly the case we must keep showing, and counting
+    completed items would retire it early.
+    """
+    return str(order.get("status") or "").lower() == "open"
 
 
 def _fetch_orders_window(email, jwt, eut, want: set, days: int, max_pages: int, left):
@@ -543,7 +581,8 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
         raise RuntimeError(f"no orders fetched in {el()} — keeping the previous cache"
                            + (f" ({'; '.join(notes)})" if notes else ""))
 
-    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    today = dt.date.today()
+    cutoff = (today - dt.timedelta(days=days)).isoformat()
     keep = []
     for o in orders:
         q = o.get("order_name")
@@ -551,11 +590,45 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
         # account — oligos, genes, another team's plasmids — and the tab shows them in their
         # own section rather than pretending the account only holds our synthesis parts.
         # Only the window bounds them; `waiting` can never name an order we have no parts for.
-        if q in waiting or str(o.get("received_date") or "")[:10] >= cutoff:
+        if q in waiting:
             keep.append(o)
+        elif _is_open(o):
+            # An OPEN order never ages out. The window exists to retire finished work, and an
+            # order still open is the opposite of finished — the older it is, the more it
+            # needs looking at. The previous rule aged opens out on `received_date`, so an
+            # order stuck in production for 60 days silently left the tab at day 45 and read
+            # as delivered.
+            keep.append(o)
+        else:
+            # Delivered/closed: the window runs from when the DNA LANDED, not when it was
+            # ordered. Q-705566 was placed 12 Aug and finished shipping 1 Sep — on the old
+            # rule its 20-day-old delivery would drop off before a same-day order placed
+            # 44 days ago and never shipped. An order that closed without ever shipping has
+            # no delivery date, so it falls back to `received_date` rather than living
+            # forever.
+            landed = _delivered_on(o)
+            if (landed or str(o.get("received_date") or "")[:10]) >= cutoff:
+                keep.append(o)
+
+    # Stamp the age the tab flags on. Computed here, where `today` and the order payload are
+    # both in hand, so every consumer reads the same number instead of re-deriving it.
+    for o in keep:
+        rec = str(o.get("received_date") or "")[:10]
+        o["_delivered_on"] = _delivered_on(o)
+        try:
+            o["_open_days"] = (today - dt.date.fromisoformat(rec)).days if _is_open(o) else None
+        except ValueError:
+            o["_open_days"] = None
     n_other = sum(1 for o in keep if o.get("order_name") not in by_order)
-    print(f"  {len(keep)} tracked within {days}d "
+    n_open = sum(1 for o in keep if _is_open(o))
+    aged = sorted((o for o in keep if (o.get("_open_days") or 0) > days),
+                  key=lambda o: -o["_open_days"])
+    print(f"  {len(keep)} tracked ({n_open} open, kept regardless of age; "
+          f"{len(keep) - n_open} delivered within {days}d of landing) "
           f"({len(keep) - n_other} with pipeline parts, {n_other} other) [{el()}]", flush=True)
+    if aged:
+        print(f"  {len(aged)} open >{days}d: "
+              + ", ".join(f"{o['order_name']} ({o['_open_days']}d)" for o in aged[:10]), flush=True)
 
     # Pipeline orders lead in both loops below. With non-pipeline orders now in `keep`,
     # spending the budget in list order could burn it on another team's parts and skip work
@@ -687,7 +760,8 @@ def refresh(days: int = 45, max_pages: int = 4,
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--days", type=int, default=45,
-                    help="how far back delivered orders stay on the tab (default 45)")
+                    help="how long a DELIVERED order stays on the tab, measured from its "
+                         "delivery date (default 45). Open orders are never aged out.")
     ap.add_argument("--max-pages", type=int, default=4,
                     help="hard cap on order pages fetched (default 4 = 100 orders)")
     ap.add_argument("--deadline", type=int, default=_DEADLINE_SECONDS,
