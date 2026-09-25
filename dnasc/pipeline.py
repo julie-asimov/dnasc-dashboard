@@ -454,55 +454,8 @@ def run_pipeline() -> pd.DataFrame:
     # ── Re-derive visual_status for repick workorders from downstream op states ─
     # _detect_colony_repicks sets visual_status=RUNNING unconditionally. Now that
     # resolve_downstream_plates has appended the repick's Rearray/Quant/NGS ops,
-    # apply the same colony-status logic as _apply_colony_status_overrides uses
-    # for a SUCCEEDED colony workorder — scoped to the post-repick op slice.
-    # This mirrors how streakout status is derived: OpTracker states + seq_confirmed.
-    def _repick_status(row):
-        if row.get("visual_status") != "RUNNING":
-            return row["visual_status"]
-        try:
-            tot = int(row.get("repick_total_colonies") or 0)
-            if tot <= 0:
-                return row["visual_status"]
-            pn = row.get("protocol_name")
-            st = row.get("operation_state")
-            if hasattr(pn, "tolist"): pn = pn.tolist()
-            if hasattr(st, "tolist"): st = st.tolist()
-            if not (isinstance(pn, list) and isinstance(st, list)):
-                return row["visual_status"]
-            # Find the LAST repick op (handles >1 repick round)
-            repick_idx = None
-            for i, p in enumerate(pn):
-                if p == proto.REPICK:
-                    repick_idx = i
-            if repick_idx is None:
-                return row["visual_status"]
-            post_pn = pn[repick_idx + 1:]
-            post_st = st[repick_idx + 1:]
-            if not post_pn:
-                return "RUNNING"  # repick plates found, nothing downstream yet
-            # The repick's own confirmed count, not the original pick's. A repick
-            # only fires on a FAILED parent, so seq_confirmed here is 0 by
-            # construction — reading it alone made every confirmed repick resolve
-            # back to FAILED off the post-repick NGS op.
-            seq = int(row.get("seq_confirmed") or 0) + int(row.get("repick_seq_confirmed") or 0)
-            # Active-op check must precede SC/FA check — the post-repick slice also
-            # contains original-pick NGS ops (SC/FA) re-appended by
-            # resolve_downstream_plates, so checking SC/FA first would falsely FAIL
-            # a workorder whose repick NGS is still running.
-            if any(s in ("RU", "RD") for s in post_st):
-                return "RUNNING"
-            has_progress = any(
-                p in proto.PROGRESS_PROTOS and s == "SC"
-                for p, s in zip(post_pn, post_st)
-            )
-            if not has_progress:
-                return "RUNNING"  # ops present but none SC yet
-            return _seq_status_from_ops(post_pn, post_st, seq)
-        except Exception:
-            pass
-        return row["visual_status"]
-
+    # _repick_status (module level, so it is testable) applies the same colony
+    # logic _apply_colony_status_overrides uses — scoped to the post-repick ops.
     _repick_mask = (
         (final_df["visual_status"] == "RUNNING") &
         (final_df.get("repick_total_colonies", pd.Series(0, index=final_df.index)).fillna(0).astype(int) > 0)
@@ -580,6 +533,100 @@ def _seq_status_from_ops(pn: list, ps: list, seq: int) -> str:
     if any(p in proto.SEQ_PROTOS and s in ("SC", "FA") for p, s in zip(pn, ps)):
         return "FAILED"
     return "IN_PROGRESS"
+
+
+def _as_utc(v):
+    """Best-effort tz-aware UTC Timestamp, or None when the value carries no time."""
+    try:
+        ts = pd.Timestamp(v)
+    except (TypeError, ValueError):
+        return None
+    if ts is pd.NaT or pd.isna(ts):
+        return None
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
+def _repick_status(row):
+    """
+    Re-derive a repick workorder's visual_status from the ops that ran AFTER the
+    repick — mirroring how streakout status is derived (OpTracker states +
+    seq_confirmed). Callers gate on visual_status == RUNNING and a non-zero
+    repick_total_colonies.
+    """
+    if row.get("visual_status") != "RUNNING":
+        return row["visual_status"]
+    try:
+        tot = int(row.get("repick_total_colonies") or 0)
+        if tot <= 0:
+            return row["visual_status"]
+        pn = row.get("protocol_name")
+        st = row.get("operation_state")
+        ts = row.get("operation_start")
+        if hasattr(pn, "tolist"): pn = pn.tolist()
+        if hasattr(st, "tolist"): st = st.tolist()
+        if hasattr(ts, "tolist"): ts = ts.tolist()
+        if not (isinstance(pn, list) and isinstance(st, list)):
+            return row["visual_status"]
+        if not isinstance(ts, list):
+            ts = []
+        # Find the LAST repick op (handles >1 repick round)
+        repick_idx = None
+        for i, p in enumerate(pn):
+            if p == proto.REPICK:
+                repick_idx = i
+        if repick_idx is None:
+            return row["visual_status"]
+
+        # Slice by TIME, not by list position. resolve_downstream_plates appends
+        # whatever it discovers to the END of these lists (repair.py: `existing +
+        # new`), and for a repick workorder it re-traces the ORIGINAL miniprep
+        # plate — so the original pick's Rearray/Quant (SC) and NGS (FA) land
+        # after the repick marker even though they ran days before it. Read
+        # positionally, a live repick resolved straight back to FAILED off the
+        # original pick's NGS: pAI-25730 (Sept 2026) showed "REPICK MINIPREP:
+        # RUNNING" and "STALLED" on the same card, because is_stalled reads
+        # visual_status while the operation line reads the ops list. Position
+        # stopped being a proxy for time the moment anything appended out of
+        # order; the timestamps still are.
+        ts_utc = [_as_utc(v) for v in ts]
+        ts_utc += [None] * max(0, len(pn) - len(ts_utc))
+        repick_ts = ts_utc[repick_idx]
+        if repick_ts is None:
+            # No timestamp on the repick itself — fall back to position.
+            idxs = list(range(repick_idx + 1, len(pn)))
+        else:
+            # An op with no timestamp of its own is left out: it cannot be shown
+            # to postdate the repick, and keeping it is exactly what produced the
+            # false FAILED. The cost is a finished repick reading RUNNING for a
+            # refresh, which is the safer direction of the two.
+            idxs = [
+                i for i in range(len(pn))
+                if i != repick_idx and ts_utc[i] is not None and ts_utc[i] > repick_ts
+            ]
+        idxs = [i for i in idxs if i < len(st)]
+        post_pn = [pn[i] for i in idxs]
+        post_st = [st[i] for i in idxs]
+        if not post_pn:
+            return "RUNNING"  # repick plates found, nothing downstream yet
+        # The repick's own confirmed count, not the original pick's. A repick
+        # only fires on a FAILED parent, so seq_confirmed here is 0 by
+        # construction — reading it alone made every confirmed repick resolve
+        # back to FAILED off the post-repick NGS op.
+        seq = int(row.get("seq_confirmed") or 0) + int(row.get("repick_seq_confirmed") or 0)
+        # Active-op check precedes the SC/FA check: the repick's own Rearray can
+        # be SC while its NGS is still RU, and that is RUNNING, not a verdict.
+        if any(s in ("RU", "RD") for s in post_st):
+            return "RUNNING"
+        has_progress = any(
+            p in proto.PROGRESS_PROTOS and s == "SC"
+            for p, s in zip(post_pn, post_st)
+        )
+        if not has_progress:
+            return "RUNNING"  # ops present but none SC yet
+        return _seq_status_from_ops(post_pn, post_st, seq)
+    except Exception:
+        pass
+    return row["visual_status"]
 
 
 def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
