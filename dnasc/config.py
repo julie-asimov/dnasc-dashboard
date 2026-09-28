@@ -166,7 +166,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.11.130"
+    PIPELINE_VERSION: str = "1.11.131"
 
     @classmethod
     def sql_step_ts(cls, op: str = "o", job: str = "j") -> str:

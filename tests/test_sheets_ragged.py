@@ -215,3 +215,55 @@ class TestAppendSafety:
         res = sheets.append_experiment_names([])
         assert res["ok"] is True
         assert res["appended"] == []
+
+
+# ── date-format normalization ────────────────────────────────────────────────
+#
+# The sheet is hand-maintained and mixes ISO (`2026-09-04`) with US short form
+# (`9/3/26`) in the same column. Every consumer parses with a hard
+# `strptime(s, "%Y-%m-%d")` inside a bare `except`, so a US-format row did not
+# raise — it silently became "no due date": no badge, no timeline marker, sorted
+# to the bottom, flagged "MISSING ASANA DATE". Normalizing at extraction keeps
+# due_dates.json ISO-only so no consumer has to learn a second format.
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2026-05-04",   "2026-05-04"),   # already ISO — untouched
+    ("2026/5/4",     "2026-05-04"),
+    ("9/3/26",       "2026-09-03"),   # month-first: Sep 3, never Mar 9
+    ("9/25/26",      "2026-09-25"),
+    ("10/2/26",      "2026-10-02"),
+    ("10/20/26",     "2026-10-20"),
+    ("12/31/2026",   "2026-12-31"),
+    ("Sep 25, 2026", "2026-09-25"),
+    ("",             ""),
+    ("nan",          ""),
+    ("TBD",          ""),            # free text is not a date
+])
+def test_iso_date_normalizes_every_spelling_in_the_sheet(raw, expected):
+    from dnasc.extractors import sheets
+    assert sheets._iso_date(raw) == expected
+
+
+def test_fetch_due_dates_emits_iso_for_us_format_rows(tmp_path, monkeypatch):
+    """A `9/3/26` row must reach due_dates.json as `2026-09-03`, not be dropped."""
+    from dnasc.extractors import sheets
+
+    df = pd.DataFrame([
+        {"experiment_name": "A808-1-NBW_SPR004_Vector-design > SPR004",
+         "date_sequence_transferred": "9/4/26", "due_date_in_asana": "10/2/26"},
+        {"experiment_name": "A697-1-NBW_FRS002_Plasmid-design",
+         "date_sequence_transferred": "", "due_date_in_asana": "2026-05-04"},
+        {"experiment_name": "A999-unparseable",
+         "date_sequence_transferred": "", "due_date_in_asana": "sometime in Q4"},
+    ])
+    monkeypatch.setattr(sheets, "_try_google_sheets", lambda: df)
+    monkeypatch.setattr(sheets, "DUE_DATES_FILE", tmp_path / "due_dates.json")
+
+    out = sheets.fetch_due_dates()
+
+    assert out["A808-1-NBW_SPR004_Vector-design > SPR004"] == {
+        "due_date": "2026-10-02", "sequence_transferred": "2026-09-04"}
+    assert out["A697-1-NBW_FRS002_Plasmid-design"]["due_date"] == "2026-05-04"
+    # Undated rows are dropped, not carried through as an unparseable string the
+    # renderer would silently swallow.
+    assert "A999-unparseable" not in out

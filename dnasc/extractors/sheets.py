@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -26,6 +27,45 @@ from dnasc.logger import get_logger
 log = get_logger(__name__)
 
 DUE_DATES_FILE = Path("dashboard_state/due_dates.json")
+
+# Accepted date spellings in the sheet, tried month-first (US locale, which is
+# what Asana/Sheets writes here). `9/3/26` is 3 Sep 2026, never 9 Mar.
+_DATE_FORMATS = (
+    "%Y-%m-%d", "%Y/%m/%d",
+    "%m/%d/%Y", "%m/%d/%y",
+    "%m-%d-%Y", "%m-%d-%y",
+    "%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y",
+)
+
+
+def _iso_date(raw: str) -> str:
+    """
+    Normalize one sheet cell to `YYYY-MM-DD`, or "" if it is not a date.
+
+    The sheet is hand-maintained, so the same column carries `2026-09-04` on one
+    row and `9/3/26` on the next. Every consumer (renderer/dashboard.py,
+    renderer/inflight.py) parses with a hard `strptime(s, "%Y-%m-%d")` wrapped in
+    a bare `except` — so a US-format cell did not error, it silently became "no
+    due date": no badge, no timeline marker, sorted to the bottom, and flagged
+    "MISSING ASANA DATE". Normalizing here means due_dates.json is ISO-only and
+    no consumer has to learn a second format.
+    """
+    s = str(raw or "").strip()
+    if not s or s in ("nan", "None"):
+        return ""
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    # Sheets serial (days since 1899-12-30) — only from an UNFORMATTED read or a
+    # CSV export, never from the FORMATTED_VALUE the API gives us by default.
+    if s.isdigit() and 20000 <= int(s) <= 80000:
+        return (date(1899, 12, 30) + timedelta(days=int(s))).isoformat()
+    log.warning("Unrecognized due-date value %r — treated as no date", s[:40])
+    return ""
+
+
 
 
 def fetch_due_dates() -> dict[str, str]:
@@ -66,10 +106,14 @@ def fetch_due_dates() -> dict[str, str]:
             continue
         if not due:
             continue
+        due_iso = _iso_date(due)
+        if not due_iso:
+            continue
         result[name] = {
             # Internal key stays `due_date` so the In-Flight tab anchor needs no change.
-            "due_date":             due,
-            "sequence_transferred": seq,
+            # Always ISO — see _iso_date(); the sheet itself mixes formats.
+            "due_date":             due_iso,
+            "sequence_transferred": _iso_date(seq),
         }
 
     _save(result)
