@@ -879,12 +879,31 @@ def classify_actions(
     df["Actions Required"] = ""
     df["Wells_To_mark_available"] = ""
 
-    # Plasmid DNA we physically have anywhere (any Stock well, any age/labware).
-    # When there's no glycerol to streak from, the refill route is TRANSFORMATION
-    # of that DNA into fresh cells. With no DNA at all, it's a reorder/synthesis.
-    if "WELL_TYPE" in all_plate_data.columns and "STOCK_ID" in all_plate_data.columns:
+    # Plasmid DNA we could actually put into cells. When there's no glycerol to streak
+    # from, the refill route is TRANSFORMATION of that DNA; with nothing transformable
+    # it's a reorder/synthesis.
+    #
+    # This must match the wells the card offers under "DNA to transform"
+    # (renderer/parts.py dna_stock): seq-confirmed, not in a DISCARD box, not on an
+    # error plate (a "384 Echo Source Plate" that isn't physically 384-well), and on a
+    # real 96/384 plate. Counting *any* Stock well made parts with only unconfirmed or
+    # discarded DNA read "Transform" while their own DNA table said there was nothing
+    # to transform — pAI-25389, which isn't generated yet, was one of them.
+    _need = {"WELL_TYPE", "STOCK_ID", "SEQ_CONFIRMED", "PLATE_LOCATION_BOX",
+             "LABWARE", "PLATE_NUMBER_OF_WELLS"}
+    if _need.issubset(all_plate_data.columns):
+        _nw = pd.to_numeric(all_plate_data["PLATE_NUMBER_OF_WELLS"], errors="coerce")
+        _errp = (all_plate_data["LABWARE"] == "384 Echo Source Plate") & (_nw != 384)
+        _loc = all_plate_data["PLATE_LOCATION_BOX"].fillna("").astype(str).str.upper()
         _dna_ids = set(
-            all_plate_data.loc[all_plate_data["WELL_TYPE"] == "Stock", "STOCK_ID"].dropna().astype(str)
+            all_plate_data.loc[
+                (all_plate_data["WELL_TYPE"] == "Stock")
+                & (all_plate_data["SEQ_CONFIRMED"] == "True")
+                & ~_errp
+                & ~_loc.str.contains("DISCARD")
+                & _nw.isin([96, 384]),
+                "STOCK_ID",
+            ].dropna().astype(str)
         )
     else:
         _dna_ids = set()

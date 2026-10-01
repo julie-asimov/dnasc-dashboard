@@ -451,7 +451,7 @@ def _render() -> str:
         """Not one well on record for this part — LIMS has never held any of it."""
         return not len(apd[apd["STOCK_ID"].astype(str)==str(part)])
 
-    def act_badge(a, age=None, not_in_lims=False, muted=False):
+    def act_badge(a, age=None, not_in_lims=False, muted=False, is_oligo=False):
         # "Reorder" is wrong for a part LIMS has never held: there is nothing to RE-order, and the
         # row's real state is that it isn't there at all. Say that instead of naming an action.
         if not_in_lims: lbl,bg,fg = "Not in LIMS","#f3f4f6","#b91c1c"
@@ -459,7 +459,11 @@ def _render() -> str:
         elif str(a).startswith("Mark"): lbl,bg,fg = "Mark available","#eff6ff","#1d4ed8"
         elif a=="Refill": lbl,bg,fg = "Refill","#fef3c7","#92400e"
         elif a=="Transform": lbl,bg,fg = "Transform","#fff7ed","#c2410c"
-        elif a=="True":   lbl,bg,fg = "Reorder","#fff1f5","#be185d"
+        # Third leaf of the refill tree: glycerol → Refill, else DNA → Transform, else there is no
+        # source at all. For a plasmid that is BLOCKED, not an action — "Reorder" named a job the
+        # person reading the card cannot do; what clears it is a build. Oligos really are reordered.
+        elif a=="True" and is_oligo: lbl,bg,fg = "Reorder","#fff1f5","#be185d"
+        elif a=="True":   lbl,bg,fg = "Blocked","#fff1f5","#be185d"
         else: lbl,bg,fg = str(a),"#f3f4f6","#6b7280"
         # Covered for its queued need: the row is only here because of worst-case exposure, so
         # the action is what you WOULD do, not what you must do today. Grey it out rather than
@@ -485,8 +489,11 @@ def _render() -> str:
         _loc=apd["PLATE_LOCATION_BOX"].fillna("").astype(str)
         _lw =apd["LABWARE"].fillna("").astype(str)
         _nw =pd.to_numeric(apd["PLATE_NUMBER_OF_WELLS"], errors="coerce")
+        # No SEQ_CONFIRMED gate. 1545 of the 17468 available glycerol wells carry a blank flag
+        # while sitting in a real 80C/80D box on normal glycerol labware — for 832 plasmids that
+        # is the ONLY glycerol they have, so requiring the flag left the chip saying "Refill" over
+        # an empty streak panel. Show the tube and label its seq state; don't hide it.
         g=apd[(apd["STOCK_ID"]==part) & (apd["WELL_TYPE"]=="Glycerol") & (apd["AVAILABLE"]=="True")
-              & (apd["SEQ_CONFIRMED"]=="True")
               & ~_loc.str.upper().str.contains("DISCARD")
               & ~_loc.str.upper().str.contains("TEMP")                    # never temp glycerol
               & (_lw.str.contains("Micronic") | (_nw==96))]               # only micronic OR non-temp 96-well
@@ -497,7 +504,10 @@ def _render() -> str:
         for _,x in g.iterrows():
             nw=x["PLATE_NUMBER_OF_WELLS"]
             co=coord384(x["WELL_NUMBER"]) if nw==384 else coord96(x["WELL_NUMBER"])
-            rows.append((x["PLATE_ID"], co, str(x["PLATE_LOCATION_BOX"]), _ab(x), str(x.get("COMP_CELL") or ""), x["WELL_ID"]))
+            rows.append((x["PLATE_ID"], co, str(x["PLATE_LOCATION_BOX"]), _ab(x), str(x.get("COMP_CELL") or ""),
+                         x["WELL_ID"], x["SEQ_CONFIRMED"]=="True"))
+        # Seq-confirmed tubes first — if a part has both, streak the confirmed one.
+        rows.sort(key=lambda r: not r[6])
         return rows
 
     def dna_stock(part, seq_only=True):
@@ -701,8 +711,13 @@ def _render() -> str:
             tone      = "#0e7490"
         elif act=="True" and x.get("_blockedpart") and _no_lims_wells(part):
             situation, guidance, tone = "Not in LIMS — no wells on record", "", "#b91c1c"
+        elif act=="True" and part.startswith("o"):
+            situation, guidance, tone = "No stock on hand", "Reorder / synthesize", "#be185d"
         elif act=="True":
-            situation, guidance, tone = "No DNA on hand", "Reorder / synthesize", "#be185d"
+            # Neither leg of the refill tree is open: nothing to streak, nothing to transform.
+            situation = "Blocked — no glycerol to streak, no DNA to transform"
+            guidance  = "Nothing on hand to make more from — this needs a build, not a bench job"
+            tone      = "#be185d"
         else:
             situation, guidance, tone = "", "", "#6b7280"
 
@@ -771,10 +786,17 @@ def _render() -> str:
             blocks.append(_block("On hand · 4B fridge (4°C)", '<span style="font-size:11px;color:#9ca3af">none in 4B fridge</span>'))
         gs=glycerol_streak(part)
         if gs:
-            hdr='<tr><td><b>pAI</b></td><td><b>Antibiotic</b></td><td><b>Strain</b></td><td><b>Plate</b></td><td><b>Coord</b></td><td><b>Location</b></td><td><b>Well ID</b></td></tr>'
-            rws="".join(f'<tr><td style="font-family:monospace;font-weight:700">{part}</td><td>{html.escape(ab)}</td><td>{html.escape(strain or "?")}</td><td>plate {p}</td><td style="font-family:monospace">{co or "?"}</td><td>{html.escape(loc)}</td><td style="font-family:monospace">{wid}</td></tr>' for p,co,loc,ab,strain,wid in gs)
+            hdr=('<tr><td><b>pAI</b></td><td><b>Antibiotic</b></td><td><b>Strain</b></td><td><b>Plate</b></td>'
+                 '<td><b>Coord</b></td><td><b>Location</b></td><td><b>Well ID</b></td><td><b>Seq</b></td></tr>')
+            _seq_cell=lambda sc: ('<span style="color:#15803d">✓</span>' if sc else
+                                  '<span style="color:#b45309;white-space:nowrap">not seq-confirmed</span>')
+            rws="".join(f'<tr><td style="font-family:monospace;font-weight:700">{part}</td><td>{html.escape(ab)}</td><td>{html.escape(strain or "?")}</td><td>plate {p}</td><td style="font-family:monospace">{co or "?"}</td><td>{html.escape(loc)}</td><td style="font-family:monospace">{wid}</td><td>{_seq_cell(sc)}</td></tr>' for p,co,loc,ab,strain,wid,sc in gs)
+            _nq=sum(1 for r in gs if not r[6])
+            _cap=('<div style="font-size:10px;color:#b45309;margin-bottom:3px">'
+                  f'{_nq} of these {"tubes are" if _nq!=1 else "tube is"} available but <b>not seq-confirmed</b> in LIMS — '
+                  'the tube is in the freezer, the flag just isn&#39;t set</div>') if _nq else ''
             blocks.append(_block(f"Streak from · glycerol ({len(gs)})",
-                f'<table class="d-tbl"><tbody>{hdr}{rws}</tbody></table>'))
+                _cap + f'<table class="d-tbl"><tbody>{hdr}{rws}</tbody></table>'))
         # Make-available (flip ON) — seq-confirmed wells eligible to be re-enabled in LIMS.
         ma=make_avail_wells(part)
         if ma:
@@ -1246,7 +1268,7 @@ def _render() -> str:
                 f'{stall_badge(x)}'
                 f'{repeat_badge(x["Reactions Required"]) if stall_rank(x)==2 else ""}</td>'
                 f'{stock_cell}'
-                f'<td>{act_badge(act,age,not_in_lims=bool(x.get("_blockedpart") and act=="True" and _no_lims_wells(part)),muted=_covered(x))}</td>'
+                f'<td>{act_badge(act,age,not_in_lims=bool(x.get("_blockedpart") and act=="True" and _no_lims_wells(part)),muted=_covered(x),is_oligo=part.startswith("o"))}</td>'
                 f'<td style="font-size:11px">{batch_cell(x)}</td>'
                 f'<td style="font-size:11px;color:#374151">{html.escape(summary)}</td></tr>'
                 f'<tr id="d{i}" style="display:none"><td></td><td colspan="5">{detail_html(x)}</td></tr>')
@@ -1700,6 +1722,8 @@ def _render() -> str:
     _n_refill = sum(1 for a in _disp if a=="Refill")
     _n_xform  = sum(1 for a in _disp if a=="Transform")
     _n_pcr    = sum(1 for a in _disp if a=="Make by PCR")
+    # Neither glycerol nor DNA. Chips read "Blocked" (plasmid) or "Reorder" (oligo); the tile spans
+    # both, and can't be called "Blocked" — that word is already taken by the blocking-WO tile below.
     _n_nosrc  = sum(1 for a in _disp if a=="True")
     _n_trash  = (len(dispose) + len(exhausted)
                  + sum(len(exp_by_type[t]) for t in ("Plasmid","dPart","SynPart")))
@@ -1813,7 +1837,7 @@ def _render() -> str:
   <div class="ovc"><div class="ovn" style="color:#92400e">{_n_refill}</div><div class="ovl">Refill</div></div>
   <div class="ovc"><div class="ovn" style="color:#c2410c">{_n_xform}</div><div class="ovl">Transform</div></div>
   <div class="ovc"><div class="ovn" style="color:#0e7490">{_n_pcr}</div><div class="ovl">Add PCR WO</div></div>
-  <div class="ovc"><div class="ovn" style="color:#be185d">{_n_nosrc}</div><div class="ovl">Reorder</div></div>
+  <div class="ovc"><div class="ovn" style="color:#be185d">{_n_nosrc}</div><div class="ovl">No source</div></div>
   <div class="ovc"><div class="ovn" style="color:#b91c1c">{_n_bp}</div><div class="ovl">Blocked parts &rarr; {_n_bp_wo} WOs</div></div>
   <div class="ovc"><div class="ovn" style="color:#be185d">{len(set(clean_wells)|set(mp_wells)|set(disc_wells))}</div><div class="ovl">Wells → unavailable</div></div>
   <div class="ovc"><div class="ovn" style="color:#6b7280">{_n_trash}</div><div class="ovl">Plates to trash</div></div>
