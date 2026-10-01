@@ -1264,6 +1264,7 @@ def render_parts_inventory_html(df: pd.DataFrame, generated_at: dt.datetime | No
 MARK_AVAILABLE_VOL_MIN = 25   # µL — Echo wells with MORE than this can be marked available
 MARK_AVAILABLE_CONC_MIN = 5   # ng/µL — below this is too dilute to mark available
 CLEAN_INVENTORY_VOL_MAX = 25  # µL — Echo wells with this volume OR LESS get marked unavailable
+SYNPART_VOL_MAX = 15          # µL — synparts run lower before retiring; they also skip the conc rule
 LOW_CONC_MIN_NGUL = 5         # ng/µL — available Echo Stock wells below this are too dilute to use
 
 # "Live well" liveness filter — keeps disposed/retired wells out of the queues.
@@ -1348,6 +1349,11 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
     and its only maker is another PCR. The other two clauses still apply to dParts in full: a
     dPart well ≤ CLEAN_INVENTORY_VOL_MAX µL, or past the FRESHNESS_DAYS window, is queued like
     any other well.
+
+    SynParts (STOCK_ID 'syn...') are EXEMPT FROM THE LOW-CONCENTRATION CLAUSE ENTIRELY — a synpart
+    is usable at any concentration — and run further down before retiring: their near-empty floor
+    is SYNPART_VOL_MAX (15 µL), not CLEAN_INVENTORY_VOL_MAX (25 µL). Expiry still applies to them
+    in full at FRESHNESS_DAYS.
     """
     if all_plate_data.empty:
         return []
@@ -1362,11 +1368,16 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
     age = (cnow - created).dt.days
     sid = all_plate_data.get("STOCK_ID", pd.Series("", index=all_plate_data.index)).astype(str)
     exp_days = np.where(sid.str.startswith("o"), OLIGO_FRESHNESS_DAYS, FRESHNESS_DAYS)
-    near_empty = vol <= CLEAN_INVENTORY_VOL_MAX
+    # Synparts hold usable material further down the tube than plasmid/dPart stock, so they get a
+    # lower near-empty floor (15 µL) instead of the shared 25 µL one.
+    is_syn = sid.str.startswith("syn")
+    near_empty = vol <= np.where(is_syn, SYNPART_VOL_MAX, CLEAN_INVENTORY_VOL_MAX)
     expired = age > exp_days                      # NaT age → NaN > x → False (kept available)
     # dParts are PCR products — coming off dilute is normal for them, so a low ng/µL reading is
     # not a reason to retire the well. They stay subject to near_empty and expired.
-    low_conc = conc.notna() & (conc < LOW_CONC_MIN_NGUL) & ~sid.str.startswith("d")
+    # Synparts are likewise usable at ANY concentration — the conc clause never retires one.
+    # ('syn...' does not start with 'd', so the dPart test leaves them alone either way.)
+    low_conc = conc.notna() & (conc < LOW_CONC_MIN_NGUL) & ~sid.str.startswith("d") & ~is_syn
     loc = (all_plate_data["PLATE_LOCATION_BOX"] if "PLATE_LOCATION_BOX" in all_plate_data.columns
            else pd.Series("", index=all_plate_data.index)).fillna("").astype(str)
     mask = (

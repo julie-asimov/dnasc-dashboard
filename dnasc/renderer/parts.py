@@ -1620,7 +1620,10 @@ def _render() -> str:
     extra += wells_section("mk_un","Make Unavailable · 384 Echo source",
               "available Echo source wells that are ≤25µL (near-empty), past expiration (200d), OR &lt;5 ng/µL (too dilute) → flip OFF in LIMS "
               "· <b>dParts are exempt from the &lt;5 ng/µL rule only</b> (a PCR product is expected to come off dilute) — "
-              "they still flip OFF at ≤25µL or 200d","#be185d", clean_wells, show_plates=False)
+              "they still flip OFF at ≤25µL or 200d "
+              "· <b>SynParts are exempt from the &lt;5 ng/µL rule entirely</b> (usable at any concentration) "
+              "<b>and run down to ≤15µL</b> before flipping OFF — expiration still applies at 200d",
+              "#be185d", clean_wells, show_plates=False)
     extra += wells_section("mk_un_mp","Make Unavailable · 96-well miniprep stock",
               "available miniprep-stock wells (96-well) past expiration (200d) → flip OFF in LIMS","#9d174d", mp_wells, show_plates=False)
     extra += wells_section("mk_un_disc","Make Unavailable · wells on DISCARDED plates",
