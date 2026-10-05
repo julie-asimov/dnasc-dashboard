@@ -1263,6 +1263,30 @@ def _finalize_metadata(df: pd.DataFrame) -> pd.DataFrame:
             if col in df.columns:
                 df.loc[syn_mask, col] = df.loc[syn_mask, "root_work_order_id"].map(root_map)
 
+    # experiment_name from a SIBLING ON THE SAME REQUEST. bios lets a retry be filed
+    # under a brand-new assembly plan whose experiment_id is NULL, so the
+    # assemblyplan->experiment join in the extractor returns nothing for that row. The
+    # root-based fill above cannot rescue it either: an assembly workorder self-roots
+    # (see bios.py), so its root IS the row with the missing name. Its siblings on the
+    # request still carry the real experiment. Without this the row survives to
+    # dashboard.py's groupby("experiment_name"), which drops NaN keys, and the whole
+    # attempt vanishes from the tab and the search index -- e.g. golden gate 16a64e7d,
+    # attempt 4 of pAI-23883, invisible while three failed attempts rendered fine.
+    # Requests with no experiment_name on ANY row stay NaN and are still dropped.
+    if "experiment_name" in df.columns and "req_id" in df.columns:
+        _exp_missing = df["experiment_name"].isna() & df["req_id"].notna()
+        if _exp_missing.any():
+            _exp_by_req = (
+                df.loc[df["experiment_name"].notna() & df["req_id"].notna()]
+                  .groupby("req_id")["experiment_name"].first()
+            )
+            _filled = df.loc[_exp_missing, "req_id"].map(_exp_by_req)
+            df.loc[_exp_missing, "experiment_name"] = _filled
+            log.info(
+                "Backfilled experiment_name from request siblings on %d/%d rows",
+                int(_filled.notna().sum()), int(_exp_missing.sum()),
+            )
+
     # Other metadata cols are safe to fill from any group member
     cols = ["request_status", "priority", "construct_name", "for_partner"]
     for col in cols:

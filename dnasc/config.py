@@ -27,7 +27,7 @@ class PipelineConfig:
     # triage data it shows is not yet correct, so it must not reach the team.
     # Host rule: the publishing cron runs on Linux, day-to-day work is on macOS.
     # Force either way with DNASC_LOCAL_TABS=1 (show) / =0 (hide).
-    LOCAL_ONLY_TABS: frozenset = frozenset({"ngs"})
+    LOCAL_ONLY_TABS: frozenset = frozenset({"ngs", "sarika"})
 
     @staticmethod
     def show_local_only_tabs() -> bool:
@@ -166,7 +166,7 @@ class PipelineConfig:
     })
 
     # ── Pipeline version (bump on every code push) ────────────────────────────
-    PIPELINE_VERSION: str = "1.11.136"
+    PIPELINE_VERSION: str = "1.11.138"
 
     @classmethod
     def sql_step_ts(cls, op: str = "o", job: str = "j") -> str:
