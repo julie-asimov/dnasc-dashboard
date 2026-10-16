@@ -371,7 +371,20 @@ class EnrichmentTransformer:
             )
             req_is_stalled[req_id] = is_stalled
 
-            asm_rows_act = active_rows[active_rows['type'].isin(_ASM_TYPES)]
+            # fulfills_request stocks — reused for asm_review, phase, seq_winner
+            _root_stocks = set(
+                r_df[(r_df['fulfills_request'] == True) & ~r_df['STOCK_ID'].fillna('').str.startswith('#')]['STOCK_ID'].dropna()
+            ) if 'fulfills_request' in r_df.columns else set()
+
+            # ASM REVIEW means *this construct* has a succeeded attempt while another
+            # attempt at the same construct is still open.  Restrict to the root stock
+            # the way the phase label below does: without it a succeeded sub-assembly
+            # (fulfills_request=False, often a different pAI) paired with the waiting
+            # root tripped the badge on requests that have no winner at all.
+            asm_rows_act = active_rows[
+                active_rows['type'].isin(_ASM_TYPES)
+                & active_rows['STOCK_ID'].astype(str).isin(_root_stocks)
+            ]
             req_is_asm_review[req_id] = (
                 has_real_workorders
                 and not is_finished
@@ -379,11 +392,6 @@ class EnrichmentTransformer:
                 and asm_rows_act['visual_status'].eq('SUCCEEDED').any()
                 and asm_rows_act['visual_status'].isin(['READY', 'WAITING']).any()
             )
-
-            # fulfills_request stocks — reused for phase, seq_winner
-            _root_stocks = set(
-                r_df[(r_df['fulfills_request'] == True) & ~r_df['STOCK_ID'].fillna('').str.startswith('#')]['STOCK_ID'].dropna()
-            ) if 'fulfills_request' in r_df.columns else set()
 
             # ── phase label (PARTS / ASM / LSP) ──────────────────────────
             _phase_rows  = r_df[r_df['visual_status'].isin(_PHASE_ACTIVE) & (r_df['wo_status'].astype(str) != 'CANCELED')]
