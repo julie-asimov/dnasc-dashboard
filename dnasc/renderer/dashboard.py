@@ -1454,12 +1454,31 @@ def render_all_projects_dashboard(
             req_bg_color = "#f9fafb"; req_border_left = "#6b7280"
 
         # Collect all root stock IDs across all chains — used for header tags and parts filtering
+        # Only roots that actually fulfill the request earn a header chip.  A
+        # sub-assembly chain gets its own root group — pAI-26694 builds the dPart
+        # d8355 that the pAI-26704 Gibson waits on, and its workorders carry
+        # request_id=NULL / fulfills_request=False — so chipping every root made a
+        # one-plasmid request read as two, with the lower-numbered sub-assembly
+        # taking the primary style.  Keep the unfiltered map as a fallback: if no
+        # root declares fulfills_request (synthetic rows, older parquets), chip
+        # them all rather than render a card with no product at all.
         _root_stock_map = {}
+        _root_stock_map_all = {}
+        _has_fr = 'fulfills_request' in req_df.columns
         for _rid, _rdf in req_df.groupby('root_work_order_id'):
-            _rw = _rdf[_rdf['workorder_id'] == _rid]['STOCK_ID']
+            _rrow = _rdf[_rdf['workorder_id'] == _rid]
+            _rw = _rrow['STOCK_ID']
             _rstock = str(_rw.iloc[0]) if not _rw.empty and pd.notna(_rw.iloc[0]) else str(_rdf['STOCK_ID'].iloc[0])
-            if _rstock not in ('nan', 'None', 'N/A'):
-                _root_stock_map[_rid] = _rstock
+            if _rstock in ('nan', 'None', 'N/A'):
+                continue
+            _root_stock_map_all[_rid] = _rstock
+            if _has_fr:
+                _fr_src = _rrow['fulfills_request'] if not _rrow.empty else _rdf['fulfills_request']
+                if not (_fr_src == True).any():
+                    continue
+            _root_stock_map[_rid] = _rstock
+        if not _root_stock_map:
+            _root_stock_map = _root_stock_map_all
         all_root_stocks = set(_root_stock_map.values())
         # Also include fulfills_request=True stocks (catches LSP STOCK_IDs distinct from the GG root)
         if 'fulfills_request' in req_df.columns:
