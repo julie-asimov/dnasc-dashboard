@@ -1618,11 +1618,11 @@ def _render() -> str:
               "to reach target without batching · includes blocked parts, where flipping is what "
               "un-blocks their stuck workorders","#1d4ed8", mk_avail, show_plates=False)
     extra += wells_section("mk_un","Make Unavailable · 384 Echo source",
-              "available Echo source wells that are ≤25µL (near-empty), past expiration (200d), OR &lt;5 ng/µL (too dilute) → flip OFF in LIMS "
+              "available Echo source wells that are ≤20µL (near-empty), past expiration (200d), OR &lt;5 ng/µL (too dilute) → flip OFF in LIMS "
               "· <b>dParts are exempt from the &lt;5 ng/µL rule only</b> (a PCR product is expected to come off dilute) — "
-              "they still flip OFF at ≤25µL or 200d "
+              "they still flip OFF at 200d, and <b>run down to ≤15µL</b> before flipping OFF "
               "· <b>SynParts are exempt from the &lt;5 ng/µL rule entirely</b> (usable at any concentration) "
-              "<b>and run down to ≤15µL</b> before flipping OFF — expiration still applies at 200d",
+              "<b>and likewise run down to ≤15µL</b> before flipping OFF — expiration still applies at 200d",
               "#be185d", clean_wells, show_plates=False)
     extra += wells_section("mk_un_mp","Make Unavailable · 96-well miniprep stock",
               "available miniprep-stock wells (96-well) past expiration (200d) → flip OFF in LIMS","#9d174d", mp_wells, show_plates=False)

@@ -760,15 +760,16 @@ class TestMarkAvailableQueue:
 class TestCleanInventoryQueue:
     def test_includes_available_low_volume(self):
         df = pd.DataFrame([
-            _q_well(401, 25, available=True),   # ✓ (<=25, available)
+            _q_well(401, 20, available=True),   # ✓ (<=20, available) — at the floor
             _q_well(402, 10, available=True),   # ✓
+            _q_well(403, 21, available=True),   # ✗ one µL above the floor
         ])
         assert build_clean_inventory_queue(df, now=NOW) == ["well401", "well402"]
 
     def test_excludes_already_unavailable_and_high_volume(self):
         df = pd.DataFrame([
             _q_well(501, 10, available=False),   # ✗ already unavailable (no-op to re-mark)
-            _q_well(502, 26, available=True),    # ✗ >25, and fresh relative to NOW
+            _q_well(502, 26, available=True),    # ✗ >20, and fresh relative to NOW
         ])
         assert build_clean_inventory_queue(df, now=NOW) == []
 
@@ -781,29 +782,35 @@ class TestCleanInventoryQueue:
         ])
         assert build_clean_inventory_queue(df, now=NOW) == ["well602"]
 
-    def test_dparts_exempt_from_low_conc_only(self):
+    def test_dparts_exempt_from_low_conc_and_run_to_15ul(self):
         # A PCR product is expected to come off dilute, so ng/µL alone must not retire a dPart
-        # well. Volume and age still do — and a plasmid well at the same conc still gets queued.
+        # well. Volume and age still do — but on the same low 15 µL floor as synparts, not the
+        # shared 20 µL one. A plasmid well at the same volume/conc still gets queued.
         old = pd.Timestamp("2025-01-01", tz="UTC")          # > FRESHNESS_DAYS before NOW
         df = pd.DataFrame([
             _q_well(801, 40, available=True, stock_id="d6473", conc=1.0),           # ✗ dilute dPart — stays ON
             _q_well(802, 10, available=True, stock_id="d6474"),                     # ✓ near-empty dPart
             _q_well(803, 40, available=True, stock_id="d6475", created_at=old),     # ✓ expired dPart
             _q_well(804, 40, available=True, stock_id="pAI-900", conc=1.0),         # ✓ dilute plasmid
+            _q_well(805, 17, available=True, stock_id="d6476"),                     # ✗ 17 µL is above the 15 µL dPart floor
+            _q_well(806, 15, available=True, stock_id="d6477"),                     # ✓ at the dPart floor
+            _q_well(807, 17, available=True, stock_id="pAI-903"),                   # ✓ plasmid flips at 17 µL (20 floor)
         ])
-        assert build_clean_inventory_queue(df, now=NOW) == ["well802", "well803", "well804"]
+        assert build_clean_inventory_queue(df, now=NOW) == [
+            "well802", "well803", "well804", "well806", "well807",
+        ]
 
     def test_synparts_exempt_from_conc_and_run_to_15ul(self):
         # A synpart is usable at ANY concentration, so the <5 ng/µL clause never retires one, and
-        # it runs further down the tube than other stock — 15 µL, not the shared 25 µL floor.
+        # it runs further down the tube than plasmid stock — 15 µL, not the shared 20 µL floor.
         # Expiry is unchanged. A plasmid at the same volume/conc is queued, to pin the contrast.
         old = pd.Timestamp("2025-01-01", tz="UTC")          # > FRESHNESS_DAYS before NOW
         df = pd.DataFrame([
             _q_well(851, 40, available=True, stock_id="syn100", conc=0.4),          # ✗ dilute synpart — stays ON
-            _q_well(852, 20, available=True, stock_id="syn101"),                    # ✗ 20 µL is above the 15 µL floor
+            _q_well(852, 17, available=True, stock_id="syn101"),                    # ✗ 17 µL is above the 15 µL floor
             _q_well(853, 15, available=True, stock_id="syn102"),                    # ✓ at the floor
             _q_well(854, 40, available=True, stock_id="syn103", created_at=old),    # ✓ expired synpart
-            _q_well(855, 20, available=True, stock_id="pAI-901"),                   # ✓ plasmid still flips at 20 µL
+            _q_well(855, 17, available=True, stock_id="pAI-901"),                   # ✓ plasmid flips at 17 µL (20 floor)
             _q_well(856, 40, available=True, stock_id="pAI-902", conc=0.4),         # ✓ plasmid still flips when dilute
         ])
         assert build_clean_inventory_queue(df, now=NOW) == [
@@ -811,11 +818,13 @@ class TestCleanInventoryQueue:
         ]
 
     def test_mutually_exclusive_with_mark_available(self):
-        # No well should appear in both queues (disjoint by the 25 µL threshold).
+        # No well should appear in both queues. The two floors differ on purpose — clean retires at
+        # ≤20 µL, mark-available only offers >25 µL — so 20-25 µL sits in neither queue and the
+        # well is simply left as it is. A gap keeps them disjoint; an overlap would not.
         df = pd.DataFrame([
             _q_well(701, 40, available=False, seq_confirmed=True),  # mark-available
             _q_well(702, 15, available=True,  seq_confirmed=True),  # clean
-            _q_well(703, 25, available=True,  seq_confirmed=True),  # clean (==25)
+            _q_well(703, 25, available=True,  seq_confirmed=True),  # neither — in the 20-25 gap
         ])
         mark = set(build_mark_available_queue(df, now=NOW))
         clean = set(build_clean_inventory_queue(df))

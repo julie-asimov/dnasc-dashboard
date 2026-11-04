@@ -6,7 +6,8 @@ Queries active BIOS workorders and LIMS inventory and produces three copy-paste
 lab action queues:
   1. Mark Available  — seq-confirmed, not-yet-available Echo wells > 25 µL
                        (whole inventory) to flip to available.
-  2. Clean Inventory — available Echo wells <= 25 µL to mark unavailable.
+  2. Clean Inventory — available Echo wells <= 20 µL (dParts/SynParts <= 15 µL)
+                       to mark unavailable.
   3. Refill          — per part: glycerol plate/well to streak from, plus a
                        ready-to-paste PCR-workorder CSV block for dParts.
 
@@ -1263,8 +1264,9 @@ def render_parts_inventory_html(df: pd.DataFrame, generated_at: dt.datetime | No
 
 MARK_AVAILABLE_VOL_MIN = 25   # µL — Echo wells with MORE than this can be marked available
 MARK_AVAILABLE_CONC_MIN = 5   # ng/µL — below this is too dilute to mark available
-CLEAN_INVENTORY_VOL_MAX = 25  # µL — Echo wells with this volume OR LESS get marked unavailable
+CLEAN_INVENTORY_VOL_MAX = 20  # µL — Echo wells with this volume OR LESS get marked unavailable
 SYNPART_VOL_MAX = 15          # µL — synparts run lower before retiring; they also skip the conc rule
+DPART_VOL_MAX = 15            # µL — dParts run as low as synparts; only the conc rule differs
 LOW_CONC_MIN_NGUL = 5         # ng/µL — available Echo Stock wells below this are too dilute to use
 
 # "Live well" liveness filter — keeps disposed/retired wells out of the queues.
@@ -1337,7 +1339,7 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
     """
     Whole-inventory queue: currently-available 384 Echo source-plate wells that should be
     flipped to unavailable for ANY of:
-      • NEARLY EMPTY   — volume <= CLEAN_INVENTORY_VOL_MAX µL
+      • NEARLY EMPTY   — volume <= CLEAN_INVENTORY_VOL_MAX µL (dParts/SynParts: 15 µL)
       • PAST EXPIRATION — older than the freshness window (oligos OLIGO_FRESHNESS_DAYS, else FRESHNESS_DAYS)
       • LOW CONCENTRATION — a recorded conc below LOW_CONC_MIN_NGUL ng/µL (too dilute to use;
         oligos/unquantified wells have null ng/µL so they never match this clause)
@@ -1346,13 +1348,13 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
 
     dParts (STOCK_ID 'd...') are EXEMPT FROM THE LOW-CONCENTRATION CLAUSE ONLY. A PCR product is
     expected to come off dilute, and that is not a reason to retire it — the well is still usable
-    and its only maker is another PCR. The other two clauses still apply to dParts in full: a
-    dPart well ≤ CLEAN_INVENTORY_VOL_MAX µL, or past the FRESHNESS_DAYS window, is queued like
-    any other well.
+    and its only maker is another PCR. The other two clauses still apply to dParts in full, on the
+    same low floor as synparts: a dPart well ≤ DPART_VOL_MAX (15 µL), or past the FRESHNESS_DAYS
+    window, is queued like any other well.
 
     SynParts (STOCK_ID 'syn...') are EXEMPT FROM THE LOW-CONCENTRATION CLAUSE ENTIRELY — a synpart
     is usable at any concentration — and run further down before retiring: their near-empty floor
-    is SYNPART_VOL_MAX (15 µL), not CLEAN_INVENTORY_VOL_MAX (25 µL). Expiry still applies to them
+    is SYNPART_VOL_MAX (15 µL), not CLEAN_INVENTORY_VOL_MAX (20 µL). Expiry still applies to them
     in full at FRESHNESS_DAYS.
     """
     if all_plate_data.empty:
@@ -1368,10 +1370,12 @@ def build_clean_inventory_queue(all_plate_data: pd.DataFrame, now: dt.datetime |
     age = (cnow - created).dt.days
     sid = all_plate_data.get("STOCK_ID", pd.Series("", index=all_plate_data.index)).astype(str)
     exp_days = np.where(sid.str.startswith("o"), OLIGO_FRESHNESS_DAYS, FRESHNESS_DAYS)
-    # Synparts hold usable material further down the tube than plasmid/dPart stock, so they get a
-    # lower near-empty floor (15 µL) instead of the shared 25 µL one.
+    # Synparts and dParts hold usable material further down the tube than plasmid stock, so they
+    # get a lower near-empty floor (15 µL) instead of the shared 20 µL one.
     is_syn = sid.str.startswith("syn")
-    near_empty = vol <= np.where(is_syn, SYNPART_VOL_MAX, CLEAN_INVENTORY_VOL_MAX)
+    is_dpart = sid.str.startswith("d") & ~is_syn   # 'd...' but never a 'syn...' (which can't start 'd')
+    near_empty = vol <= np.where(is_syn, SYNPART_VOL_MAX,
+                                 np.where(is_dpart, DPART_VOL_MAX, CLEAN_INVENTORY_VOL_MAX))
     expired = age > exp_days                      # NaT age → NaN > x → False (kept available)
     # dParts are PCR products — coming off dilute is normal for them, so a low ng/µL reading is
     # not a reason to retire the well. They stay subject to near_empty and expired.
