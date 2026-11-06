@@ -37,6 +37,7 @@ from dnasc.transformers.repair import (
     resolve_lims_streakouts,
     resolve_optracker_streakouts,
     _fetch_well_mapping,
+    _manual_op_kind,
 )
 
 # ── Antibiotic normalisation (module-level so tests can import) ───────────────
@@ -506,6 +507,16 @@ def run_pipeline() -> pd.DataFrame:
 # Private helpers  (logic extracted from the old monolith run_pipeline())
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Manual-op kinds whose colonies are WAITING on sequencing, as opposed to kinds
+# that end at the glycerol. A refill restocks a well that was already confirmed —
+# it is finished the moment the glycerol exists and no NGS is ever coming, so the
+# "colonies but none confirmed" read below must not touch it (169 of the 194
+# optracker_operation rows are REFILL; a blanket rule parked all of them at
+# RUNNING forever). A pick, a subculture or a free-text transformation DOES owe a
+# verdict, and until it has one it is in flight.
+_AWAITING_SEQ_KINDS = frozenset({"PICK", "OTHER", "TFX", "SUBCULTURE", "STRAIN"})
+
+
 _COLONY_TYPES = frozenset({
     "gibson_workorder", "golden_gate_workorder", "transformation_workorder",
     "transformation_offline_operation", "streakout_operation",
@@ -665,6 +676,18 @@ def _apply_colony_status_overrides(df: pd.DataFrame) -> pd.DataFrame:
         if row.get("type") == "optracker_operation":
             if seq > 0:
                 return "SUCCEEDED", wo == "FAILED", False
+            # Colonies on the bench, none confirmed yet — the same read the
+            # transformation_offline_operation branch below gives. Without it the
+            # verdict depended on which recovery path created the row, not on the
+            # bench: off well2407817, sbclone_EPI (strain changed NEB→EPI400, so
+            # transformation_offline_operation) read RUNNING while ubclone_10B and
+            # ubclone_EPI read SUCCEEDED, with all three sitting at 0 confirmed
+            # colonies banked the same minute.
+            _kind = row.get("manual_op_kind")
+            if _kind is None or str(_kind).strip() in ("", "nan", "None"):
+                _kind = _manual_op_kind(row.get("workorder_id"))
+            if tot > 0 and _kind in _AWAITING_SEQ_KINDS:
+                return "RUNNING", False, False
             return row["visual_status"], False, False
 
         if wo == "FAILED" and seq > 0:

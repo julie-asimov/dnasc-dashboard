@@ -145,8 +145,12 @@ def test_discovery_is_structural_not_a_keyword_list():
     fn = src[src.index("def resolve_lims_streakouts"):]
     fn = fn[:fn.index("\ndef ", 1)] if "\ndef " in fn[1:] else fn
 
-    predicates = re.findall(r"REGEXP_CONTAINS\(w\.process_id,\s*r?'([^']+)'", fn)
-    assert predicates, "no REGEXP_CONTAINS on w.process_id found — did the query move?"
+    # The alias moved when the query was rewritten onto temp tables (w → _w,
+    # and the discovery predicate now sits on the bare column), so match either
+    # spelling — what matters is the predicate itself, not what it is called.
+    predicates = re.findall(
+        r"REGEXP_CONTAINS\((?:\w+\.)?process_id,\s*r?'([^']+)'", fn)
+    assert predicates, "no REGEXP_CONTAINS on process_id found — did the query move?"
     for pred in predicates:
         assert "STREAK" not in pred.upper(), (
             f"discovery predicate is keyword-gated again: {pred!r}"

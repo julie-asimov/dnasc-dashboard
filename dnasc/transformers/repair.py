@@ -1009,12 +1009,31 @@ def resolve_lims_streakouts(
     # back to a BIOS workorder via well_content → plasmid_stock / strain.
     try:
         streak_df = client.query(f"""
-            SELECT DISTINCT
-                w.process_id AS streak_process_id,
-                COALESCE(ps.process_id, s.process_id, src_well.process_id)
-                    AS source_workorder_id,
-                own_strain.cell_strain AS own_cell_strain
-            FROM `{project_id}.lims__src.well` w
+            -- One reference per federated view, then join locally. The previous
+            -- shape read lims__src.well three times (the outer scan, the
+            -- own-strain subquery and the source-well join) for the same pull.
+            CREATE TEMP TABLE _w AS
+            SELECT id, process_id FROM `{project_id}.lims__src.well`;
+
+            CREATE TEMP TABLE _wc AS
+            SELECT well_id, plasmid_stock_id, strain_id
+            FROM `{project_id}.lims__src.well_content`;
+
+            CREATE TEMP TABLE _st AS
+            SELECT id, cell_strain, process_id FROM `{project_id}.lims__src.strain`;
+
+            CREATE TEMP TABLE _ps AS
+            SELECT id, process_id FROM `{project_id}.lims__src.plasmid_stock`;
+
+            -- Every LIMS process_id naming a source well IS a manual operation on
+            -- that well, whatever the operator typed in front of it.
+            CREATE TEMP TABLE _manual AS
+            SELECT id AS well_id, process_id,
+                   SAFE_CAST(REGEXP_EXTRACT(process_id, r'well(\\d+)') AS INT64)
+                       AS src_well_id
+            FROM _w
+            WHERE REGEXP_CONTAINS(process_id, r'(?i)well[0-9]+');
+
             -- The strain of the material THIS operation produced, from its own
             -- wells. Julie's rule: parent EPI400 + this operation's glycerol
             -- NEBstable means a transformation happened. Reading the parent's
@@ -1027,31 +1046,63 @@ def resolve_lims_streakouts(
             -- and silently fall back to the parent — the exact bug being fixed. 8
             -- process_ids have wells that disagree on strain, so the pick is
             -- deterministic: most common first, then alphabetical.
-            LEFT JOIN (
-                SELECT pid, ARRAY_AGG(cell_strain ORDER BY n DESC, cell_strain
-                                      LIMIT 1)[OFFSET(0)] AS cell_strain
-                FROM (
-                    SELECT w2.process_id AS pid, s2.cell_strain, COUNT(*) AS n
-                    FROM `{project_id}.lims__src.well` w2
-                    JOIN `{project_id}.lims__src.well_content` wc2 ON wc2.well_id = w2.id
-                    JOIN `{project_id}.lims__src.strain` s2 ON s2.id = wc2.strain_id
-                    WHERE REGEXP_CONTAINS(w2.process_id, r'(?i)well[0-9]+')
-                      AND s2.cell_strain IS NOT NULL
-                    GROUP BY 1, 2
-                )
-                GROUP BY pid
-            ) own_strain ON own_strain.pid = w.process_id
-            JOIN `{project_id}.lims__src.well` src_well
-                ON src_well.id =
-                   SAFE_CAST(REGEXP_EXTRACT(w.process_id, r'well(\\d+)') AS INT64)
-            LEFT JOIN `{project_id}.lims__src.well_content` wc
-                ON wc.well_id = src_well.id
-            LEFT JOIN `{project_id}.lims__src.plasmid_stock` ps
-                ON ps.id = wc.plasmid_stock_id
-            LEFT JOIN `{project_id}.lims__src.strain` s
-                ON s.id = wc.strain_id
-            WHERE REGEXP_CONTAINS(w.process_id, r'(?i)well[0-9]+')
-              AND COALESCE(ps.process_id, s.process_id, src_well.process_id) IS NOT NULL
+            CREATE TEMP TABLE _own AS
+            SELECT pid, ARRAY_AGG(cell_strain ORDER BY n DESC, cell_strain
+                                  LIMIT 1)[OFFSET(0)] AS cell_strain
+            FROM (
+                SELECT m.process_id AS pid, s.cell_strain, COUNT(*) AS n
+                FROM _manual m
+                JOIN _wc ON _wc.well_id = m.well_id
+                JOIN _st s ON s.id = _wc.strain_id
+                WHERE s.cell_strain IS NOT NULL
+                GROUP BY 1, 2
+            )
+            GROUP BY pid;
+
+            CREATE TEMP TABLE _ws AS
+            SELECT well_id, parent_well_id
+            FROM `{project_id}.lims__src.well_source`
+            WHERE parent_well_id IS NOT NULL;
+
+            -- Fallback for an operation whose wells are minipreps: a Stock well
+            -- carries a plasmid_stock, never a strain, so _own is empty for it and
+            -- the caller fell back to the PARENT workorder's strain — which is the
+            -- strain the material was transformed OUT of. ubclone_EPI_04Nov26_
+            -- well2407817 (plate 19050, 8 EPI400 minipreps) read NEB_STABLE that
+            -- way. Its glycerol sibling under the same overnight-culture well does
+            -- carry the strain, so hop up one well_source level and back down.
+            -- Restricted to process_ids _own could not answer, which keeps the
+            -- sibling fan-out off the 96-pick agar plates.
+            CREATE TEMP TABLE _kin AS
+            SELECT pid, ARRAY_AGG(cell_strain ORDER BY n DESC, cell_strain
+                                  LIMIT 1)[OFFSET(0)] AS cell_strain
+            FROM (
+                SELECT m.process_id AS pid, s.cell_strain, COUNT(*) AS n
+                FROM _manual m
+                JOIN _ws mine ON mine.well_id = m.well_id
+                JOIN _ws sib  ON sib.parent_well_id = mine.parent_well_id
+                             AND sib.well_id != m.well_id
+                JOIN _wc ON _wc.well_id = sib.well_id
+                JOIN _st s ON s.id = _wc.strain_id
+                WHERE s.cell_strain IS NOT NULL
+                  AND m.process_id NOT IN (SELECT pid FROM _own)
+                GROUP BY 1, 2
+            )
+            GROUP BY pid;
+
+            SELECT DISTINCT
+                m.process_id AS streak_process_id,
+                COALESCE(ps.process_id, s.process_id, srcw.process_id)
+                    AS source_workorder_id,
+                COALESCE(own.cell_strain, kin.cell_strain) AS own_cell_strain
+            FROM _manual m
+            LEFT JOIN _own own ON own.pid = m.process_id
+            LEFT JOIN _kin kin ON kin.pid = m.process_id
+            JOIN _w srcw ON srcw.id = m.src_well_id
+            LEFT JOIN _wc wc ON wc.well_id = srcw.id
+            LEFT JOIN _ps ps ON ps.id = wc.plasmid_stock_id
+            LEFT JOIN _st s  ON s.id  = wc.strain_id
+            WHERE COALESCE(ps.process_id, s.process_id, srcw.process_id) IS NOT NULL
         """).to_dataframe()
     except Exception as exc:
         log.warning("resolve_lims_streakouts: LIMS query failed: %s", exc)
