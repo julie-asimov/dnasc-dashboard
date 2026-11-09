@@ -880,6 +880,7 @@ def render_all_projects_dashboard(
     .wait-loc { color: #64748b; font-size: 10px; }
     .wait-loc.elsewhere { color: #be185d; font-weight: 600; }
     .wait-loc.here { color: #0d9488; }
+    .wait-loc.used { color: #b91c1c; font-weight: 600; }
     .wait-loc.none { color: #9ca3af; font-style: italic; }
     .colony-badge { font-size: 7px; padding: 1px 3px; border-radius: 2px; font-weight: 600; }
     .tat-cell { font-family: monospace; color: #86868b; font-size: 8px; white-space: nowrap; }
@@ -2596,7 +2597,14 @@ def render_all_projects_dashboard(
                             _rows = []
                             for _w in _wu:
                                 if _w in tree_stock_ids:
-                                    _loc, _cls, _pri = 'being made in this workflow', 'here', 2
+                                    # A BLOCKED workorder is not waiting on a part that is
+                                    # still in production — bios blocks it because the input
+                                    # well is spent. Say the same thing the header chip says
+                                    # ("input used up") so the card does not contradict itself.
+                                    if row.get('wo_status') == 'BLOCKED':
+                                        _loc, _cls, _pri = 'input used up', 'used', 0
+                                    else:
+                                        _loc, _cls, _pri = 'being made in this workflow', 'here', 2
                                 else:
                                     _src = _stock_to_req.get(_w)
                                     if _src and _src.get('exp_name'):
@@ -2629,7 +2637,10 @@ def render_all_projects_dashboard(
                     if not clean_name: return ""
                     if clean_name in waiting_items:
                         if clean_name in tree_stock_ids:
-                            return f'<span class="part-tag in-production" title="Being made in this workflow">{label_prefix}{clean_name}</span>'
+                            _pt_tip = ('Input used up — must be remade before this attempt can run'
+                                       if row.get('wo_status') == 'BLOCKED'
+                                       else 'Being made in this workflow')
+                            return f'<span class="part-tag in-production" title="{_pt_tip}">{label_prefix}{clean_name}</span>'
                         else:
                             _tip_info = _stock_to_req.get(clean_name)
                             if _tip_info:
