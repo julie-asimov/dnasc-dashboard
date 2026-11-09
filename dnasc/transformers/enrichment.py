@@ -494,6 +494,12 @@ class EnrichmentTransformer:
                         _hit = _PROTO_MAP.get(_key)
                     if _hit is not None:
                         _pri, _lbl = _hit
+                        # Deliberately NOT relabelled when wo_status == 'BLOCKED': that
+                        # status lags the bench, so an RD/RU op means the step really is
+                        # runnable and READY is the honest label (see the bridge comment
+                        # in pipeline.py:_filter_and_enrich). The request-level ⛔ BLOCKED
+                        # badge reads visual_status instead, which the bridge has already
+                        # corrected.
                         if _pri > _best_pri:
                             _best_pri, _best_label, _best_state = _pri, _lbl, _s
             req_operation[req_id] = _best_label

@@ -468,6 +468,40 @@ def run_pipeline() -> pd.DataFrame:
         if _flipped:
             log.info("Repick status re-derived for %d workorders from downstream op states", _flipped)
 
+    # ── Stale BLOCKED re-derive ───────────────────────────────────────────────
+    # `workorder.status` lags the bench. When a missing part lands, bios readies the
+    # OpTracker operations a fraction of a second AFTER writing the workorder rows and
+    # never goes back to re-write the status: on 2026-11-09 the GGN002/GGN004 campaigns
+    # had their syn parts quanted at 15:52 UTC and their Golden Gate ops readied at
+    # 15:59:46.0-46.2, yet 8 of 9 workorders still read BLOCKED from a status write at
+    # 15:59:45.890. Only 34746dff got a later write and picked up READY.
+    #
+    # The bridge in _filter_and_enrich already prefers the op state over wo_status, but
+    # these rows have their operation lists completed by later steps (downstream plate
+    # resolution), so at bridge time there was no RD/RU yet to prefer. Re-derive just
+    # this class, once the op lists are final.
+    #
+    # A genuinely blocked workorder has no runnable op at all — the A824-upsilon-pilot
+    # retries waiting on the exhausted pAI-26906 are all WA — so they are untouched and
+    # keep reading BLOCKED.
+    def _runnable_op(s):
+        if hasattr(s, "tolist"):
+            s = s.tolist()
+        return isinstance(s, list) and any(v in ("RD", "RU") for v in s)
+
+    _stale_blocked = (
+        final_df["wo_status"].astype(str).str.upper().eq("BLOCKED")
+        & final_df["visual_status"].astype(str).eq("BLOCKED")
+        & final_df["operation_state"].map(_runnable_op)
+    )
+    if _stale_blocked.any():
+        final_df.loc[_stale_blocked, "visual_status"] = final_df.loc[
+            _stale_blocked, "operation_state"
+        ].map(lambda s: "RUNNING"
+              if "RU" in (s.tolist() if hasattr(s, "tolist") else s) else "READY")
+        log.info("Stale BLOCKED re-derived for %d workorders whose ops are already ready/running",
+                 int(_stale_blocked.sum()))
+
     # ── Attempt anchor recompute (must run last, after all row filtering) ────
     # Uses normalized backbone/parts columns. Runs here rather than in Step 2
     # so anchors are never computed against workorders that are later filtered
@@ -1511,6 +1545,19 @@ def _filter_and_enrich(df: pd.DataFrame) -> pd.DataFrame:
 
     # CANCELED wo_status always wins — ops may have FA states but the
     # workorder was explicitly canceled, so don't let ops override it.
+    #
+    # BLOCKED deliberately does NOT get the same treatment — has_ru/has_rd are tested
+    # first on purpose. `workorder.status` lags the bench: when a missing part lands,
+    # bios writes the workorder rows and *then* readies the OpTracker operations, and
+    # it does not go back to re-write the status. On 2026-11-09 the GGN002/GGN004
+    # campaigns had their syn parts received+quanted at 15:42-15:52 UTC and their
+    # Golden Gate ops readied at 15:59:46.0-46.2 — but 8 of 9 workorders still read
+    # BLOCKED from a status write at 15:59:45.890, a fraction of a second earlier.
+    # Only 34746dff got a later write (15:59:46.606) and picked up READY. An RD op
+    # means the plan really is runnable, so the op state wins and a stale BLOCKED is
+    # correctly shown as READY. A genuinely blocked workorder has no RD/RU op at all
+    # (the 19 A824-upsilon-pilot retries on pAI-26906 are all WA) and still resolves
+    # to BLOCKED through wo_valid below.
     # np.select applies conditions in order; first match wins per row.
     df["visual_status"] = np.select(
         [

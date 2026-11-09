@@ -1577,7 +1577,7 @@ def render_all_projects_dashboard(
                     op_status = 'READY' if display_text.endswith('READY') else ('RUNNING' if display_text.endswith('RUNNING') else 'WAITING')
                 status_badge_html = f'''
                     <span class="badge status-{op_status}" style="
-                        font-size: 8px; padding: 1px 4px;
+                        font-size: 11px; padding: 2px 7px;
                         display: inline-flex; align-items: center; line-height: 1;
                         box-sizing: border-box; vertical-align: middle;
                         white-space: nowrap; font-weight: 700; border-radius: 2px;
@@ -1602,6 +1602,42 @@ def render_all_projects_dashboard(
         order_pending_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#7c3aed; color:white; border:2px solid #6d28d9; font-size:12px; padding:4px 12px; font-weight:800;">⏳ ORDER PENDING</span><div class="badge-tip">Parts order submitted to synthesis vendor — waiting on delivery</div></div>' if has_order_pending else ""
         antibiotic_mismatch_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#dc2626; color:white; border:2px solid #b91c1c; font-size:12px; padding:4px 12px; font-weight:800;">🚨 ANTIBIOTIC MISMATCH</span><div class="badge-tip">An active workorder has an antibiotic that does not match LIMS — check and correct before proceeding</div></div>' if has_antibiotic_mismatch else ""
         dual_antibiotic_badge = '<div class="badge-tip-wrap"><span class="badge" style="background:#fef3c7; color:#92400e; border:2px solid #f59e0b; font-size:12px; padding:4px 12px; font-weight:800;">⚠️ DUAL ANTIBIOTIC (LIMS)</span><div class="badge-tip">LIMS lists two bacterial antibiotics on this plasmid — often the NeoR mammalian marker mis-flagged as Kan. The correct one is selected, but the BIOS/LIMS record should be corrected.</div></div>' if has_dual_antibiotic else ""
+
+        # ── Blocked-attempt chip ──────────────────────────────────────────────
+        # Docked to the operation badge, NOT in the alert-badge row. A request whose
+        # attempt 1 is in NGS and whose attempt 2 is blocked is still moving, so the
+        # operation stays the headline and this rides along small. Before v1.11.149
+        # this was a 12px/800 badge next to an 8px operation and the card read as dead.
+        #
+        # The missing input comes from `Waiting` — bios' own field, populated on all 27
+        # live blocked rows — not the parts/backbone `available` snapshot, which is
+        # written once and goes stale (pAI-27276 was BLOCKED with every input reading
+        # available=true).
+        _blk_rows = req_df[req_df['wo_status'].astype(str) == 'BLOCKED'] if 'wo_status' in req_df.columns else req_df.iloc[0:0]
+        blocked_chip = ""
+        if not _blk_rows.empty and not is_done:
+            _blk_att = sorted({int(v) for v in _blk_rows.get('attempt_number', pd.Series(dtype=float)).dropna()})
+            _blk_parts = sorted({
+                _w.strip()
+                for _raw in _blk_rows.get('Waiting', pd.Series(dtype=object)).dropna().astype(str)
+                for _w in _raw.split(',') if _w.strip()
+            })
+            _who = (f'attempt {"/".join(str(a) for a in _blk_att)}'
+                    if _blk_att and max(_blk_att) > 1 else 'this build')
+            _lbl = (f'⛔ {_who} · input used up' if _blk_parts
+                    else f'⛔ {_who} blocked')
+            _tip = (
+                f'{", ".join(_blk_parts)} is used up, so {_who} cannot run until it is remade.'
+                if _blk_parts else
+                f'bios has {_who} blocked.'
+            ) + ' The operation beside this chip is what is still live on another attempt.'
+            blocked_chip = (
+                '<span class="badge-tip-wrap" style="margin-left:4px;">'
+                '<span style="background:#fee2e2; color:#b91c1c; border:1px solid #fca5a5;'
+                ' border-radius:3px; font-size:8px; padding:1px 4px; font-weight:700;'
+                ' white-space:nowrap; vertical-align:middle; line-height:1;">'
+                f'{_lbl}</span><div class="badge-tip">{_tip}</div></span>'
+            )
 
         ready_to_ship_time = None
         final_release_time = None
@@ -1677,7 +1713,7 @@ def render_all_projects_dashboard(
                 <div style="display: flex; gap: 8px; align-items: center; flex-shrink: 0; margin-left: auto;">
                     {customer_badge}{partner_badge}
                     <span class="badge status-{str(req_status).replace(" ", "_")}">{req_status}</span>
-                    {status_badge_html}
+                    {status_badge_html}{blocked_chip}
                     {stalled_badge}
                     {asm_review_badge}
                     {seq_winner_badge}

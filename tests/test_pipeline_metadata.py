@@ -417,6 +417,34 @@ class TestFilterAndEnrichVisualStatus:
         result = _filter_and_enrich(_df(row))
         assert result.loc[result.index[0], "visual_status"] == "CANCELED"
 
+    def test_rd_op_beats_a_stale_blocked_status(self):
+        # `workorder.status` lags: when a missing part lands, bios writes the workorder
+        # rows and THEN readies the operations, without re-writing the status. On
+        # 2026-11-09 the GGN002/GGN004 campaigns had parts quanted at 15:52 UTC and
+        # their GG ops readied at 15:59:46.0-46.2, yet 8 of 9 workorders still read
+        # BLOCKED from a status write at 15:59:45.890. The op state is the truth.
+        row = _fe_row(wo_status="BLOCKED", operation_state=["RD"])
+        result = _filter_and_enrich(_df(row))
+        assert result.loc[result.index[0], "visual_status"] == "READY"
+
+    def test_ru_op_beats_a_stale_blocked_status(self):
+        row = _fe_row(wo_status="BLOCKED", operation_state=["RU"])
+        result = _filter_and_enrich(_df(row))
+        assert result.loc[result.index[0], "visual_status"] == "RUNNING"
+
+    def test_blocked_with_no_runnable_op_stays_blocked(self):
+        # A genuinely blocked workorder has no RD/RU op at all — the 19
+        # A824-upsilon-pilot retries on the exhausted pAI-26906 are all WA. Those
+        # fall through to the raw wo_status and must keep reading BLOCKED.
+        row = _fe_row(wo_status="BLOCKED", operation_state=["WA", "WA", "WA"])
+        result = _filter_and_enrich(_df(row))
+        assert result.loc[result.index[0], "visual_status"] == "BLOCKED"
+
+    def test_canceled_still_beats_an_rd_op(self):
+        row = _fe_row(wo_status="CANCELED", operation_state=["RD"])
+        result = _filter_and_enrich(_df(row))
+        assert result.loc[result.index[0], "visual_status"] == "CANCELED"
+
     def test_draft_wo_status(self):
         row = _fe_row(wo_status="DRAFT", operation_state=[])
         result = _filter_and_enrich(_df(row))
