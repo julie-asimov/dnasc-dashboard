@@ -2,42 +2,67 @@
 """Refresh the Twist order-tracking cache used by the dashboard's Twist tab.
 
 Standalone pull on its own cron, exactly like gen_parts_pkl.py — the dashboard render
-NEVER calls the Twist API. Two reasons that matters:
+NEVER calls the Twist API. Writes dashboard_state/twist_result.pkl ATOMICALLY (temp file
++ os.replace) so the renderer always sees either the previous good pkl or the complete
+new one.
 
-  • the orders endpoint is slow (~75 s per page regardless of page_size), so a live call
-    inside render would add minutes to every rebuild
-  • it needs AUTHORIZATION_JWT / X_END_USER_TOKEN, which expire; a render must not fail
-    (or hang) because a token went stale overnight
+ORDER TRACKING API (migrated 2026-11-06, v1.11.144)
+----------------------------------------------------
+The old `GET {twist-api.twistdna.com}/v1/users/<email>/orders/` LIST endpoint is BROKEN
+vendor-side and has been since ~2026-09-10. Twist's gateway answers it with HTTP 500
+`ReadTimeout` / `502 Bad Gateway` from `mes-prod.twistbioscience.com`: measured 1 success
+in 13 attempts (~8%) on 2026-11-06, identical from the Mac and from the server, so it is
+not egress and not the tokens. The damage was invisible because this script correctly
+keeps the previous cache rather than caching an empty pull — twist_pull.log shows 925 runs
+and 122 successes, 118 of them in 2026-09-01..09, and the tab silently served an Oct 30
+snapshot for a week while *looking* live.
 
-Writes dashboard_state/twist_result.pkl ATOMICALLY (temp file + os.replace) so the
-renderer always sees either the previous good pkl or the complete new one.
+Tiffany Dai at Twist (2026-09-19) confirmed the investigation is open and pointed at the
+replacement: https://app.swaggerhub.com/apis-docs/TwistDNA/synbio-order-intake/1.0.0
 
-`--days` (default 45) bounds DELIVERED orders only, and it is measured from the DELIVERY
-date — the latest shipment's `received_at`, else `shipped_date` — not from when the order
-was placed. An order placed 60 days ago that landed last week is recent news; keying the
-window off `received_date` dropped it for being "old" while its DNA was still on the bench.
+So the order list, order detail and plate maps now come from the Order Tracking API, which
+is a different host and sub-second instead of ~75 s a page:
 
-OPEN orders are never aged out. They are the ones worth looking at, and the longer one has
-been open the more that is true, so `_open_days` is stamped on each for the tab to flag.
-Note this only governs what is KEPT: paging still stops at `--days`, so an open order older
-than that is found only because the pipeline still lists it in `waiting`. Raise `--days` to
-reach further back.
+    /orders/summary          0.9 s   every order on the account (633 = 7 pages of 100)
+    /orders/<Q-number>       ~1 s    dates, item statuses + ETAs, shipments, counters
+    /orders/<Q>/collateral   ~6 s    plate maps as JSON — plateId, wellLocation, yield, QC
 
-The order list is paged newest-first and STOPS EARLY: only until every Q-number the
-pipeline is still waiting on has been seen AND the window reaches back `--days`. The full
-history is 300 orders — paging all of it would take ~20 minutes for data nobody looks at.
-A typical run is ~3 min (2 pages + plate maps); `--max-pages` bounds it at ~6, and
-`--deadline` is a wall-clock stop on top of that, so an hourly cron can never still be
-running when the next one fires. Anything skipped for either reason is recorded in `notes`
-and shown on the tab — a short pull must not read as "nothing new".
+READ-ONLY. The same API can place real, billable orders (`POST /v1/orders/<draft-id>`).
+This script issues GETs and nothing else; never add a write call to it.
+
+What still comes from the OLD host, because it works and the new API does not carry it:
+  • `/orders/<sfdc_id>/items/` (~2-3 s) — per-item `redo_count` and `delayed_status`,
+    Twist's own synthesis-delay flag. The new `TrackingOrderItem` has neither.
+  • the order LIST, on ONE bounded best-effort attempt per run, purely to harvest
+    `project_name` (see `_scrape_project_names`) — the only field with no replacement.
+
+Deliberate losses, all of them recorded in `notes` so the tab says so rather than
+implying Twist sent nothing:
+  • a shipment's DELIVERY timestamp. The new payload has no `received_at`, so a shipment
+    marked `received` reports its SHIP date and is flagged `received_at_approx`.
+  • `status_detail` / `carrier_detail` / `last_updated_at` / per-shipment
+    `estimated_delivery_date`. `_is_delayed()` in the renderer reads `status_detail` and
+    will simply never fire now; `lastLocation` survives and is the live scan signal.
+
+`--days` (default 45) bounds DELIVERED orders only, measured from the DELIVERY date — the
+latest shipment's date — not from when the order was placed. OPEN orders are never aged
+out; the longer one has been open the more it needs looking at, so `_open_days` is stamped
+on each for the tab to flag.
+
+Summaries are cheap enough to take whole (3.7 s for all 633), so paging is no longer the
+cost. DETAIL calls are, at ~1 s each, so the walk stops once the window is covered AND
+every Q-number the pipeline is still waiting on has been seen — the same early-stop rule
+as before, now measured in orders rather than pages. `--deadline` remains a hard
+wall-clock stop so an hourly cron can never still be running when the next one fires.
 
 Env:
-    AUTHORIZATION_JWT, X_END_USER_TOKEN   (required)
-    TWIST_EMAIL                           (default dna@asimov.io)
+    AUTHORIZATION_JWT   (required)
+    X_END_USER_TOKEN    (required only for the two OLD-host calls above)
+    TWIST_EMAIL         (default dna@asimov.io)
 
 Usage:
     /opt/anaconda3/bin/python3 gen_twist_pkl.py
-    /opt/anaconda3/bin/python3 gen_twist_pkl.py --days 90 --max-pages 6
+    /opt/anaconda3/bin/python3 gen_twist_pkl.py --days 90
 """
 from __future__ import annotations
 
@@ -54,7 +79,6 @@ import sys
 import tempfile
 import time
 import traceback
-import zipfile
 
 import pandas as pd
 import requests
@@ -73,27 +97,25 @@ from twist_orders import (  # noqa: E402  (path juggling above is deliberate)
 
 OUT = os.path.join(HERE, "dashboard_state", "twist_result.pkl")
 PARQUET = os.path.join(HERE, "dashboard_state", "baseline.parquet")
+# Project names live nowhere in the new API, so the few we manage to scrape off the old
+# one are kept forever. An order's project never changes, so one lucky hit is permanent.
+PROJECTS = os.path.join(HERE, "dashboard_state", "twist_project_names.json")
 
 # Workorder types whose vendor_order_id is a Twist Q-number.
 _SYNTH_TYPES = ["syn_part_synthesis_workorder", "plasmid_synthesis_workorder"]
 
-# One page costs ~75 s no matter its size, so take big pages and few of them.
-_PAGE_SIZE = 25
-_TIMEOUT = 300
+# New Order Tracking API. Host and prefix differ from BASE_URL (the old host), and auth is
+# a bearer JWT with no end-user token.
+NEW_BASE = "https://twist-api.prod.twistbio.co/ecommerce-synbio-intake/v1"
 
-# Hard wall-clock budget for the whole pull. The vendor API is the slow part and its latency
-# is not ours to control, so the job stops fetching rather than running long — a cron firing
-# hourly must never still be running when the next one starts, and it must be finished well
-# before the dashboard refresh it feeds. Whatever was collected still gets cached, with a note
-# on the tab saying what was skipped; a silent short pull would read as "nothing new".
-# Raised 600→900 when the per-order items fetch was added (~150 s for 31 orders on top of
-# ~190 s of order pages and ~100 s of plate maps). The cron leaves ~20 min before the parts
-# pull at :50, so 15 min still lands with room to spare.
+_SUMMARY_SIZE = 100     # max the endpoint accepts; the whole account is ~7 pages
+_TIMEOUT = 120
 _DEADLINE_SECONDS = 900
-# A page costs ~75 s; without this much left, starting one just burns the remaining budget.
-_PAGE_COST = 90
 
-
+# Measured 2026-11-06. Used to decide whether there is budget left to start a call rather
+# than discovering mid-flight that there was not.
+_DETAIL_COST = 5
+_COLLATERAL_COST = 20   # ~6 s typical, but a 160-item order 504s after ~30 s
 # ── pipeline side ─────────────────────────────────────────────────────────────
 def _pipeline_parts(parquet: str) -> tuple[dict, set]:
     """{Q-number: [part dicts]}, {Q-numbers with a part still waiting on delivery}.
@@ -145,59 +167,264 @@ def _pipeline_parts(parquet: str) -> tuple[dict, set]:
     return by_order, waiting, by_stock
 
 
-# ── Twist side ────────────────────────────────────────────────────────────────
-# The orders endpoint 500s occasionally. It used to raise straight out of the pull, so one
-# transient blip on page 1 discarded the whole run — observed 2026-09-03 on a forced refresh,
-# where the identical request succeeded on the retry from another host moments later. At ~75 s
-# a page, a run is far too expensive to throw away over a vendor hiccup.
+# ── Twist side: the new Order Tracking API ────────────────────────────────────
 _RETRIES = 3
-_RETRY_WAIT = 20        # seconds; the API is slow enough that a tight retry helps nobody
+_RETRY_WAIT = 5         # the new endpoints answer in ~1 s, so a tight retry is sensible
 _RETRY_ON = (500, 502, 503, 504)
 
 
-def _get_page_with_retry(url, jwt, eut, page, left):
-    """One page of the orders list, retried on 5xx and transport errors.
+def _bearer(jwt: str) -> dict:
+    """Headers for the new API. It takes a BEARER jwt and no end-user token — unlike
+    `_headers()`, which is the old host's `JWT <tok>` + `X-End-User-Token` pair. Passing
+    the old header shape here authenticates nothing."""
+    return {"accept": "*/*", "Authorization": f"Bearer {jwt}"}
 
-    Returns the response, or None if every attempt failed (or the budget ran out mid-way).
-    Auth failures are NOT retried — a stale token will not fix itself, and burning the budget
-    on three identical 401s only delays the real message.
+
+def _get_json(url, jwt, left, params=None, cost=10, label="", retries=_RETRIES):
+    """GET → parsed JSON, or None.
+
+    Retries 5xx because the vendor's gateway still blips (Q-698807's collateral 504s
+    reproducibly — ~160 items with full sequences is apparently too much for it to
+    assemble in time). Each request is capped by what is left of the pull's budget, so
+    one slow call cannot overrun the deadline on its own, and a call is not started at
+    all unless `cost` seconds remain.
     """
-    for attempt in range(1, _RETRIES + 1):
-        try:
-            resp = requests.get(url, headers=_headers(jwt, eut),
-                                timeout=min(_TIMEOUT, max(30, int(left()))), params={
-                "page_size": _PAGE_SIZE, "sort_by": "received_date",
-                "reverse": "true", "page": page,
-            })
-            if resp.status_code == 200:
-                return resp
-            if resp.status_code not in _RETRY_ON:
-                resp.raise_for_status()
-                return resp
-            # Say WHAT the vendor said. Discarding the body meant a repeating server-side
-            # 500 was indistinguishable from a token problem, a rate limit and a real
-            # outage — and the retry line was the only place we would ever see it.
-            body = " ".join((resp.text or "").split())[:200]
-            hint = ""
-            for h in ("Retry-After", "X-RateLimit-Remaining", "CF-Ray", "X-Request-Id"):
-                if h in resp.headers:
-                    hint += f" {h}={resp.headers[h]}"
-            why = f"HTTP {resp.status_code} in {resp.elapsed.total_seconds():.1f}s{hint}"
-            if body:
-                why += f" — {body!r}"
-        except requests.RequestException as e:
-            if getattr(getattr(e, "response", None), "status_code", None) not in (None,) + _RETRY_ON:
-                raise
-            why = f"{type(e).__name__}"
-
-        if attempt == _RETRIES or left() < _PAGE_COST + _RETRY_WAIT:
-            print(f"    page {page}: {why} — giving up after {attempt} attempt(s)", flush=True)
+    for attempt in range(1, retries + 1):
+        if left() < cost:
             return None
-        print(f"    page {page}: {why} — retrying in {_RETRY_WAIT}s "
-              f"({attempt}/{_RETRIES})", flush=True)
+        tmo = max(5, min(_TIMEOUT, int(left())))
+        try:
+            r = requests.get(url, headers=_bearer(jwt), params=params, timeout=tmo)
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code not in _RETRY_ON:
+                if label:
+                    body = " ".join((r.text or "").split())[:160]
+                    print(f"    {label}: HTTP {r.status_code} — {body!r}", flush=True)
+                return None
+            why = f"HTTP {r.status_code}"
+        except requests.RequestException as e:
+            why = type(e).__name__
+        if attempt == retries:
+            if label:
+                print(f"    {label}: {why} — giving up after {attempt} attempt(s)",
+                      flush=True)
+            return None
         time.sleep(_RETRY_WAIT)
     return None
 
+
+def _fetch_summaries(email, jwt, left) -> list[dict]:
+    """Every order on the account, newest first.
+
+    The whole history is 633 orders = 7 pages of 100, measured at 3.7 s total, so there is
+    no reason to window this call — the expensive half is the per-order detail below.
+    Ordering is by Q-number descending, which is chronological: the list opens with
+    Q-749793 and ends at Q-52134.
+
+    `fromDate` is required-ish in practice; 2015 is simply "everything".
+    """
+    out, page = [], 1
+    while True:
+        j = _get_json(f"{NEW_BASE}/users/{email}/orders/summary", jwt, left,
+                      params={"fromDate": "2015-01-01T00:00:00Z",
+                              "toDate": "2099-12-31T23:59:59Z",
+                              "page": page, "size": _SUMMARY_SIZE},
+                      cost=5, label=f"summary page {page}")
+        if not j:
+            break
+        out.extend(j.get("orders") or [])
+        if page >= int(j.get("total_pages") or 1):
+            break
+        page += 1
+    return out
+
+
+def _fetch_detail(email, jwt, q: str, left) -> dict | None:
+    """One order: dates, per-item status and ETA, shipments, counters. ~1 s."""
+    return _get_json(f"{NEW_BASE}/users/{email}/orders/{q}", jwt, left,
+                     cost=_DETAIL_COST, label=f"detail {q}")
+
+
+# Twist's summary vocabulary → the old list endpoint's 'open'/'past' bookkeeping, which is
+# what `_is_open()` and the renderer have always read. 'In production' is the only live
+# state; 'Cancelled' is finished work that never shipped, so it files as 'past'.
+_OPEN_STATUSES = ("in production",)
+
+
+def _ship_status(raw: str) -> str:
+    """New shipment status → the old vocabulary the renderer buckets on ('shipped' =
+    in flight, 'received' = landed). Anything unrecognised passes through untouched
+    rather than being guessed into one of the two — a wrong bucket moves an order to the
+    wrong table, a blank one merely fails to move it."""
+    s = str(raw or "").strip().lower()
+    if s in ("received", "delivered"):
+        return "received"
+    if s in ("shipped", "in_transit", "in transit"):
+        return "shipped"
+    return s
+
+
+def _legacy_order(summary: dict, detail: dict, project: str) -> dict:
+    """New-API order → the dict shape the renderer has always consumed.
+
+    Deliberately a translation layer rather than a renderer rewrite: dnasc/renderer/
+    twist.py reads ~20 snake_case fields off these dicts and is the part of this feature
+    with the most behaviour in it. Keeping the contract means the migration is one file.
+
+    Two fields change meaning and are commented where they are set: the order-level ETA
+    (now derived from item ETAs, because the new API has no order-level one) and a
+    shipment's `received_at` (which the new API does not report at all).
+    """
+    info = detail.get("info") or {}
+    items = detail.get("orderItems") or []
+    raw_status = str(summary.get("orderStatus") or "").strip().lower()
+    is_open = raw_status in _OPEN_STATUSES
+
+    # Order ETA. The old API carried `estimated_completion_date` per order; the new one
+    # carries `estimatedShippingDate` per ITEM. The honest order-level answer is the LAST
+    # outstanding item's date — that is when the order is actually done — so prefer the
+    # max over items still being made, and fall back to the max over all of them once
+    # nothing is outstanding.
+    def _eta(pool):
+        return max((str(i.get("estimatedShippingDate") or "")[:10] for i in pool
+                    if i.get("estimatedShippingDate")), default="")
+    eta = _eta([i for i in items if str(i.get("status")) == "in_production"]) or _eta(items)
+
+    ships = []
+    for s in (detail.get("shipments") or []):
+        st = _ship_status(s.get("status"))
+        shipped = str(s.get("shippedDate") or "")
+        ships.append({
+            "id": s.get("id"),
+            "number": s.get("number"),
+            "status": st,
+            "shipped_date": shipped,
+            # NO DELIVERY TIMESTAMP EXISTS in this API. A shipment marked received did
+            # land, so reporting its ship date keeps the Arrived column alive, but it is
+            # off by the transit time (typically a day) and must never be read as the
+            # delivery date. The flag is here so a renderer can label it; `notes` says so
+            # on the tab either way.
+            "received_at": shipped if st == "received" else "",
+            "received_at_approx": st == "received",
+            "carrier": s.get("carrier") or "",
+            "tracking_number": s.get("trackingNumber") or "",
+            "tracking_url": s.get("trackingUrl") or "",
+            "last_location": s.get("lastLocation") or "",
+            # Absent from the new payload. Left empty rather than faked: `_is_delayed()`
+            # reads status_detail and will correctly never fire instead of inventing a
+            # verdict from a field that no longer exists.
+            "status_detail": {},
+            "carrier_detail": "",
+            "last_updated_at": "",
+            "estimated_delivery_date": "",
+            "containers": s.get("containers") or [],
+        })
+
+    return {
+        "order_name": detail.get("quoteNumber") or summary.get("orderId") or "",
+        "sfdc_id": summary.get("salesId") or detail.get("salesId") or "",
+        "status": "open" if is_open else "past",
+        "order_status_raw": summary.get("orderStatus") or "",
+        "project_name": project or "",
+        "received_date": str(detail.get("receivedDate") or ""),
+        "created_date": str(detail.get("receivedDate") or ""),
+        "estimated_completion_date": eta,
+        "due_date": "",
+        "high_priority": False,
+        "type": detail.get("type") or "",
+        "container_code": detail.get("containerType") or "",
+        "total_items": info.get("totalItems") or 0,
+        "in_production_items": info.get("inProductionItems") or 0,
+        "failed_items": info.get("failedItems") or 0,
+        # `completed` and `closed` are SUMMED by the renderer (done = completed + closed),
+        # so the delivered count goes in exactly one of them.
+        "completed_items": info.get("deliveredItems") or 0,
+        "closed_items": 0,
+        "cancelled_items": (info.get("totalItems") or 0) if raw_status == "cancelled" else 0,
+        "total_amount": summary.get("totalAmount"),
+        "currency_iso_code": summary.get("currency") or "",
+        "shipments": ships,
+    }
+
+
+# ── project names: the one field with no replacement ──────────────────────────
+def _load_projects() -> dict:
+    try:
+        with open(PROJECTS) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_projects(names: dict) -> None:
+    try:
+        d = os.path.dirname(PROJECTS)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".twist_projects.", suffix=".tmp")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(names, fh, indent=1, sort_keys=True)
+        os.replace(tmp, PROJECTS)
+    except Exception:
+        traceback.print_exc()
+
+
+def _seed_projects_from_pkl(names: dict) -> int:
+    """First run only: lift project names out of the last good pkl.
+
+    That cache was written while the old list endpoint still worked, so it holds a real
+    `project_name` for every order it covered. Without this the names would have to be
+    re-won one ~8%-successful scrape at a time, and the tab would read as a wall of bare
+    Q-numbers until that happened.
+    """
+    if names:
+        return 0
+    try:
+        with open(OUT, "rb") as fh:
+            prev = pickle.load(fh)
+    except Exception:
+        return 0
+    got = 0
+    for o in prev.get("orders") or []:
+        q, p = o.get("order_name"), (o.get("project_name") or "").strip()
+        if q and p:
+            names[q] = p
+            got += 1
+    return got
+
+
+def _scrape_project_names(email, jwt, eut, names: dict, left) -> str:
+    """ONE bounded best-effort call to the OLD list endpoint, purely for `project_name`.
+
+    `project_name` ("A824_upsilon_syn_parts", "LND004_clonal") exists nowhere in the new
+    API — not on the summary, not on the order detail, not on the quote — and it is what
+    makes the tab readable at a glance. The old LIST endpoint is the only source, and it
+    answers about 8% of the time.
+
+    So: try once, cheaply, and treat success as a bonus. Names are written through to
+    PROJECTS and kept forever, because an order's project never changes — every lucky hit
+    permanently improves the tab. Never let this block the pull; the run is already
+    complete without it.
+    """
+    if left() < 130:
+        return "project-name scrape skipped — not enough budget left"
+    try:
+        r = requests.get(f"{BASE_URL}/v1/users/{email}/orders/",
+                         headers=_headers(jwt, eut), timeout=min(130, int(left())),
+                         params={"page_size": 25, "sort_by": "received_date",
+                                 "reverse": "true", "page": 1})
+    except requests.RequestException as e:
+        return f"project-name scrape failed ({type(e).__name__}) — using {len(names)} cached"
+    if r.status_code != 200:
+        return (f"project-name scrape failed (HTTP {r.status_code}, the known-broken old "
+                f"endpoint) — using {len(names)} cached")
+    fresh = 0
+    for o in (r.json().get("results") or []):
+        q, p = o.get("order_name"), (o.get("project_name") or "").strip()
+        if q and p and names.get(q) != p:
+            names[q] = p
+            fresh += 1
+    return f"project-name scrape OK — {fresh} new, {len(names)} known"
 
 def _delivered_on(order: dict) -> str:
     """ISO date the order actually LANDED, or "" if nothing has arrived yet.
@@ -226,227 +453,83 @@ def _is_open(order: dict) -> bool:
     return str(order.get("status") or "").lower() == "open"
 
 
-def _fetch_orders_window(email, jwt, eut, want: set, days: int, max_pages: int, left):
-    """Page orders newest-first, stopping as soon as the window covers what we need.
+# ── plate maps: now JSON, not a CSV download ──────────────────────────────────
+# Sequence fields, dropped from everything we keep. On a clonal-gene order these are
+# ~95% of the payload (Q-698807's map was 4.4 MB of 4.6 MB as CSV), the tab renders none
+# of them, and the cached copy is embedded verbatim in the dashboard HTML — so every
+# viewer downloads them on every page load.
+_DROP_KEYS = ("insertSequence", "constructSequence", "vectorSequence")
 
-    `left()` returns the seconds remaining in the pull's budget. Returns (orders, notes);
-    `notes` records anything we deliberately did not fetch — page cap or deadline — so the
-    tab can say so instead of silently looking complete.
-    """
-    url = f"{BASE_URL}/v1/users/{email}/orders/"
-    cutoff = dt.date.today() - dt.timedelta(days=days)
-    orders, notes, seen = [], [], set()
-    total = None
+# JSON key → the dict key the renderer reads. Product lines still disagree about names,
+# exactly as the six CSV layouts used to: gene fragments carry `targetYieldQc` and no NGS
+# verdict, clonal genes carry `ngsQc` + `yieldQc` + `constructLength`. First key wins.
+_WELL_FIELDS = {
+    "plate":    ("plateId",),
+    "well":     ("wellLocation",),
+    "bp":       ("insertLength", "constructLength"),
+    "asm_qc":   ("ngsQc",),
+    "yield_qc": ("yieldQc", "targetYieldQc"),
+    "yield":    ("actualYieldNg",),
+    "product":  ("productType",),
+}
 
-    for page in range(1, max_pages + 1):
-        if left() < _PAGE_COST:
-            missing = sorted(want - seen)
-            notes.append(f"out of time after {len(orders)} orders"
-                         + (f"; not fetched: {', '.join(missing)}" if missing else ""))
-            break
-        resp = _get_page_with_retry(url, jwt, eut, page, left)
-        if resp is None:
-            # Every attempt failed. Keep whatever pages we already have rather than
-            # aborting the pull — the caller caches a short window with a note, which is
-            # far better than throwing away a run that cost minutes of vendor latency.
-            notes.append(f"vendor error on page {page} after {_RETRIES} attempts"
-                         f" — kept {len(orders)} orders")
-            break
-        data = resp.json()
-        if isinstance(data, list):
-            batch, has_next = data, False
-        else:
-            batch = data.get("results", [])
-            has_next = bool(data.get("next"))
-            total = data.get("count", total)
-        if not batch:
-            break
-        orders.extend(batch)
-        seen |= {o.get("order_name") for o in batch}
-
-        oldest = min((str(o.get("received_date") or "")[:10] for o in batch if o.get("received_date")),
-                     default="")
-        past_cutoff = bool(oldest) and oldest < cutoff.isoformat()
-        if (past_cutoff and want <= seen) or not has_next:
-            break
-        if page == max_pages:
-            missing = sorted(want - seen)
-            notes.append(f"stopped after {max_pages} pages ({len(orders)} of {total} orders)"
-                         + (f"; not found: {', '.join(missing)}" if missing else ""))
-    return orders, notes
+# Column order for the synthesised CSV behind the ↓ Plate map button. Header names match
+# what Twist's own CSV used, so a file saved today still opens like the ones already on
+# disk in twist_platemaps/.
+_CSV_COLS = (("Name", ("name",)), ("Plate ID", ("plateId",)),
+             ("Well Location", ("wellLocation",)), ("Insert Length", ("insertLength",)),
+             ("Construct Length", ("constructLength",)), ("NGS QC", ("ngsQc",)),
+             ("Yield QC", ("yieldQc",)), ("Target Yield QC", ("targetYieldQc",)),
+             ("Actual Yield (ng)", ("actualYieldNg",)), ("Product Type", ("productType",)),
+             ("Custom Label", ("customLabel",)))
 
 
-def _platemap_csv(email, jwt, eut, order_sfdc: str, shipment_id: str, order_name: str,
-                  left=None):
-    """Fetch a shipment's plate map. Despite the endpoint's name it serves a plain CSV
-    (verified against twist_platemaps/*.zip — every saved file is CSV text, not a ZIP).
-
-    Returns (filename, csv_text) or (None, None). Also mirrored to twist_platemaps/ so
-    the files exist on disk independent of the pkl.
-    """
-    api = (f"{BASE_URL}/v1/users/{email}/orders/{order_sfdc}"
-           f"/shipments/{shipment_id}/plate-maps/")
-    # Cap each request by what is left of the pull's budget, so one slow map cannot
-    # overrun the deadline on its own.
-    tmo = 120 if left is None else max(5, min(120, int(left())))
-    try:
-        r = requests.get(api, headers=_headers(jwt, eut), timeout=tmo)
-        if r.status_code != 200:
-            return None, None
-        file_url = r.json().get("platemaps_file_url", "")
-        if not file_url:
-            return None, None
-        f = requests.get(file_url, timeout=tmo)
-        if f.status_code != 200:
-            return None, None
-        raw = f.content
-    except Exception:
-        return None, None
-
-    # MOST orders serve a plain CSV — but some genuinely serve a ZIP with the CSV inside
-    # (2026-09-03: 4 of 26 maps began with the PK magic bytes). Decoding those as text gave
-    # mojibake, so the parse found no parts AND the download button handed the browser a
-    # corrupt file. Sniff the magic bytes rather than trusting the endpoint's content type.
-    if raw[:2] == b"PK":
-        try:
-            with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                names = sorted(n for n in z.namelist() if n.lower().endswith(".csv"))
-                if not names:
-                    return None, None
-                texts = [z.read(n).decode("utf-8", "replace") for n in names]
-        except Exception:
-            return None, None
-        text = _merge_csvs(texts)
-    else:
-        text = raw.decode("utf-8", "replace")
-
-    plate = ""
-    try:
-        rows = list(csv.DictReader(io.StringIO(text)))
-        plate = _col(rows[0], "Plate ID", "Tube ID") if rows else ""
-    except Exception:
-        pass
-    name = f"platemap_{plate or order_name}.csv"
-
-    # The COMPLETE file goes to disk — disk is cheap and the full artifact stays available.
-    try:
-        PLATEMAP_DIR.mkdir(exist_ok=True)
-        (PLATEMAP_DIR / f"{order_name}_{name}").write_text(text)
-    except Exception:
-        pass
-    # Only the slim version is cached, because the pkl's copy is embedded verbatim in the
-    # dashboard HTML for the ↓ Plate map button.
-    return name, _slim_csv(text)
-
-
-# Sequence columns, dropped from the CACHED copy of a plate map (the full file still goes to
-# twist_platemaps/ on disk). On a clonal-gene map these are ~95% of the bytes — 4.4 MB of
-# Q-698807's 4.6 MB — the tab renders none of them, and the pkl's copy is embedded verbatim in
-# the dashboard HTML, so every viewer downloads them on every page load.
-_DROP_COLS = ("Insert Sequence", "Construct Sequence", "Vector Sequence",
-              "Construct Sequence (Insert + Adapters)")
-
-
-def _merge_csvs(texts: list) -> str:
-    """Several plate-map CSVs → one.
-
-    A shipment's ZIP holds ONE CSV PER PLATE, and reading only the first member quietly threw
-    away the rest: Q-698815's 5-plate shipment ships 43+36+25+25+32 = 161 rows and we kept 43,
-    so four plates' worth of well locations never existed as far as the tab was concerned.
-
-    Column names differ between Twist's product lines, so the merge takes the UNION of the
-    members' headers rather than assuming they line up. Any single-member or unparsable input
-    is returned untouched — a plate map is better whole than half-rewritten.
-    """
-    if len(texts) == 1:
-        return texts[0]
-    try:
-        cols, rows = [], []
-        for t in texts:
-            rd = csv.DictReader(io.StringIO(t))
-            for c in (rd.fieldnames or []):
-                if c not in cols:
-                    cols.append(c)
-            rows.extend(list(rd))
-        if not cols or not rows:
-            return texts[0]
-        buf = io.StringIO()
-        wr = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
-        wr.writeheader()
-        for r in rows:
-            wr.writerow({c: (r.get(c) or "") for c in cols})
-        return buf.getvalue()
-    except Exception:
-        return texts[0]
-
-
-def _slim_csv(text: str) -> str:
-    """Same CSV without the sequence columns. Returns the input unchanged if it has none,
-    or if anything about the parse looks off — a plate map is better whole than mangled."""
-    try:
-        rd = csv.DictReader(io.StringIO(text))
-        orig = list(rd.fieldnames or [])
-        cols = [c for c in orig if c not in _DROP_COLS]
-        if not cols or cols == orig:
-            return text
-        buf = io.StringIO()
-        wr = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
-        wr.writeheader()
-        for row in rd:
-            wr.writerow({c: row.get(c) or "" for c in cols})
-        return buf.getvalue()
-    except Exception:
-        return text
-
-
-def _col(row: dict, *names: str) -> str:
-    """First non-empty value among `names`. Twist serves at least SIX different plate-map
-    layouts depending on product type, so a single column name is not enough."""
-    for n in names:
-        v = (row.get(n) or "").strip()
-        if v:
-            return v
+def _first(row: dict, keys) -> str:
+    for k in keys:
+        v = row.get(k)
+        if v not in (None, "", "None"):
+            return str(v)
     return ""
 
 
-def _parse_platemap(text: str) -> dict:
-    """CSV → {part name: {plate, well, yield, asm_qc, yield_qc, bp}}.
+def _rows_to_csv(rows: list) -> str:
+    """Plate-map items → a CSV for the download button, sequences excluded.
 
-    `Name` is the LIMS STOCK_ID (syn4714, …), which is what makes this worth parsing:
-    it gives the physical well for every part the moment a shipment lands. The bulky
-    Insert Sequence column is dropped — it is ~90% of the file and the tab never shows it.
-
-    Column names vary by product line, so each field reads every alias we have actually
-    seen. Plate products carry `Plate ID` + `Well Location`; tube products (clonal genes)
-    carry `Tube ID` and no well at all; and QC/yield are renamed again per product
-    (`NGS QC`, `Actual Yield (ng)`). Reading one layout meant clonal-gene orders parsed
-    with a blank location and no yield, which rendered as "—" as if Twist had sent nothing.
+    The tab's ↓ Plate map button hands the browser a Blob built from this text. Twist no
+    longer serves a file to pass through, so one is built from the JSON — which also ends
+    the old ZIP-vs-CSV magic-byte sniffing and the six-header-layout merge, since every
+    product line now arrives as the same parsed objects.
     """
-    out = {}
-    try:
-        for row in csv.DictReader(io.StringIO(text)):
-            nm = (row.get("Name") or "").strip()
-            if not nm:
-                continue
-            out[nm] = {
-                "plate": _col(row, "Plate ID", "Tube ID"),
-                "well": _col(row, "Well Location"),
-                "bp": _col(row, "Insert Length", "Construct Length"),
-                "asm_qc": _col(row, "Assembly QC", "NGS QC"),
-                "yield_qc": _col(row, "Yield QC", "Target Yield QC"),
-                "yield": _col(row, "Yield (ng)", "Actual Yield (ng)"),
-                # Which kind of material this row is. Twist ships glycerol stocks as their
-                # OWN shipment with its own plate map naming the same parts as the DNA map,
-                # so without this the two are indistinguishable once merged per order.
-                "product": _col(row, "Product Type"),
-            }
-    except Exception:
-        pass
-    return out
+    cols = [c for c, keys in _CSV_COLS if any(_first(r, keys) for r in rows)]
+    buf = io.StringIO()
+    wr = csv.writer(buf)
+    wr.writerow(cols)
+    lookup = dict(_CSV_COLS)
+    for r in rows:
+        wr.writerow([_first(r, lookup[c]) for c in cols])
+    return buf.getvalue()
 
 
-# Fields kept from an order item. The full payload repeats the order's shipping address and
-# carries construct sequences we never render; keeping it whole would bloat the pkl for nothing.
+def _fetch_collateral(email, jwt, q: str, left) -> list:
+    """`/orders/<Q>/collateral` → [{shipmentId, items:[...]}], or [].
+
+    Replaces the per-shipment plate-map download. One call now covers every shipment on
+    the order, and the items come back parsed — `plateId`, `wellLocation`, `actualYieldNg`
+    and the QC verdicts — instead of as a CSV (or a ZIP of CSVs) to sniff and merge.
+
+    404 means "no shipments yet", which is normal for an order still in production and not
+    worth a line of output. Big orders can 504: Q-698807 (~160 items) does so reproducibly,
+    so `_get_json` retries and then gives up, and the caller notes the gap.
+    """
+    # TWO attempts. Measured 2026-11-06: this call is usually ~4 s, but the same order can
+    # take 58 s once and 4 s the next time, and a big one (Q-698807, ~160 items) 504s
+    # outright. One attempt lost Q-745440's two maps to a single slow response; three spends
+    # ~90 s re-failing on the orders that are genuinely too big. Two recovers the flaky ones
+    # without letting a hopeless one eat the budget.
+    j = _get_json(f"{NEW_BASE}/users/{email}/orders/{q}/collateral", jwt, left,
+                  cost=_COLLATERAL_COST, label="", retries=2)
+    return (j or {}).get("plateMaps") or []
+
 _ITEM_FIELDS = ("name", "status", "last_event", "redo_count", "delayed_status",
                 "estimated_shipping_date", "size", "type", "vector_name")
 # An items call measured 1.8–3.0 s; without this much budget left, don't start one.
@@ -545,8 +628,15 @@ def _token_id(label: str, tok: str) -> str:
 
 def have_tokens() -> bool:
     """Whether the Twist API credentials are in the environment. full_refresh checks this
-    before calling in, so a server without the tokens skips cleanly instead of erroring."""
-    return bool(os.environ.get("AUTHORIZATION_JWT") and os.environ.get("X_END_USER_TOKEN"))
+    before calling in, so a server without the tokens skips cleanly instead of erroring.
+
+    Only the JWT is required now. The Order Tracking API — the orders, their detail and
+    their plate maps — needs nothing else; X_END_USER_TOKEN buys the two OLD-host extras
+    (per-item delay flags and the project-name scrape), and a pull without it is degraded
+    rather than impossible. Demanding both would skip the pull entirely over an optional
+    token.
+    """
+    return bool(os.environ.get("AUTHORIZATION_JWT"))
 
 
 def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
@@ -555,10 +645,11 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
     eut = os.environ.get("X_END_USER_TOKEN", "")
     # RuntimeError, not SystemExit: this is called from full_refresh inside an
     # `except Exception`, and SystemExit would sail past it and kill the refresh.
-    if not jwt or not eut:
-        raise RuntimeError("AUTHORIZATION_JWT and X_END_USER_TOKEN must be set.")
+    if not jwt:
+        raise RuntimeError("AUTHORIZATION_JWT must be set.")
 
-    print(f"tokens: {_token_id('JWT', jwt)} | {_token_id('EUT', eut)}", flush=True)
+    print(f"tokens: {_token_id('JWT', jwt)}"
+          + (f" | {_token_id('EUT', eut)}" if eut else " | EUT absent"), flush=True)
 
     t0 = time.time()
 
@@ -568,50 +659,88 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
     def el():
         return f"{time.time() - t0:.0f}s"
 
+    notes: list[str] = []
     by_order, waiting, by_stock = _pipeline_parts(PARQUET)
     print(f"pipeline: {len(by_order)} orders seen, {len(waiting)} still awaiting delivery"
           f" ({', '.join(sorted(waiting)) or 'none'}) [{el()}]", flush=True)
 
-    print(f"fetching orders (~75 s per page, {deadline}s budget) ...", flush=True)
-    orders, notes = _fetch_orders_window(email, jwt, eut, waiting, days, max_pages, left)
-    print(f"  {len(orders)} orders in window [{el()}]", flush=True)
+    # ── 1. every order on the account, newest first (~4 s) ────────────────────
+    sums = _fetch_summaries(email, jwt, left)
     # Never cache an empty pull over a good one: with no orders the tab would go blank and
     # read as "nothing on order" rather than "the pull did not finish".
-    if not orders:
-        raise RuntimeError(f"no orders fetched in {el()} — keeping the previous cache"
-                           + (f" ({'; '.join(notes)})" if notes else ""))
+    if not sums:
+        raise RuntimeError(f"no order summaries fetched in {el()} — keeping the previous "
+                           f"cache")
+    print(f"  {len(sums)} order summaries [{el()}]", flush=True)
 
+    # ── 2. detail for as far back as the window reaches ───────────────────────
+    # Summaries are ordered newest-first, so the walk stops once it is past the window —
+    # but it keeps SCANNING (free, no network) for any Q-number the pipeline is still
+    # waiting on, because an order can sit open well past `days` and those are precisely
+    # the ones worth showing.
     today = dt.date.today()
     cutoff = (today - dt.timedelta(days=days)).isoformat()
+    max_orders = max(25, max_pages * 25)
+    want, pairs, seen, past_cutoff = set(waiting), [], set(), False
+
+    for s in sums:
+        q = str(s.get("orderId") or "")
+        if not q or q in seen:
+            continue
+        if past_cutoff and q not in want:
+            continue
+        if len(seen) >= max_orders:
+            notes.append(f"stopped after {max_orders} orders"
+                         + (f"; not fetched: {', '.join(sorted(want))}" if want else ""))
+            break
+        if left() < _DETAIL_COST:
+            notes.append(f"out of time after {len(seen)} orders"
+                         + (f"; not fetched: {', '.join(sorted(want))}" if want else ""))
+            break
+        d = _fetch_detail(email, jwt, q, left)
+        seen.add(q)
+        if not d:
+            continue
+        pairs.append((s, d))
+        want.discard(q)
+        rec = str(d.get("receivedDate") or "")[:10]
+        if rec and rec < cutoff:
+            past_cutoff = True
+        if past_cutoff and not want:
+            break
+    print(f"  {len(pairs)} orders detailed [{el()}]", flush=True)
+
+    # ── 3. project names: cached, topped up on a best-effort scrape ───────────
+    names = _load_projects()
+    seeded = _seed_projects_from_pkl(names)
+    if seeded:
+        print(f"  seeded {seeded} project names from the previous pkl", flush=True)
+
+    orders = [_legacy_order(s, d, names.get(str(s.get("orderId") or ""), ""))
+              for s, d in pairs]
+
+    # ── 4. window ─────────────────────────────────────────────────────────────
     keep = []
     for o in orders:
         q = o.get("order_name")
         # Orders with no pipeline part are kept too. They are still real work on this Twist
         # account — oligos, genes, another team's plasmids — and the tab shows them in their
         # own section rather than pretending the account only holds our synthesis parts.
-        # Only the window bounds them; `waiting` can never name an order we have no parts for.
         if q in waiting:
             keep.append(o)
         elif _is_open(o):
-            # An OPEN order never ages out. The window exists to retire finished work, and an
-            # order still open is the opposite of finished — the older it is, the more it
-            # needs looking at. The previous rule aged opens out on `received_date`, so an
-            # order stuck in production for 60 days silently left the tab at day 45 and read
-            # as delivered.
+            # An OPEN order never ages out. The window exists to retire finished work, and
+            # an order still open is the opposite of finished — the older it is, the more
+            # it needs looking at.
             keep.append(o)
         else:
             # Delivered/closed: the window runs from when the DNA LANDED, not when it was
-            # ordered. Q-705566 was placed 12 Aug and finished shipping 1 Sep — on the old
-            # rule its 20-day-old delivery would drop off before a same-day order placed
-            # 44 days ago and never shipped. An order that closed without ever shipping has
-            # no delivery date, so it falls back to `received_date` rather than living
-            # forever.
+            # ordered. An order that closed without ever shipping has no delivery date, so
+            # it falls back to `received_date` rather than living forever.
             landed = _delivered_on(o)
             if (landed or str(o.get("received_date") or "")[:10]) >= cutoff:
                 keep.append(o)
 
-    # Stamp the age the tab flags on. Computed here, where `today` and the order payload are
-    # both in hand, so every consumer reads the same number instead of re-deriving it.
     for o in keep:
         rec = str(o.get("received_date") or "")[:10]
         o["_delivered_on"] = _delivered_on(o)
@@ -619,6 +748,7 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
             o["_open_days"] = (today - dt.date.fromisoformat(rec)).days if _is_open(o) else None
         except ValueError:
             o["_open_days"] = None
+
     n_other = sum(1 for o in keep if o.get("order_name") not in by_order)
     n_open = sum(1 for o in keep if _is_open(o))
     aged = sorted((o for o in keep if (o.get("_open_days") or 0) > days),
@@ -628,23 +758,26 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
           f"({len(keep) - n_other} with pipeline parts, {n_other} other) [{el()}]", flush=True)
     if aged:
         print(f"  {len(aged)} open >{days}d: "
-              + ", ".join(f"{o['order_name']} ({o['_open_days']}d)" for o in aged[:10]), flush=True)
+              + ", ".join(f"{o['order_name']} ({o['_open_days']}d)" for o in aged[:10]),
+              flush=True)
 
-    # Pipeline orders lead in both loops below. With non-pipeline orders now in `keep`,
-    # spending the budget in list order could burn it on another team's parts and skip work
-    # for a part the pipeline is actually waiting on.
+    # Pipeline orders lead in both loops below. With non-pipeline orders in `keep`, spending
+    # the budget in list order could burn it on another team's parts and skip work for a
+    # part the pipeline is actually waiting on.
     ordered = sorted(keep, key=lambda o: o.get("order_name") not in by_order)
 
-    # Item lists before plate maps: an items call is ~2-3 s and is the ONLY source of part
-    # names for an order that has not shipped, while a plate map is ~4 s and does not exist
-    # until a shipment does. Cheaper and more broadly useful, so it gets the budget first.
+    # ── 5. item lists — still the OLD host, the only source of the delay flags ─
     items_by_order, it_skipped = {}, 0
-    for o in ordered:
-        if left() < _ITEM_COST:
-            it_skipped += 1
-            continue
-        items_by_order[o.get("order_name")] = _fetch_order_items(
-            email, jwt, eut, o.get("sfdc_id"), left)
+    if not eut:
+        notes.append("X_END_USER_TOKEN absent — per-item redo_count and delayed_status "
+                     "not fetched")
+    else:
+        for o in ordered:
+            if left() < _ITEM_COST:
+                it_skipped += 1
+                continue
+            items_by_order[o.get("order_name")] = _fetch_order_items(
+                email, jwt, eut, o.get("sfdc_id"), left)
     if it_skipped:
         notes.append(f"out of time — item list not fetched for {it_skipped} order(s)")
     print(f"  {sum(len(v) for v in items_by_order.values())} order items "
@@ -669,51 +802,103 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
         print(f"  recovered by part name (blank vendor_order_id): "
               f"{', '.join(recovered)} [{el()}]", flush=True)
 
-    # `wells` holds the DNA, `glyc` the glycerol stocks — kept apart on purpose. Twist sends
-    # glycerol as a SEPARATE shipment whose plate map names the very same parts as the DNA
-    # map (Q-698807: 77 DNA rows on pSHPs0828B417001IQ, 77 glycerol rows on pSHPs0829B005801HX).
+    # ── 6. plate maps, one collateral call per shipped order ──────────────────
+    # `wells` holds the DNA, `glyc` the glycerol stocks — kept apart on purpose. Twist ships
+    # glycerol as a SEPARATE shipment whose map names the very same parts as the DNA map
+    # (Q-698807: 77 DNA rows on pSHPs0828B417001IQ, 77 glycerol rows on pSHPs0829B005801HX).
     # Merged into one dict per order they collide name-for-name and one map silently
-    # overwrote the other, so an order's glycerol locations vanished depending purely on
-    # which shipment happened to be fetched last.
+    # overwrites the other.
     platemaps, wells, glyc = {}, {}, {}
-    skipped = 0
+    skipped, approx = 0, False
     for o in ordered:
-        q, sfdc = o.get("order_name"), o.get("sfdc_id")
-        for s in (o.get("shipments") or []):
-            if s.get("status") not in ("shipped", "received") or not (sfdc and s.get("id")):
+        q = o.get("order_name")
+        ships = {s.get("id"): s for s in (o.get("shipments") or [])
+                 if s.get("status") in ("shipped", "received")}
+        approx = approx or any(s.get("received_at_approx") for s in ships.values())
+        if not ships:
+            continue
+        if left() < _COLLATERAL_COST:
+            skipped += 1
+            continue
+        print(f"    plate maps {q} ...", flush=True)
+        maps = _fetch_collateral(email, jwt, q, left)
+        if not maps:
+            skipped += 1
+            continue
+        for pm in maps:
+            sid = pm.get("shipmentId")
+            rows = [r for r in (pm.get("items") or []) if isinstance(r, dict)]
+            if not rows:
                 continue
-            if left() <= 0:
-                skipped += 1
-                continue
-            key = f"{q}|{s['id']}"
-            print(f"    plate map {q} {s['id'][:8]} ...", flush=True)
-            fname, text = _platemap_csv(email, jwt, eut, sfdc, s["id"], q, left)
-            if not text:
-                continue
-            parsed = _parse_platemap(text)
-            # A glycerol shipment's map is glycerol end to end (Q-698807: 77/77 rows), so the
-            # whole shipment can be labelled as such and its download button say what it is.
-            is_glyc = bool(parsed) and all(
-                "glycerol" in (i.get("product") or "").lower() for i in parsed.values())
-            platemaps[key] = {"filename": fname, "csv": text, "glycerol": is_glyc}
-            for nm, info in parsed.items():
+            s = ships.get(sid) or {}
+            # The COMPLETE payload goes to disk — disk is cheap and the full artifact
+            # (sequences included) stays available independent of the pkl.
+            plate = _first(rows[0], ("plateId",))
+            try:
+                PLATEMAP_DIR.mkdir(exist_ok=True)
+                (PLATEMAP_DIR / f"{q}_platemap_{plate or sid}.json").write_text(
+                    json.dumps(rows, indent=1))
+            except Exception:
+                pass
+            slim = [{k: v for k, v in r.items() if k not in _DROP_KEYS} for r in rows]
+            parsed = {}
+            for r in slim:
+                nm = str(r.get("name") or "").strip()
+                if not nm:
+                    continue
+                info = {f: _first(r, keys) for f, keys in _WELL_FIELDS.items()}
                 # Tag each row with the state of the SHIPMENT that carried it. Merged per
                 # order, the maps otherwise lose which box a part travelled in, so the tab
-                # could not tell a part that has landed from one still in the air — the
-                # order-level bucket was the finest grain available.
+                # could not tell a part that has landed from one still in the air.
                 info["ship_status"] = s.get("status") or ""
                 info["ship_at"] = str(s.get("received_at") or s.get("shipped_date") or "")[:10]
+                parsed[nm] = info
+            if not parsed:
+                continue
+            # A glycerol shipment's map is glycerol end to end, so the whole shipment can be
+            # labelled as such and its download button say what it is.
+            is_glyc = all("glycerol" in (i.get("product") or "").lower()
+                          for i in parsed.values())
+            platemaps[f"{q}|{sid}"] = {
+                "filename": f"platemap_{plate or q}.csv",
+                "csv": _rows_to_csv(slim),
+                "glycerol": is_glyc,
+            }
+            for nm, info in parsed.items():
                 tgt = glyc if "glycerol" in (info.get("product") or "").lower() else wells
                 slot = tgt.setdefault(q, {})
-                # A part can appear in two maps (a reship, or DNA then glycerol). Never let a
-                # shipped row overwrite one already recorded as received.
+                # A part can appear in two maps (a reship, or DNA then glycerol). Never let
+                # a shipped row overwrite one already recorded as received.
                 if slot.get(nm, {}).get("ship_status") == "received" != info["ship_status"]:
                     continue
                 slot[nm] = info
     if skipped:
         # Say it out loud: a missing download button must not look like "Twist sent no map".
-        notes.append(f"out of time — {skipped} plate map(s) not fetched this run")
+        notes.append(f"plate map not fetched for {skipped} shipped order(s) this run")
     print(f"  {len(platemaps)} plate maps [{el()}]", flush=True)
+
+    # ── 7. project-name scrape last, on whatever budget is left ───────────────
+    # Only reach for the broken endpoint when it could actually tell us something. Once
+    # every kept order has a name, the scrape is 122 s spent to re-learn what is already
+    # cached — and it fails ~92% of the time anyway.
+    missing = [o for o in keep if not names.get(o.get("order_name"))]
+    if not eut:
+        scrape = "project-name scrape skipped — no X_END_USER_TOKEN"
+    elif not missing:
+        scrape = f"project names complete ({len(names)} cached) — scrape not needed"
+    else:
+        scrape = _scrape_project_names(email, jwt, eut, names, left)
+    _save_projects(names)
+    print(f"  {scrape} [{el()}]", flush=True)
+    for o in keep:
+        o["project_name"] = names.get(o.get("order_name"), "") or o.get("project_name", "")
+    unnamed = sum(1 for o in keep if not o.get("project_name"))
+    if unnamed:
+        notes.append(f"{unnamed} order(s) have no project name — Twist's new API does not "
+                     f"carry one, and the old endpoint it came from is broken")
+    if approx:
+        notes.append("Delivery dates shown are SHIP dates: Twist's new order API reports "
+                     "when a box left, never when it landed")
 
     return {
         "generated_at": dt.datetime.now(tz=dt.timezone.utc),
@@ -724,12 +909,11 @@ def build(days: int, max_pages: int, deadline: int = _DEADLINE_SECONDS) -> dict:
         "platemaps": platemaps,
         "wells_by_order": wells,
         "glycerol_by_order": glyc,
-        "eta_changes": _eta_changes(orders, by_order, waiting),
+        "eta_changes": _eta_changes(keep, by_order, waiting),
         "window_days": days,
         "notes": notes,
         "eta_log": str(ETA_LOG),
     }
-
 
 def refresh(days: int = 45, max_pages: int = 4,
             deadline: int = _DEADLINE_SECONDS) -> dict:
@@ -763,7 +947,9 @@ def main():
                     help="how long a DELIVERED order stays on the tab, measured from its "
                          "delivery date (default 45). Open orders are never aged out.")
     ap.add_argument("--max-pages", type=int, default=4,
-                    help="hard cap on order pages fetched (default 4 = 100 orders)")
+                    help="hard cap on orders DETAILED, in units of 25 (default 4 = 100). "
+                         "Named for the pages the old list endpoint fetched; the summary "
+                         "list is now taken whole and the per-order detail is the cost.")
     ap.add_argument("--deadline", type=int, default=_DEADLINE_SECONDS,
                     help=f"wall-clock budget in seconds (default {_DEADLINE_SECONDS})")
     args = ap.parse_args()
